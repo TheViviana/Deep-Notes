@@ -17,13 +17,16 @@ export function useWikiComplete({titles, areaRef, onChange}) {
     const q = m[1].toLowerCase();
     const list = live.current.titles.filter(t =>
       t.title.toLowerCase().includes(q) || String(t.short || '').toLowerCase().includes(q)).slice(0, 7);
-    setSuggest({q: m[1], start: el.selectionStart - m[1].length, list}); setPick(0);
+    // end 一并捕获：插入时的切割终点固定为补全菜单打开时的选区，不随实时光标漂移
+    setSuggest({q: m[1], start: el.selectionStart - m[1].length, end: el.selectionEnd, list}); setPick(0);
   };
   const insert = t => {
-    const el = areaRef.current, s = live.current.suggest.start, e = el.selectionStart;
+    const el = areaRef.current, s = live.current.suggest.start, e = live.current.suggest.end ?? el.selectionStart;
     const value = el.value.slice(0, s) + t.title + ']]' + el.value.slice(e).replace(/^\]\]/, '');
+    const pos = s + t.title.length + 2;
     onChange(value); setSuggest(null);
-    requestAnimationFrame(() => { el.focus(); const pos = s + t.title.length + 2; el.setSelectionRange(pos, pos); });
+    // 光标恢复带值守卫：回调迟到（用户已继续输入）时不再拽光标，避免后续输入落到过期位置
+    requestAnimationFrame(() => { el.focus(); if (el.value === value) el.setSelectionRange(pos, pos); });
   };
   const onKeyDown = e => {
     const s = live.current.suggest;
