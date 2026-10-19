@@ -1,5 +1,84 @@
-const { app, BrowserWindow, shell, ipcMain, net } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, net, dialog } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const fsp = fs.promises;
+
+// —— 文件夹知识库（桌面版）：渲染层经 preload 暴露的 window.deepnotes.vault 调用 ——
+// 所有写操作都限制在所选根目录（root）内，路径越界一律拒绝。
+function inside(root, target) {
+  const r = path.resolve(root) + path.sep;
+  const t = path.resolve(target);
+  return t === path.resolve(root) || t.startsWith(r);
+}
+
+const SKIP = new Set(['.obsidian', '.trash', '.git', '.DS_Store', 'node_modules']);
+
+async function readMd(root) {
+  const out = [];
+  async function walk(dir) {
+    let entries;
+    try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.name.startsWith('.') || SKIP.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) await walk(full);
+      else if (e.isFile() && /\.md$/i.test(e.name)) {
+        try {
+          out.push({ relPath: path.relative(root, full).split(path.sep).join('/'), body: await fsp.readFile(full, 'utf8') });
+        } catch {}
+      }
+    }
+  }
+  await walk(root);
+  return out;
+}
+
+ipcMain.handle('vault:choose-dir', async () => {
+  const res = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
+  return res.canceled || !res.filePaths[0] ? null : res.filePaths[0];
+});
+
+ipcMain.handle('vault:read', async (_e, root) => {
+  try { return { ok: true, files: await readMd(root) }; }
+  catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
+
+ipcMain.handle('vault:write', async (_e, { root, rel, body }) => {
+  try {
+    const full = path.join(root, rel);
+    if (!inside(root, full)) return { ok: false, error: '路径越界' };
+    await fsp.mkdir(path.dirname(full), { recursive: true });
+    await fsp.writeFile(full, body, 'utf8');
+    return { ok: true };
+  } catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
+
+ipcMain.handle('vault:trash', async (_e, { root, rel }) => {
+  try {
+    const full = path.join(root, rel);
+    if (!inside(root, full)) return { ok: false, error: '路径越界' };
+    const trashDir = path.join(root, '.trash');
+    await fsp.mkdir(trashDir, { recursive: true });
+    const dest = path.join(trashDir, Date.now() + '-' + path.basename(full));
+    await fsp.rename(full, dest).catch(err => {
+      if (err?.code === 'ENOENT') return; // 文件本就不存在，视为已删除
+      throw err;
+    });
+    return { ok: true };
+  } catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
+
+// 在原知识库旁新建「<原名> - Deep Notes」副本目录，原库内容不动；重名自动加序号。
+ipcMain.handle('vault:prepare-copy', async (_e, srcRoot) => {
+  try {
+    const parent = path.dirname(path.resolve(srcRoot));
+    const base = path.basename(path.resolve(srcRoot)) + ' - Deep Notes';
+    let dir = path.join(parent, base);
+    for (let i = 2; fs.existsSync(dir); i++) dir = path.join(parent, `${base} ${i}`);
+    await fsp.mkdir(dir, { recursive: true });
+    return { ok: true, dir };
+  } catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
 
 try {
   if (require('electron-squirrel-startup')) app.quit();

@@ -1,0 +1,126 @@
+// 桌面版文件夹知识库：编辑内容实时写回本地 .md 文件（与 Obsidian 相同的存放方式）。
+// 仅在 Electron（window.deepnotes 存在）且已选择库根目录时启用；网页版保持 localStorage 不变。
+// 每次导入都在原库旁新建「<原名> - Deep Notes」副本，原知识库文件夹内容不动。
+import {CONFIG} from '../config';
+
+const ROOT_KEY = CONFIG.storagePrefix + '-vault-root-v1';
+const api = () => window.deepnotes?.vault || null;
+export const capable = () => !!api();
+
+export function getRoot() {
+  try { return localStorage.getItem(ROOT_KEY) || null; } catch { return null; }
+}
+export function setRoot(dir) {
+  try {
+    if (dir) localStorage.setItem(ROOT_KEY, dir);
+    else localStorage.removeItem(ROOT_KEY);
+  } catch {}
+  // 换库时旧队列里的待写操作路径属于旧库，全部作废，防止误写。
+  clearTimeout(timer);
+  timer = null;
+  queue.clear();
+}
+
+// 各模块内容落盘的默认目录；方法笔记直接使用自身 path（形如 05-方法库 methods/<子目录>/<文件名>.md）。
+const DIRS = {works: '02-作品库', drafts: '03-创作台/正在写', readings: '06-阅读区'};
+
+// 文件名安全化：路径分隔符换成 ·，去首尾空白，限长 60。
+const safe = t => String(t || '未命名').trim().replace(/[/\\]/g, '·').replace(/\s+/g, ' ').slice(0, 60) || '未命名';
+
+// 计算一条内容对应的库内相对路径（posix 分隔）。kind ∈ works | notes | drafts | readings
+export function pathOf(kind, item) {
+  if (!item) return null;
+  if (kind === 'notes') return item.path || null;
+  const dir = DIRS[kind];
+  if (!dir) return null;
+  return `${dir}/${safe(item.title)}.md`;
+}
+
+// 序列化成带 frontmatter 的 Markdown；deepnotes-id 保证再次导入时不产生重复节点。
+function frontmatter(pairs) {
+  return '---\n' + pairs.filter(([, v]) => v != null && v !== '').map(([k, v]) => `${k}: ${String(v).replace(/\n/g, ' ')}`).join('\n') + '\n---\n';
+}
+export function serialize(kind, item) {
+  let fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['updated', item.updatedAt || null]]);
+  if (kind === 'works') {
+    fm = frontmatter([
+      ['deepnotes-id', item.id], ['title', item.title], ['date', item.date], ['updated', item.updatedAt || null],
+      ['direction', item.direction || null], ['tags', (item.tags || []).map(t => '#' + t).join(' ')],
+      ['media', item.media === 'video' ? '视频' : item.media === 'images' ? '图文' : null],
+      ['观看', item.views ?? null], ['点赞', item.likes ?? null], ['评论', item.comments ?? null],
+      ['收藏', item.saves ?? null], ['涨粉', item.follows ?? null], ['分享', item.shares ?? null],
+      ['曝光', item.impressions ?? null], ['封面点击率', item.ctr ?? null], ['平均观看时长', item.duration ?? null],
+    ]);
+  } else if (kind === 'readings') {
+    fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['author', item.author || null], ['source', item.source || null], ['date', item.date || null], ['updated', item.updatedAt || null]]);
+  } else if (kind === 'drafts') {
+    fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['updated', item.updatedAt || null]]);
+  }
+  return fm + '\n' + (item.body || '');
+}
+
+// —— 防抖写盘队列：多次编辑合并，800ms 静默后统一 flush ——
+const queue = new Map(); // rel -> {root, rel, body} | {root, rel, trash: true}
+let timer = null;
+
+function enqueue(op) {
+  queue.set(op.rel, op);
+  clearTimeout(timer);
+  timer = setTimeout(flush, 800);
+}
+
+export async function flush() {
+  clearTimeout(timer);
+  timer = null;
+  const root = getRoot();
+  const v = api();
+  if (!root || !v || !queue.size) return;
+  const ops = [...queue.values()];
+  queue.clear();
+  for (const op of ops) {
+    try {
+      if (op.trash) await v.trash(root, op.rel);
+      else await v.write(root, op.rel, op.body);
+    } catch {}
+  }
+}
+
+// 同步一条内容到磁盘。item 为 null 表示删除；old 为变更前的旧记录（路径变了会先移走旧文件）。
+// old 与 item 同引用（其他 kind 变化引发的全量 diff）时无需重写。
+export function queueSync(kind, item, old) {
+  const root = getRoot();
+  if (!root || !api() || kind === 'ideas') return;
+  const newRel = item ? pathOf(kind, item) : null;
+  const oldRel = old ? pathOf(kind, old) : null;
+  if (old === item && oldRel === newRel) return;
+  if (!item) {
+    if (oldRel) enqueue({root, rel: oldRel, trash: true});
+    return;
+  }
+  if (old && oldRel && oldRel !== newRel) enqueue({root, rel: oldRel, trash: true});
+  if (newRel) enqueue({root, rel: newRel, body: serialize(kind, item)});
+}
+
+// —— 导入：桌面版选目录 → 主进程读文件 → 转成 parseVault 兼容的 File 桩 ——
+export async function chooseDir() {
+  const v = api();
+  return v ? v.chooseDir() : null;
+}
+
+// 把主进程读到的 {relPath, body} 列表转成 importer.parseVault 可用的 File 桩。
+export function readVaultFiles(dir, res) {
+  if (!res?.ok) throw new Error(res?.error || '读取失败');
+  const base = (dir || '').split('/').pop() || 'vault';
+  return res.files.map(f => ({
+    name: f.relPath.split('/').pop(),
+    webkitRelativePath: base + '/' + f.relPath,
+    lastModified: 0,
+    text: async () => f.body,
+  }));
+}
+
+export async function prepareCopy(srcRoot) {
+  const v = api();
+  if (!v) return null;
+  return v.prepareCopy(srcRoot);
+}

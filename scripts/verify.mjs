@@ -46,7 +46,7 @@ for (const f of ['skills/neural-creator-dashboard/SKILL.md', 'README.md', 'AGENT
 // 2. 数据结构
 function check(m, label) {
   const errs = [];
-  for (const k of ['snapshot', 'posts', 'postContent', 'notes', 'seedIdeas', 'seedDrafts', 'concepts']) if (!(k in m)) errs.push(`缺少导出 ${k}`);
+  for (const k of ['snapshot', 'posts', 'postContent', 'notes', 'seedIdeas', 'seedDrafts', 'seedReadings', 'concepts']) if (!(k in m)) errs.push(`缺少导出 ${k}`);
   if (errs.length) return errs;
   if (!m.posts.length) errs.push('posts 为空');
   for (const p of m.posts) {
@@ -103,8 +103,8 @@ const core = [
 ];
 for (const [label, re] of core) if (!re.test(home)) fail(`Home.jsx 缺少核心动效：${label}`); else ok(label);
 const modules = (graphSrc.match(/export const MODULES = \[([\s\S]*?)\n\];/) || [])[1] || '';
-if ((modules.match(/\{id: '/g) || []).length !== 5) fail('graph.js 的 MODULES 应为 5 个模块（5 只水母）');
-else ok('5 个模块 → 5 只水母');
+if ((modules.match(/\{id: '/g) || []).length !== 6) fail('graph.js 的 MODULES 应为 6 个模块（6 只水母）');
+else ok('6 个模块 → 6 只水母');
 for (const f of ['media/orb.mp4', 'media/jellyfish.mp4']) if (!existsSync(join(ROOT, 'public', f))) fail(`缺少核心素材 public/${f}`);
 
 // 4. 页面与素材

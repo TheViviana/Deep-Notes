@@ -28,11 +28,11 @@ const indexFor = file => `// 看板读取的数据入口。默认使用虚构示
 
 // —— 参数 ——
 const args = process.argv.slice(2);
-const opt = {works: [], methods: [], ideas: [], drafts: []};
+const opt = {works: [], methods: [], ideas: [], drafts: [], readings: []};
 for (let i = 0; i < args.length; i++) {
   const a = args[i], next = () => args[++i];
   if (a === '--vault') opt.vault = next();
-  else if (['--works', '--methods', '--ideas', '--drafts'].includes(a)) opt[a.slice(2)].push(next());
+  else if (['--works', '--methods', '--ideas', '--drafts', '--readings'].includes(a)) opt[a.slice(2)].push(next());
   else if (a === '--all-as-notes') opt.allAsNotes = true;
   else if (a === '--account') opt.account = next();
   else if (a === '--followers') opt.followers = Number(next());
@@ -108,6 +108,7 @@ const clean = body => body.replace(/\r/g, '').trim();
 // —— 分类 ——
 const RULES = [
   ['works', /(作品|works?$|published|已发布)/i],
+  ['readings', /(阅读|readings?$|书架|书摘|稍后读)/i],
   ['drafts', /(草稿|创作台|drafts?$|正在写|写作中)/i],
   ['ideas', /(选题|ideas?$|灵感)/i],
   ['methods', /(方法|methods?$|模板|templates?$|流程|workflow|知识|卡片|notes?$)/i]
@@ -115,7 +116,7 @@ const RULES = [
 const norm = p => p.split(/[\\/]/).filter(Boolean).join('/');
 function classify(rel) {
   const dirs = rel.split(sep).slice(0, -1);
-  for (const kind of ['works', 'drafts', 'ideas', 'methods']) for (const f of opt[kind]) {
+  for (const kind of ['works', 'readings', 'drafts', 'ideas', 'methods']) for (const f of opt[kind]) {
     const prefix = norm(f);
     if (norm(rel).startsWith(prefix + '/')) return {kind, root: prefix.split('/').length};
   }
@@ -127,7 +128,7 @@ function classify(rel) {
 }
 
 const files = walk(VAULT);
-const bucket = {works: [], methods: [], ideas: [], drafts: []};
+const bucket = {works: [], methods: [], ideas: [], drafts: [], readings: []};
 for (const file of files) {
   const rel = relative(VAULT, file), c = classify(rel);
   if (!c) continue;
@@ -173,6 +174,15 @@ const drafts = bucket.drafts.map((x, i) => {
   return {id: 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null};
 });
 
+// 阅读区：别人写好的内容（作者 / 来源可选，写在 frontmatter 里）。
+const readings = bucket.readings.map((x, i) => ({
+  id: 'reading-' + (i + 1), title: x.title,
+  author: String(pick(x.fm, ['author', '作者', 'by']) || ''),
+  source: String(pick(x.fm, ['source', '来源', '出处', 'url', '链接']) || ''),
+  date: dateOf(pick(x.fm, ['date', '收藏日期', '发布日期', 'published']), x.file).slice(0, 10),
+  body: clean(x.body)
+})).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 60);
+
 // 概念词：至少在两条内容里出现的话题标签，取出现最多的 20 个。
 const count = new Map();
 for (const t of [...works.flatMap(w => w.content.tags), ...notes.flatMap(n => n.tags)]) count.set(t, (count.get(t) || 0) + 1);
@@ -206,6 +216,8 @@ export const notes = ${J(notes.map(({tags, ...n}) => n))};
 export const seedIdeas = ${J(ideas)};
 
 export const seedDrafts = ${J(drafts)};
+
+export const seedReadings = ${J(readings)};
 
 export const concepts = ${J(concepts)};
 `;

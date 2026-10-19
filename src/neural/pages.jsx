@@ -48,6 +48,12 @@ export function Library({graph, works, selected, setSelected, openArticle, setOp
   const total = works.reduce((s, p) => s + charsOf(p), 0);
   const max = Math.max(0, ...works.map(charsOf));
   const openWork = works.find(w => w.id === openArticle) || null;
+  // 打开文章后滚动定位：文章视图在长列表下方，不滚动会像「按钮没反应」
+  useEffect(() => {
+    if (!openArticle) return;
+    const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+    requestAnimationFrame(() => document.querySelector('.article-view')?.scrollIntoView({block: 'start', behavior: smooth ? 'smooth' : 'auto'}));
+  }, [openArticle]);
   const kpis = [['文章', 'Articles', works.length], ['总字数', 'Words', total], ['双链', 'Wikilinks', graph.links.filter(l => l.kind === 'wiki').length], ['双向共振', 'Mutual', graph.links.filter(l => l.both).length]];
   return <div className="page page-library">
     <PageHead zh="作品库" en="Works" sub="每篇文章，都是网络里的一个节点。" subEn="Every article is a node in the network — length and links side by side.">
@@ -342,6 +348,53 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
         </div>
       </section> : <section className="editor glass"><p className="empty-line">还没有方法笔记，点右上角新建。 <em>No notes yet.</em></p></section>}
     </div>
+  </div>;
+}
+
+// —— 阅读区 Readings：放别人写好的内容，自己拿来阅读（可批注编辑），复用文章全文视图 ——
+export function Readings({graph, readings, selected, setSelected, openReading, setOpenReading, onGo, onAction, onNew, onUpdate, onDelete}) {
+  const [q, setQ] = useState('');
+  const rows = readings.filter(r => ((r.title || '') + ' ' + (r.author || '') + ' ' + (r.source || '')).toLowerCase().includes(q.toLowerCase()))
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  const cur = readings.find(r => r.id === openReading) || null;
+  const node = graph.index.get('reading:' + (openReading ?? selected ?? rows[0]?.id));
+  // ArticleView 的兼容对象：date 必须是字符串、tags 必须是数组；metaLine 覆盖「首发/编辑于/标签」文案
+  const asWork = r => ({...r, date: r.date || '', tags: [], metaLine: `${String(r.date || '').slice(0, 10)} 收藏 · ${r.author || '佚名'}${r.source ? ' · ' + r.source : ''}`});
+  // 打开阅读后滚动定位：全文视图在列表下方，不滚动会像「按钮没反应」
+  useEffect(() => {
+    if (!openReading) return;
+    const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+    requestAnimationFrame(() => document.querySelector('.article-view')?.scrollIntoView({block: 'start', behavior: smooth ? 'smooth' : 'auto'}));
+  }, [openReading]);
+  return <div className="page page-readings">
+    <PageHead zh="阅读区" en="Readings" sub="别人的好内容，收进自己的网络。" subEn="Reading list — others' words, linked into your graph.">
+      <button className="pill primary" onClick={onNew}><Icon name="plus" size={15}/>添加阅读 <em>New reading</em></button>
+    </PageHead>
+    <div className="library-layout">
+      <section className="works-col">
+        <div className="toolbar-row">
+          <label className="search"><Icon name="search" size={15}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索标题、作者或来源… Search" aria-label="搜索阅读条目"/></label>
+        </div>
+        <div className="read-list">{rows.map(r => {
+          const on = (openReading ?? selected) === r.id;
+          return <div key={r.id} className={`read-card glass ${on ? 'active' : ''}`} onClick={() => { setSelected(r.id); setOpenReading(r.id); }} role="button" tabIndex={0}
+            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(r.id); setOpenReading(r.id); } }}>
+            <span className="rc-body">
+              <span className="rc-title">{r.title || '未命名阅读'}</span>
+              <span className="rc-sub">{r.author || '佚名'}{r.source ? ` · ${r.source}` : ''} · {String(r.date || '').slice(0, 10) || '未标日期'} · {(r.body || '').length.toLocaleString('zh-CN')} 字</span>
+            </span>
+            <span className="rc-tools">
+              <button className="icon-btn" title="删除这条阅读 Delete" aria-label={`删除 ${r.title || '未命名阅读'}`}
+                onClick={e => { e.stopPropagation(); onDelete(r.id); }}><Icon name="trash" size={13}/></button>
+            </span>
+          </div>;
+        })}</div>
+        {!rows.length && <div className="empty"><Icon name="book" size={30}/><p>还没有收藏的阅读 <em>Nothing here yet</em></p><button className="pill" onClick={() => setQ('')}>清空搜索 <em>Clear</em></button></div>}
+        <p className="source-line"><Icon name="info" size={13}/>{readings.length} 条阅读保存在此浏览器，正文可批注，[[双链]] 会汇入图谱 <em>Saved locally</em>。</p>
+      </section>
+      {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'readings')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)}/></aside>}
+    </div>
+    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenReading(null)} onGo={onGo} eyebrow={['READING', '阅读全文']}/>}
   </div>;
 }
 

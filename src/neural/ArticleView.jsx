@@ -517,7 +517,7 @@ export function buildMirrorHtml(text, sel) {
   }).join('');
 }
 
-export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo}) {
+export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo, eyebrow = ['ARTICLE', '文章全文']}) {
   const [mode, setMode] = useState('edit');
   // 专注模式：隐藏头部信息与页脚，正文区占满（浮层本身已全屏，这里是榨出最后的可视空间）
   const [focusMode, setFocusMode] = useState(false);
@@ -589,13 +589,13 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo}) 
     const hit = byName.get((a.dataset.target || '').toLowerCase());
     if (hit) onGo(hit.id);
   };
-  return <section className={`article-view glass${focusMode ? ' focused' : ''}`} role="region" aria-label="文章全文">
+  return <section className={`article-view glass${focusMode ? ' focused' : ''}`} role="region" aria-label={eyebrow[1]}>
     {focusMode && <button className="icon-btn av-unfocus" onClick={() => setFocusMode(false)} title="退出专注 Exit focus" aria-label="退出专注模式"><Icon name="close" size={14}/></button>}
     <header className="av-head">
       <div className="av-title">
-        <p className="eyebrow">ARTICLE <span>文章全文</span></p>
+        <p className="eyebrow">{eyebrow[0]} <span>{eyebrow[1]}</span></p>
         <h2>{work.title}</h2>
-        <p className="av-meta">{work.date.slice(0, 10)} 首发 · 编辑于 {work.updatedAt || work.date}{work.direction ? ` · ${work.direction}` : ''} · {work.tags.length} 个标签</p>
+        <p className="av-meta">{work.metaLine || `${work.date.slice(0, 10)} 首发 · 编辑于 ${work.updatedAt || work.date}${work.direction ? ` · ${work.direction}` : ''} · ${work.tags.length} 个标签`}</p>
       </div>
       <div className="av-actions">
         <div className="seg" role="group" aria-label="编辑或预览">

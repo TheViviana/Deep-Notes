@@ -344,6 +344,18 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .library-layout { display: grid; grid-template-columns: 1fr clamp(380px, 32vw, 460px); gap: 20px; align-items: start; }
 .library-analysis { position: sticky; top: 80px; height: calc(100vh - 100px); animation: slideIn .6s cubic-bezier(.2, .8, .2, 1) both; }
 .works-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+
+/* 阅读区：与作品库同骨架的简洁列表 */
+.read-list { display: grid; gap: 10px; }
+.read-card { display: flex; align-items: center; gap: 12px; padding: 13px 16px; border-radius: 14px; border: 1px solid var(--line); background: linear-gradient(170deg, rgba(48, 49, 48, .5), rgba(14, 15, 15, .78)); text-align: left; color: var(--text); cursor: pointer; transition: transform .25s, border-color .25s, box-shadow .25s; animation: fadeUp .5s both; }
+.read-card:hover { transform: translateY(-2px); border-color: var(--line-2); }
+.read-card.active { border-color: rgba(213, 200, 164, .55); box-shadow: 0 0 0 1px rgba(213, 200, 164, .18), 0 14px 34px rgba(0, 0, 0, .4); }
+.read-card .rc-body { display: grid; gap: 3px; flex: 1; min-width: 0; }
+.read-card .rc-title { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.read-card .rc-sub { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.read-card .rc-tools { flex: none; display: flex; }
+.read-card .rc-tools .icon-btn { opacity: .55; }
+.read-card .rc-tools .icon-btn:hover { opacity: 1; }
 .work-card { display: grid; grid-template-rows: auto 1fr; padding: 0; border-radius: 16px; overflow: hidden; border: 1px solid var(--line); background: linear-gradient(170deg, rgba(48, 49, 48, .55), rgba(14, 15, 15, .82)); text-align: left; color: var(--text); transition: transform .3s, border-color .3s, box-shadow .3s; animation: fadeUp .55s both; }
 .work-card:hover { transform: translateY(-3px); border-color: var(--line-2); }
 .work-card.active { border-color: rgba(230, 207, 152, .6); box-shadow: 0 0 0 1px rgba(230, 207, 152, .2), 0 18px 40px rgba(0, 0, 0, .45), 0 0 30px rgba(230, 207, 152, .1); }

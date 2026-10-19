@@ -22,16 +22,25 @@ const files = [
     '---\npriority: 高\n---\n备注内容'),
   f('vault/03-创作台 drafts/草稿一.md',
     '---\nsource: 选题一\n---\n草稿正文'),
+  f('vault/06-阅读区 readings/阅读一.md',
+    '---\ntitle: 阅读一\nauthor: 某作者\nsource: 某博客\ndate: 2026-02-10\n---\n阅读正文'),
   f('vault/README.txt', '不是 Markdown，应被忽略')
 ];
 
-test('目录按名字分类：作品 / 方法 / 选题 / 草稿，非 md 文件被忽略', async () => {
+test('目录按名字分类：作品 / 方法 / 选题 / 草稿 / 阅读，非 md 文件被忽略', async () => {
   const r = await parseVault(files);
   assert.equal(r.vault, 'vault');
   assert.equal(r.counts.works, 2);
   assert.equal(r.counts.notes, 1);
   assert.equal(r.counts.ideas, 1);
   assert.equal(r.counts.drafts, 1);
+  assert.equal(r.counts.readings, 1);
+  const rd = r.readings[0];
+  assert.equal(rd.title, '阅读一');
+  assert.equal(rd.author, '某作者');
+  assert.equal(rd.source, '某博客');
+  assert.equal(rd.date, '2026-02-10');
+  assert.equal(rd.body, '阅读正文');
   assert.ok(!JSON.stringify(r.counts).includes('README'));
 });
 

@@ -268,6 +268,19 @@ function analyze(graph, node) {
         ['提及概念', 'Concepts', node.shared.length ? node.shared.join('、') : '正文没有命中概念词。', 'info']]
     };
   }
+  if (node.kind === 'reading') {
+    const ghosts = nb.out.filter(x => graph.index.get(x.id).kind === 'ghost');
+    return {
+      badge: ['阅读收藏', 'Reading'], status: `${node.reading.author || '佚名'}${node.reading.source ? ' · ' + node.reading.source : ''}${node.reading.date ? ` · ${String(node.reading.date).slice(0, 10)}` : ''}`,
+      action: ['打开阅读', 'Read', {type: 'openReading', id: node.reading.id}],
+      action2: ['阅读全文', 'Read full', {type: 'read', id: node.id}],
+      metric: connectivity(),
+      tiles: [['file', (node.body || '').length, '字数', 'Chars'], ['outlink', d.out, '出链', 'Outgoing'], ['back', d.back, '反链', 'Backlinks'], ['link', d.both, '双向共振', 'Mutual']],
+      insights: [...resonance,
+        ...(ghosts.length ? [['未创建的双链', 'Unresolved links', `${ghosts.length} 个 [[双链]] 指向尚未出现的笔记：${ghosts.slice(0, 3).map(x => graph.index.get(x.id).short).join('、')}${ghosts.length > 3 ? ' 等' : ''}。`, 'warn']] : []),
+        ['提及概念', 'Concepts', node.shared.length ? node.shared.join('、') : '正文没有命中概念词。', 'info']]
+    };
+  }
   if (node.kind === 'idea') {
     const I = C.filter(n => n.kind === 'idea');
     const reach = x => 100 * latent(graph, x.id).length / Math.max(1, C.length - 1);
