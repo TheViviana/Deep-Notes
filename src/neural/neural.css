@@ -450,14 +450,24 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .toc-list button:hover { background: rgba(255, 255, 255, .06); color: var(--text); }
 .toc-list button.on { background: rgba(212, 175, 110, .14); color: var(--text); }
 .editor-area:has(.toc-panel) textarea { padding-right: 190px; }
-/* —— 行级混合显示：光标行显 Markdown 源码，其余行符号淡化到近隐形（视觉≈阅读模式）—— */
-.editor-area.hybrid textarea, .editor-main.hybrid textarea { color: transparent; caret-color: var(--gold); position: relative; z-index: 1; }
-.editor-area.hybrid textarea::selection, .editor-main.hybrid textarea::selection { color: var(--text); background: rgba(212, 175, 110, .22); }
-.line-mirror { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; color: var(--text); }
+/* —— Live Preview 式编辑层 v2：textarea 是透明输入黑盒（不折行、不滚动、指针穿透），
+   镜像层是唯一布局与滚动主体：隐藏符号零宽化（宽度回收、正文顶格连续），
+   光标与选区自绘，点击 / 拖选 / 双击由镜像层接管 —— */
+.editor-area.hybrid textarea, .editor-main.hybrid textarea {
+  color: transparent; caret-color: transparent; position: relative; z-index: 1;
+  pointer-events: none; white-space: pre; overflow: hidden; resize: none;
+}
+.editor-area.hybrid textarea::selection, .editor-main.hybrid textarea::selection { color: transparent; background: transparent; }
+.editor-area.hybrid textarea::placeholder, .editor-main.hybrid textarea::placeholder { color: var(--muted); white-space: pre-wrap; }
+.line-mirror { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; z-index: 0; color: var(--text); cursor: text; user-select: none; -webkit-user-select: none; }
+.lm-inner { position: relative; }
 .lm-line { min-height: 1.9em; }
-.lm-mk { font-style: normal; opacity: 0; } /* 语法符号默认完全隐藏；opacity 占位不消字，保逐字对齐 */
-.lm-mk.on { opacity: 1; } /* 光标/选区落在所属片段（行首标记则在所在行）内才显形 */
+.lm-z { display: inline; } /* 隐藏符号处的零宽锚点 */
+.lm-mk { font-style: normal; color: var(--muted); } /* 显形后的语法符号 */
 .lm-line.lm-h { font-weight: 600; }
+.lm-line.lm-h1 { font-size: 1.45em; line-height: 1.6; }
+.lm-line.lm-h2 { font-size: 1.25em; line-height: 1.7; }
+.lm-line.lm-h3 { font-size: 1.1em; }
 .lm-line.lm-quote { color: var(--text-2); box-shadow: inset 2px 0 0 var(--gold); }
 .lm-line.lm-code { background: rgba(10, 11, 11, .6); box-shadow: inset 0 0 0 1px rgba(236, 236, 232, .05); }
 .lm-line .lm-b { font-weight: 600; }
@@ -465,7 +475,12 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .lm-line .lm-s { text-decoration: line-through; }
 .lm-line .lm-c { background: rgba(255, 255, 255, .07); border-radius: 4px; }
 .lm-line .lm-a { color: var(--cyan); }
-.editor-area:has(.toc-panel) .line-mirror { padding-right: 190px; }
+.lm-caret { position: absolute; left: 0; top: 0; width: 2px; border-radius: 1px; background: var(--gold);
+  box-shadow: 0 0 6px rgba(212, 175, 110, .75); pointer-events: none; z-index: 3; animation: lm-blink 1.1s steps(1) infinite; }
+@keyframes lm-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .lm-caret { animation: none; } }
+.lm-selbox { pointer-events: none; }
+.lm-selr { position: absolute; background: rgba(212, 175, 110, .22); border-radius: 2px; min-width: 2px; }
 /* —— 代码高亮（零依赖极简版）：颜色值 / 字符串 / 注释 / 关键字 / 数字 / 属性 / 标签 —— */
 /* 阅读视图与编辑镜像层共用同一套 token 配色 */
 .md-preview .tk-c, .line-mirror .tk-c { color: #7d8a80; font-style: italic; }

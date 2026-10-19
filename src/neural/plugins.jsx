@@ -220,13 +220,22 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, preview,
     const el = area.current;
     if (!tw || !el) return;
     const scroll = () => requestAnimationFrame(() => {
+      const mir = el.__mirrorApi;
+      if (mir?.scroller && mir.caretRect) { // 镜像层是滚动主体：按自绘光标的视口位置居中
+        if (mir.drag) return;
+        const r = mir.caretRect();
+        if (!r) return;
+        const sc = mir.scroller, vr = sc.getBoundingClientRect();
+        sc.scrollTop = Math.max(0, sc.scrollTop + (r.top + r.height / 2) - (vr.top + vr.clientHeight / 2));
+        return;
+      }
       const lh = parseFloat(getComputedStyle(el).lineHeight) || 24;
       const line = el.value.slice(0, el.selectionStart).split('\n').length - 1;
       el.scrollTop = Math.max(0, line * lh + lh / 2 - el.clientHeight / 2);
     });
     el.addEventListener('input', scroll);
-    el.addEventListener('click', scroll);
-    return () => { el.removeEventListener('input', scroll); el.removeEventListener('click', scroll); };
+    document.addEventListener('selectionchange', scroll);
+    return () => { el.removeEventListener('input', scroll); document.removeEventListener('selectionchange', scroll); };
   }, [tw, area.current]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // —— 格式应用：都走「改值 → onChange → 下一帧恢复光标」——
@@ -237,7 +246,7 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, preview,
     requestAnimationFrame(() => {
       const el = area.current;
       if (!el || el.value !== next) return;
-      el.focus(); el.setSelectionRange(selStart, selEnd);
+      el.focus({preventScroll: true}); el.setSelectionRange(selStart, selEnd);
     });
   };
   // 包裹选区（toggle）：加粗 / 高亮 / 行内代码 / 双链…
@@ -326,6 +335,18 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, preview,
     const el = area.current;
     if (!tocOn || previewMode === 'preview' || !el || !outline.length) return;
     const spy = () => {
+      const mir = el.__mirrorApi;
+      if (mir?.scroller && mir.lineTop) { // 镜像层坐标：标题行实际渲染位置（含折行与标题字号），不再按行号近似
+        const sc = mir.scroller;
+        let cur = -1;
+        for (const h of outlineRef.current) {
+          const t = mir.lineTop(h.line);
+          if (t == null) continue;
+          if (t - sc.scrollTop <= 48) cur = h.line;
+        }
+        setCurLine(cur);
+        return;
+      }
       const {lh, pad} = metrics();
       const y = el.scrollTop + el.clientHeight * .35;
       let cur = -1;
@@ -333,7 +354,7 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, preview,
       setCurLine(cur);
     };
     spy();
-    el.addEventListener('scroll', spy, {passive: true});
+    el.addEventListener('scroll', spy, {passive: true}); // 镜像层滚动会转发成 textarea 的 scroll 事件
     return () => el.removeEventListener('scroll', spy);
   }, [tocOn, outline.length, previewMode]); // eslint-disable-line react-hooks/exhaustive-deps
   // 阅读模式：监听渲染容器，高亮视口顶部最近的标题（大纲序号与渲染标题一一对应：代码块内标题两边都跳过）
@@ -361,11 +382,17 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, preview,
       if (box && idx >= 0 && list[idx]) { list[idx].scrollIntoView({block: 'start'}); return; }
     }
     const el = area.current; if (!el) return;
-    const {lh, pad} = metrics();
-    el.scrollTop = Math.max(0, pad + line * lh - 14);
     const pos = line ? el.value.split('\n').slice(0, line).join('\n').length + 1 : 0;
-    el.focus();
+    el.focus({preventScroll: true});
     el.setSelectionRange(pos, pos);
+    const mir = el.__mirrorApi;
+    if (mir?.scroller && mir.lineTop) { // 镜像层坐标：滚到标题行实际位置（含折行）
+      const t = mir.lineTop(line);
+      if (t != null) mir.scroller.scrollTop = Math.max(0, t - 14);
+    } else {
+      const {lh, pad} = metrics();
+      el.scrollTop = Math.max(0, pad + line * lh - 14);
+    }
   };
 
   // 输入后检测行首 / 命令
@@ -384,7 +411,7 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, preview,
     const next = el.value.slice(0, m.start) + snip + el.value.slice(m.end ?? el.selectionStart);
     onChange(next);
     setMenu(null);
-    requestAnimationFrame(() => { el.focus(); if (el.value === next) el.setSelectionRange(pos, pos); });
+    requestAnimationFrame(() => { el.focus({preventScroll: true}); if (el.value === next) el.setSelectionRange(pos, pos); });
   };
   const slashKey = e => {
     const m = live.current.menu;

@@ -26,7 +26,7 @@ export function useWikiComplete({titles, areaRef, onChange}) {
     const pos = s + t.title.length + 2;
     onChange(value); setSuggest(null);
     // 光标恢复带值守卫：回调迟到（用户已继续输入）时不再拽光标，避免后续输入落到过期位置
-    requestAnimationFrame(() => { el.focus(); if (el.value === value) el.setSelectionRange(pos, pos); });
+    requestAnimationFrame(() => { el.focus({preventScroll: true}); if (el.value === value) el.setSelectionRange(pos, pos); });
   };
   const onKeyDown = e => {
     const s = live.current.suggest;
