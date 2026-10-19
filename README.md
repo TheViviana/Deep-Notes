@@ -27,7 +27,7 @@ Turn your works, notes, ideas and drafts into a living neural network — an orb
 
 在原项目基础上新增（均由 Trae CN 编写）：
 
-- **数据本地持久化**：文章数据存 `localStorage` 并支持增删改查（含浏览 / 点赞 / 曝光等数据指标与媒体类型的手动修正）。
+- **数据本地持久化**：文章数据存 `localStorage` 并支持增删改查（含浏览 / 点赞 / 曝光等数据指标与媒体类型的手动修正）；桌面版还支持**文件夹知识库**——导入时在原库旁新建「`<原名> - Deep Notes`」副本，之后的增删改实时写回副本里的 `.md` 文件（删除的内容进 `.trash`），原文件夹不动，Obsidian 可直接打开副本继续编辑。
 - **Markdown 全文编辑与预览**：`[[双链]]` 补全并汇入图谱，未创建的双链可一键创建为文章或笔记；行级混合显示（光标所在行显示 Markdown 源码、其余行呈阅读态）、代码块与行内代码零依赖语法高亮（十六进制颜色附带色块预览）、工具栏文字颜色（七色 + 高亮 `==标记==`）。
 - **主视图改名与任意层级跳转**、选题池平台 / 优先级 / 状态 / 备注编辑与删除。
 - **草稿编辑器三种视图**：专注（隐藏左右卡片）/ 阅读（渲染视图）/ 对照（双文件分屏，分割线可拖动，双击复位 50/50）。
@@ -46,7 +46,7 @@ Turn your works, notes, ideas and drafts into a living neural network — an orb
 - **作品库 / 创作台 / 选题池 / 阅读区**等内页：作品卡片与排序、草稿编辑（支持 `[[` 双链补全）、选题转草稿、阅读收藏与批注。
 - **银灰配色**：中性深灰底、银灰光球、香槟金点缀，颜色集中在 `src/neural/theme.js` 和 `neural.css` 顶部的 CSS 变量里。
 - **中英双语**界面，尊重系统的「减少动态效果」设置。
-- 纯前端，选题、草稿和目标保存在浏览器 `localStorage`，无后台同步服务。
+- 纯前端，选题、草稿和目标保存在浏览器 `localStorage`，无后台同步服务；桌面版可选启用文件夹知识库，把内容同步成本地 `.md` 文件。
 
 ## 快速开始
 
@@ -63,11 +63,11 @@ npm run dev
 
 ### macOS 桌面版（免安装 .dmg）
 
-到 [Releases](https://github.com/TheViviana/Deep-Notes/releases) 下载 `Deep Notes-0.2.0-arm64.dmg`，打开后把「Deep Notes」拖进「应用程序」。安装包未做代码签名，首次打开需**右键 → 打开**（或在「系统设置 → 隐私与安全性」里点「仍要打开」）。需要 Apple Silicon（M 系列）芯片。
+到 [Releases](https://github.com/TheViviana/Deep-Notes/releases) 下载 `Deep Notes-0.2.1-arm64.dmg`，打开后把「Deep Notes」拖进「应用程序」。安装包未做代码签名，首次打开需**右键 → 打开**（或在「系统设置 → 隐私与安全性」里点「仍要打开」）。需要 Apple Silicon（M 系列）芯片。
 
 ## 桌面版构建（Electron · macOS）
 
-用 [electronizer](https://www.npmjs.com/package/electronizer) 生成的 Electron 壳打包，界面和数据与网页版完全一致——数据保存在桌面应用的 `localStorage`（Electron 用户数据目录），同样不联网。
+用 [electronizer](https://www.npmjs.com/package/electronizer) 生成的 Electron 壳打包，界面与网页版一致、同样不联网。数据保存分两层：`localStorage`（Electron 用户数据目录）始终生效；导入知识库时会在所选文件夹旁新建「`<原名> - Deep Notes`」副本并启用**文件夹写回**——作品 / 方法笔记 / 草稿 / 阅读的增删改实时同步成副本里的 `.md` 文件（删除的内容移入 `.trash`），原文件夹内容不变，「关于这份数据」弹窗可查看当前库路径。
 
 ```bash
 npm run build            # 构建静态文件到 dist/
@@ -123,7 +123,7 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
 
 ### 方式二：在软件里直接导入文件夹
 
-打开「关于这份数据」弹窗（右上角头像），点「导入知识库文件夹」，选中你的 Markdown / Obsidian 文件夹即可：解析规则与命令行导入一致，未识别的文件夹一律作为方法笔记导入，导入结果只保存在当前浏览器（或桌面应用），可随时「切回示例数据」。
+打开「关于这份数据」弹窗（右上角头像），点「导入知识库文件夹」，先选导入去向（按文件夹自动分类，或全部归入某个模块），再选中你的 Markdown / Obsidian 文件夹即可：解析规则与命令行导入一致，未识别的文件夹一律作为方法笔记导入。桌面版会在所选文件夹旁新建「`<原名> - Deep Notes`」副本作为知识库并实时写回 `.md`；网页版只保存在当前浏览器。可随时「切回示例数据」（会停用文件夹写回，盘上副本原样保留）。
 
 ### 方式三：手动改数据
 

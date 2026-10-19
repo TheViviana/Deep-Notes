@@ -3,7 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, seedReadings, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
 import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags} from './worksStore';
 import {pickVaultFolder, parseVault} from './importer';
-import {capable, getRoot, setRoot, queueSync, flush, chooseDir, readVaultFiles, prepareCopy} from './fileStore';
+import {capable, getRoot, setRoot, queueSync, flush, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler} from './fileStore';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
@@ -242,10 +242,17 @@ function App() {
       const pv = prev[kind], cv = cur[kind];
       const pmap = new Map(pv.map(x => [x.id, x]));
       const cmap = new Map(cv.map(x => [x.id, x]));
-      for (const x of cv) queueSync(kind, x, pmap.get(x.id) || null);
-      for (const x of pv) if (!cmap.has(x.id)) queueSync(kind, null, x);
+      const removed = pv.filter(x => !cmap.has(x.id));
+      const relMap = resolveRels(kind, [...cv, ...removed]); // 同名标题消歧，旧条目也参与算旧路径
+      for (const x of cv) queueSync(kind, x, pmap.get(x.id) || null, relMap);
+      for (const x of removed) queueSync(kind, null, x, relMap);
     }
   }, [works, notes, drafts, readings]);
+  // 写盘失败提示（权限不足 / 磁盘满等）；队列由 flush 触发，这里只负责把错误带给用户
+  useEffect(() => {
+    setErrorHandler(failed => setToast(`知识库写盘失败（${failed.length} 个文件），内容仍保存在浏览器 · Disk write failed`));
+    return () => setErrorHandler(null);
+  }, []);
   // 退出前尽力把防抖队列写完（800ms 内关闭窗口的场景）
   useEffect(() => {
     if (!capable()) return;
@@ -427,7 +434,7 @@ function App() {
     else if (kind === 'draft') setDrafts(ds => ds.map(d => 'draft:' + d.id === gid ? {...d, body} : d));
   }
   function onNoteTitle(gid, title) {
-    const t = title.trim();
+    const t = title.trim().replace(/[/\\]/g, '·'); // 文件名安全化，与 updateNote 一致
     if (!t) return;
     setNotes(ns => ns.map(n => 'note:' + n.id === gid ? {...n, title: t, path: n.path.replace(/[^/]+$/, t + '.md')} : n));
     setToast('笔记标题已更新 · Note renamed');
@@ -489,7 +496,8 @@ function App() {
     }
     if (kind === 'note') {
       const n = notes.find(x => x.id === id); if (!n) return {error: '找不到文件'};
-      setNotes(ns => ns.map(x => x.id === id ? {...x, ...patch, ...(patch.title ? {path: x.path.replace(/[^/]+$/, patch.title + '.md')} : {})} : x));
+      const safeTitle = patch.title ? patch.title.trim().replace(/[/\\]/g, '·') : patch.title; // 文件名安全化
+      setNotes(ns => ns.map(x => x.id === id ? {...x, ...patch, ...(safeTitle ? {path: x.path.replace(/[^/]+$/, safeTitle + '.md')} : {})} : x));
       return {ok: true, title: patch.title};
     }
     return {error: '未知类型 ' + kind};
@@ -545,20 +553,20 @@ function App() {
       ? `文章 ${data.counts.works}、方法笔记 ${data.counts.notes}、选题 ${data.counts.ideas}、草稿 ${data.counts.drafts}、阅读 ${data.counts.readings || 0}`
       : `全部 ${data.counts.all} 个文件将作为「${{works: '作品库', methods: '方法库', ideas: '选题池', drafts: '创作台', readings: '阅读区'}[target]}」的内容导入`;
     const srcName = srcDir ? srcDir.replace(/\/+$/, '').split('/').pop() : data.vault;
-    const desktopNote = srcDir ? `\n\n桌面版会在「${srcName}」旁新建「${srcName} - Deep Notes」副本作为你的知识库文件夹：之后的编辑会实时写回副本里的 .md 文件，原文件夹内容保持不变。` : '';
+    const desktopNote = srcDir ? `\n\n桌面版会在「${srcName}」旁新建「${srcName} - Deep Notes」副本作为你的知识库文件夹（副本初始为空，导入完成后按结果生成 .md）：之后的编辑会实时写回副本，原文件夹内容保持不变。` : '';
     const ok = window.confirm(`将从「${srcName}」导入：${where}${extra ? '（' + extra + '）' : ''}。${desktopNote}\n\n这会替换当前浏览器里的全部文章、选题和草稿，确定继续吗？`);
     if (!ok) return;
     let copyDir = null;
     if (srcDir) {
       const copy = await prepareCopy(srcDir);
-      if (copy?.ok) { setRoot(copy.dir); copyDir = copy.dir; }
-      else { setRoot(null); setToast('无法创建知识库副本，本次导入只保存在浏览器 · Copy failed'); }
+      if (copy?.ok) { await setRoot(copy.dir); copyDir = copy.dir; } // await：先把旧队列写进旧库再换根目录
+      else { await setRoot(null); setToast('无法创建知识库副本，本次导入只保存在浏览器 · Copy failed'); }
     }
     adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${copyDir ? ` · 已写入「${copyDir.replace(/\/+$/, '').split('/').pop()}」` : ''}`);
   }
-  function resetToSample() {
+  async function resetToSample() {
     if (!window.confirm('切回虚构示例数据？当前浏览器里的文章、选题和草稿会被清空替换。')) return;
-    setRoot(null); // 桌面版停用文件夹写回；盘上已有的知识库副本原样保留
+    await setRoot(null); // 桌面版停用文件夹写回（先把待写队列写进旧库）；盘上已有的知识库副本原样保留
     adoptData({works: seedWorks(), notes: SEED_NOTES, ideas: seedIdeas, drafts: seedDrafts, readings: seedReadings, snapshot, concepts: CONCEPTS}, '已切回示例数据 · Sample data restored');
   }
 
