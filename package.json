@@ -1,0 +1,49 @@
+{
+  "name": "deep-notes",
+  "version": "0.2.0",
+  "description": "Deep Notes — a neural-network style creator dashboard: an orb, swimming jellyfish modules and bidirectional links for your notes and works.",
+  "private": true,
+  "type": "module",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "import": "node scripts/import-notes.mjs",
+    "verify": "node scripts/verify.mjs",
+    "test": "node scripts/run-tests.mjs",
+    "electron": "electron .",
+    "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron:build": "npm run build && electron-builder",
+    "electron:dist": "electron-builder",
+    "electron:dist:win": "electron-builder --win",
+    "electron:dist:mac": "electron-builder --mac",
+    "electron:dist:linux": "electron-builder --linux",
+    "electron:dist:all": "electron-builder --mac --win --linux"
+  },
+  "dependencies": {
+    "marked": "^18.1.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "vite": "^7.0.0"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/luoluo-121/neural-creator-dashboard.git"
+  },
+  "main": "electron/main.cjs",
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1",
+    "concurrently": "^8.2.2",
+    "wait-on": "^7.2.0"
+  },
+  "allowScripts": {
+    "electron@28.3.3": true,
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true
+  }
+}
