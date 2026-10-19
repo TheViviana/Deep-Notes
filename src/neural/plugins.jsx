@@ -230,9 +230,15 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, preview,
   }, [tw, area.current]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // —— 格式应用：都走「改值 → onChange → 下一帧恢复光标」——
+  // 恢复光标前先校验正文仍是 mutate 写入的那份：回调一旦迟到（重渲染卡顿、后台标签页挂起 rAF），
+  // 用户往往已经开始在别处打字，这时再拽光标会让后续输入全部落到过期位置（如「空行打字跑到上一行」）。
   const mutate = (next, selStart, selEnd) => {
     onChange(next);
-    requestAnimationFrame(() => { const el = area.current; if (el) { el.focus(); el.setSelectionRange(selStart, selEnd); } });
+    requestAnimationFrame(() => {
+      const el = area.current;
+      if (!el || el.value !== next) return;
+      el.focus(); el.setSelectionRange(selStart, selEnd);
+    });
   };
   // 包裹选区（toggle）：加粗 / 高亮 / 行内代码 / 双链…
   const wrap = (before, after, ph) => {
@@ -366,7 +372,7 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, preview,
   const slashCheck = el => {
     if (!el || !on('slash')) return;
     const m = el.value.slice(0, el.selectionStart).match(/(?:^|\n)\/([^\s\n]*)$/);
-    setMenu(m ? {q: m[1], start: el.selectionStart - m[1].length - 1, pick: 0} : null);
+    setMenu(m ? {q: m[1], start: el.selectionStart - m[1].length - 1, end: el.selectionEnd, pick: 0} : null);
   };
   const slashInsert = c => {
     const el = area.current, m = live.current.menu;
@@ -374,9 +380,11 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, preview,
     const i = c.snippet.indexOf('¦');
     const snip = i >= 0 ? c.snippet.replace('¦', '') : c.snippet;
     const pos = i >= 0 ? m.start + i : m.start + snip.length;
-    onChange(el.value.slice(0, m.start) + snip + el.value.slice(el.selectionStart));
+    // 切割终点用菜单打开时捕获的位置（而非实时光标）：用户若在菜单开着时移动过光标，实时值会切错地方
+    const next = el.value.slice(0, m.start) + snip + el.value.slice(m.end ?? el.selectionStart);
+    onChange(next);
     setMenu(null);
-    requestAnimationFrame(() => { el.focus(); el.setSelectionRange(pos, pos); });
+    requestAnimationFrame(() => { el.focus(); if (el.value === next) el.setSelectionRange(pos, pos); });
   };
   const slashKey = e => {
     const m = live.current.menu;

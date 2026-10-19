@@ -455,9 +455,8 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .editor-area.hybrid textarea::selection, .editor-main.hybrid textarea::selection { color: var(--text); background: rgba(212, 175, 110, .22); }
 .line-mirror { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; color: var(--text); }
 .lm-line { min-height: 1.9em; }
-.lm-line i:not([class]) { font-style: normal; opacity: .07; }
-.lm-tag { opacity: .07; }
-.lm-line.cur .lm-tag { opacity: .45; }
+.lm-mk { font-style: normal; opacity: 0; } /* 语法符号默认完全隐藏；opacity 占位不消字，保逐字对齐 */
+.lm-mk.on { opacity: 1; } /* 光标/选区落在所属片段（行首标记则在所在行）内才显形 */
 .lm-line.lm-h { font-weight: 600; }
 .lm-line.lm-quote { color: var(--text-2); box-shadow: inset 2px 0 0 var(--gold); }
 .lm-line.lm-code { background: rgba(10, 11, 11, .6); box-shadow: inset 0 0 0 1px rgba(236, 236, 232, .05); }

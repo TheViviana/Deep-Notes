@@ -45,6 +45,11 @@ marked.use({renderer: {
   codespan({text}) { return `<code class="hl">${hiCode(text, '')}</code>`; },
 }});
 
+// 镜像层行内片段（彩色 span / 双链 / 高亮 / 加粗 / 斜体 / 删除线 / 行内代码）。
+// walk 递归处理嵌套片段，每个 walk 实例化独立正则（共享 lastIndex 会互相踩踏）。
+const INLINE_SRC = '<span style="color:(#[0-9a-fA-F]{3,8})">[\\s\\S]*?<\\/span>'
+  + '|\\[\\[[^\\]\\n]+\\]\\]|==[^=\\n]+==|\\*\\*[^*\\n]+\\*\\*|__[^_\\n]+__|~~[^~\\n]+~~|\\*[^*\\n]+\\*(?!\\*)|`[^`\\n]+`';
+
 // Markdown 渲染：先把 [[双链]] 替换成带 data-target 的内联 <a>（内容已转义），再交给 marked。
 // 同时供创作台阅读模式与对照分屏复用。围栏代码块与行内代码里的 [[..]] 不做替换（与 Obsidian 一致）。
 export function renderMarkdown(md) {
@@ -59,14 +64,13 @@ export function renderMarkdown(md) {
   return marked.parse(src);
 }
 
-// 镜像层内部使用：把 esc 产生的实体还原回原文（供 hiCode 重新转义，避免双重转义）。
-const unesc = s => String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
-
-// —— 行级混合显示：光标所在行显示 Markdown 源码，其余行把 #、**、` 等符号淡到近隐形 ——
-// 视觉上等于「其他位置是阅读模式」，但正文仍是同一个 textarea：双链补全 / 斜杠菜单 / 格式栏 / 打字机模式全部无感。
-// 镜像层与 textarea 逐字对齐（字体等排版属性从 textarea 读取）；textarea 文字透明，光标与选区仍由它绘制。
+// —— Live Preview 式镜像层（对齐 Obsidian）：正文恒按语义渲染（加粗 / 颜色 / 高亮 / 行内代码），
+// 语法符号（#、**、<span…>、[[ ]] 等）默认完全隐藏 —— 用 opacity:0 占位，字符不消、逐字对齐不破，
+// 光标或选区落在所属片段内（行首标记 #、>、``` 则随光标所在行）时才显形，可点进片段像源码一样编辑。
+// 正文仍是同一个 textarea：双链补全 / 斜杠菜单 / 格式栏 / 打字机模式全部无感；
+// textarea 文字透明，光标与选区仍由它绘制。
 export function LineMirror({text, taRef}) {
-  const [cur, setCur] = useState(0);
+  const [sel, setSel] = useState([0, 0, 0]); // [光标行号, 选区起点, 选区终点]
   const box = useRef(null);
   useEffect(() => {
     const el = taRef.current, m = box.current;
@@ -77,7 +81,11 @@ export function LineMirror({text, taRef}) {
       'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'tabSize', 'overflowWrap'])
       m.style[k] = cs[k];
     m.style.whiteSpace = 'pre-wrap';
-    const track = () => setCur(el.value.slice(0, Math.max(el.selectionStart, 0)).split('\n').length - 1);
+    const track = () => {
+      const s = Math.max(el.selectionStart || 0, 0), e = Math.max(el.selectionEnd || s, s);
+      const c = el.value.slice(0, s).split('\n').length - 1;
+      setSel(p => (p[0] === c && p[1] === s && p[2] === e ? p : [c, s, e])); // 值不变不触发重渲染
+    };
     const sync = () => { if (box.current) box.current.scrollTop = el.scrollTop; };
     const on = (ev, fn) => el.addEventListener(ev, fn), off = (ev, fn) => el.removeEventListener(ev, fn);
     for (const ev of ['input', 'click', 'keyup', 'select', 'focus']) on(ev, track);
@@ -87,47 +95,72 @@ export function LineMirror({text, taRef}) {
   }, [taRef]);
   // 文本变化重渲染后强制对齐滚动位置（innerHTML 重建会重置 scrollTop）
   useEffect(() => { const el = taRef.current, m = box.current; if (el && m) m.scrollTop = el.scrollTop; });
-  const html = useMemo(() => {
-    let fence = false, lang = ''; // 是否处于 ``` 围栏内（跨行状态）与围栏声明的语言
-    return String(text || '').split('\n').map((l, i) => {
-      // 逐字保形染色：<span style="color:…"> 与 ==高亮== 的源码字符原样保留（.lm-tag，随行淡显），
-      // 只把内容包进真标签上色 —— 源码字符一个不少，镜像与 textarea 永远逐字对齐，
-      // 选区不会再出现「透明代码字符与彩色文字错位叠加」。
-      const colored = esc(l)
-        .replace(/&lt;span style=&quot;color:(#[0-9a-fA-F]{3,8})&quot;&gt;([\s\S]*?)&lt;\/span&gt;/g,
-          (_, c, t) => `<span class="lm-tag">&lt;span style=&quot;color:${c}&quot;&gt;</span><span style="color:${c}">${t}</span><span class="lm-tag">&lt;/span&gt;</span>`)
-        .replace(/==([^=\n]+)==/g, '<span class="lm-tag">==</span><mark>$1</mark><span class="lm-tag">==</span>');
-      const fenceM = /^\s*```/.exec(l);
-      let inner;
-      if (i === cur) {
-        inner = colored; // 当前行：完整源码形态（代码-文字-代码），与光标、选区逐字对齐
-      } else if (fence && !fenceM) {
-        inner = hiCode(l, lang); // 围栏内：阅读式语法高亮（hiCode 自带转义，零位宽）
-      } else if (fenceM) {
-        inner = esc(l).replace(/^(\s*```)([^\s`]*)/, '<i>$1</i><i>$2</i>'); // 围栏标记与语言名整体淡隐
-      } else {
-        // 非当前行≈阅读模式：成对语法的内容按语义着色（字重 / 颜色 / 底色，零位宽变化），符号淡到近隐形
-        inner = colored
-          .replace(/\*\*([^*\n]+)\*\*/g, '<i>**</i><span class="lm-b">$1</span><i>**</i>')
-          .replace(/__([^_\n]+)__/g, '<i>__</i><span class="lm-b">$1</span><i>__</i>')
-          .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<i>*</i><span class="lm-i">$2</span><i>*</i>')
-          .replace(/~~([^~\n]+)~~/g, '<i>~~</i><span class="lm-s">$1</span><i>~~</i>')
-          .replace(/`([^`\n]+)`/g, (_, t) => '<i>`</i><span class="lm-c">' + hiCode(unesc(t), '') + '</span><i>`</i>')
-          .replace(/\[\[([^\]\n]+)\]\]/g, '<i>[[</i><span class="lm-a">$1</span><i>]]</i>')
-          .replace(/(^#{1,6}\s?)|(^\s*(?:[-+*>]|\d+[.)])\s?)|(\*\*|\*|__|~~|`{1,3}|\[\[|\]\]|\[|\]|!|\|)/g, '<i>$&</i>');
-      }
-      if (fenceM) {
-        if (!fence) { fence = true; lang = (l.match(/^\s*```([^\s`]*)/) || ['', ''])[1]; }
-        else { fence = false; lang = ''; }
-      }
-      const cls = ['lm-line', i === cur ? 'cur' : '',
-        !fenceM && !fence && /^#{1,6}\s/.test(l) ? 'lm-h' : '',
-        !fenceM && !fence && /^\s*>/.test(l) ? 'lm-quote' : '',
-        (fenceM || fence) ? 'lm-code' : ''].filter(Boolean).join(' ');
-      return `<div class="${cls}">${inner || '&#8203;'}</div>`;
-    }).join('');
-  }, [text, cur]);
+  const html = useMemo(() => buildMirrorHtml(text, sel), [text, sel]);
   return <div className="line-mirror" ref={box} aria-hidden="true" dangerouslySetInnerHTML={{__html: html}}/>;
+}
+
+// 镜像层 HTML 生成（纯函数，便于离线校验）：sel = [光标行号, 选区起点, 选区终点]。
+export function buildMirrorHtml(text, sel) {
+  const [cur, ss, se] = sel || [0, 0, 0];
+  const inRegion = (s, e) => ss <= e && se >= s; // 光标/选区与片段相交（含边缘）→ 片段的语法符号显形
+  const mk = (raw, on) => `<i class="lm-mk${on ? ' on' : ''}">${esc(raw)}</i>`;
+  // 单遍扫描行内片段（原始文本上匹配，避免实体还原；成对片段之外的原样字符照常显示）
+  const walk = (s, base) => {
+    const out = [];
+    let last = 0, m;
+    const re = new RegExp(INLINE_SRC, 'g');
+    while ((m = re.exec(s))) {
+      if (m.index > last) out.push(esc(s.slice(last, m.index)));
+      const t = m[0], at = base + m.index, end = at + t.length, on = inRegion(at, end);
+      if (t.startsWith('<span')) { // 彩色文字：首尾标签是语法符号，内容继续 token 化
+        const openLen = t.indexOf('>') + 1;
+        out.push(mk(t.slice(0, openLen), on) + `<span style="color:${m[1]}">`
+          + walk(t.slice(openLen, t.length - 7), at + openLen) + '</span>' + mk(t.slice(t.length - 7), on));
+      } else if (t.startsWith('[[')) {
+        out.push(mk('[[', on) + '<span class="lm-a">' + walk(t.slice(2, -2), at + 2) + '</span>' + mk(']]', on));
+      } else if (t.startsWith('==')) {
+        out.push(mk('==', on) + '<mark>' + walk(t.slice(2, -2), at + 2) + '</mark>' + mk('==', on));
+      } else if (t.startsWith('**') || t.startsWith('__')) {
+        out.push(mk(t.slice(0, 2), on) + '<span class="lm-b">' + walk(t.slice(2, -2), at + 2) + '</span>' + mk(t.slice(0, 2), on));
+      } else if (t.startsWith('~~')) {
+        out.push(mk('~~', on) + '<span class="lm-s">' + walk(t.slice(2, -2), at + 2) + '</span>' + mk('~~', on));
+      } else if (t[0] === '*') {
+        out.push(mk('*', on) + '<span class="lm-i">' + walk(t.slice(1, -1), at + 1) + '</span>' + mk('*', on));
+      } else { // 行内代码：hiCode 直接吃原始文本（自带转义），色块宽度为零
+        out.push(mk('`', on) + '<span class="lm-c">' + hiCode(t.slice(1, -1), '') + '</span>' + mk('`', on));
+      }
+      last = m.index + t.length;
+    }
+    if (last < s.length) out.push(esc(s.slice(last)));
+    return out.join('');
+  };
+  let fence = false, lang = '', off = 0; // 是否处于 ``` 围栏内（跨行状态）与围栏声明的语言
+  return String(text || '').split('\n').map((l, i) => {
+    const lineStart = off; off += l.length + 1;
+    const lineOn = i === cur; // 行首标记随光标所在行显形
+    const fenceM = /^\s*```/.exec(l);
+    let inner;
+    if (fence && !fenceM) {
+      inner = hiCode(l, lang); // 围栏内：阅读式语法高亮
+    } else {
+      // 行首标记：标题 / 引用 / 围栏声明整体显隐；列表符号保留可见充当项目符号
+      const pre = fenceM ? /^(\s*```[^\s`]*`*)/.exec(l) : /^((?:#{1,6}|>)\s|\s*>\s?)/.exec(l);
+      let head = '', rest = l, at = lineStart;
+      if (pre && pre[1]) {
+        head = mk(pre[1], lineOn);
+        rest = l.slice(pre[1].length); at += pre[1].length;
+      }
+      inner = head + walk(rest, at);
+    }
+    if (fenceM) {
+      if (!fence) { fence = true; lang = (l.match(/^\s*```([^\s`]*)/) || ['', ''])[1]; }
+      else { fence = false; lang = ''; }
+    }
+    const cls = ['lm-line', !fenceM && !fence && /^#{1,6}\s/.test(l) ? 'lm-h' : '',
+      !fenceM && !fence && /^\s*>/.test(l) ? 'lm-quote' : '',
+      (fenceM || fence) ? 'lm-code' : ''].filter(Boolean).join(' ');
+    return `<div class="${cls}">${inner || '&#8203;'}</div>`;
+  }).join('');
 }
 
 export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo}) {
