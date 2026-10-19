@@ -455,12 +455,12 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .editor-area.hybrid textarea::selection, .editor-main.hybrid textarea::selection { color: var(--text); background: rgba(212, 175, 110, .22); }
 .line-mirror { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; color: var(--text); }
 .lm-line { min-height: 1.9em; }
-.lm-line i { font-style: normal; opacity: .07; }
+.lm-line i:not([class]) { font-style: normal; opacity: .07; }
 .lm-tag { opacity: .07; }
 .lm-line.cur .lm-tag { opacity: 1; }
 .lm-line.lm-h { font-weight: 600; }
 .lm-line.lm-quote { color: var(--text-2); box-shadow: inset 2px 0 0 var(--gold); }
-.lm-line.lm-code { background: rgba(236, 236, 232, .05); }
+.lm-line.lm-code { background: rgba(10, 11, 11, .6); box-shadow: inset 0 0 0 1px rgba(236, 236, 232, .05); }
 .lm-line .lm-b { font-weight: 600; }
 .lm-line .lm-i { font-style: italic; }
 .lm-line .lm-s { text-decoration: line-through; }
@@ -468,14 +468,15 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .lm-line .lm-a { color: var(--cyan); }
 .editor-area:has(.toc-panel) .line-mirror { padding-right: 190px; }
 /* —— 代码高亮（零依赖极简版）：颜色值 / 字符串 / 注释 / 关键字 / 数字 / 属性 / 标签 —— */
-.md-preview .tk-c { color: #7d8a80; font-style: italic; }
-.md-preview .tk-s { color: #d4b483; }
-.md-preview .tk-k { color: #93a7c4; }
-.md-preview .tk-n { color: #b39ddb; }
-.md-preview .tk-h { color: #e8a1a1; }
-.md-preview .tk-p { color: #9ec49a; }
-.md-preview .tk-t { color: #d0a8ad; }
-.md-preview .tk-sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-left: 4px; vertical-align: -1px; border: 1px solid rgba(255, 255, 255, .25); }
+/* 阅读视图与编辑镜像层共用同一套 token 配色 */
+.md-preview .tk-c, .line-mirror .tk-c { color: #7d8a80; font-style: italic; }
+.md-preview .tk-s, .line-mirror .tk-s { color: #d4b483; }
+.md-preview .tk-k, .line-mirror .tk-k { color: #93a7c4; }
+.md-preview .tk-n, .line-mirror .tk-n { color: #b39ddb; }
+.md-preview .tk-h, .line-mirror .tk-h { color: #e8a1a1; }
+.md-preview .tk-p, .line-mirror .tk-p { color: #9ec49a; }
+.md-preview .tk-t, .line-mirror .tk-t { color: #d0a8ad; }
+.md-preview .tk-sw, .line-mirror .tk-sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-left: 4px; vertical-align: -1px; border: 1px solid rgba(255, 255, 255, .25); }
 /* 联网开关（顶栏）+ 沉浸式翻译 + 插件面板「需联网」徽标 */
 .net-switch { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px; border-radius: 999px; border: 1px solid var(--line); background: none; color: var(--text-2); font-size: 11.5px; white-space: nowrap; cursor: pointer; transition: color .2s, border-color .2s; }
 .net-switch i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); transition: background .2s, box-shadow .2s; }
@@ -817,7 +818,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 /* —— 工具栏「文字颜色」色板 —— */
 .clr-wrap { position: relative; display: inline-flex; }
 .clr-glyph { color: #d48fb0; font-weight: 700; border-bottom: 2px solid #5b8fc9; line-height: 1.15; }
-.clr-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 6; display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 8px; min-width: 176px; }
+.clr-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 6; display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 8px; min-width: 176px; background: rgba(8, 9, 10, .97); border: 1px solid rgba(236, 236, 232, .14); box-shadow: 0 18px 44px rgba(0, 0, 0, .55); }
 .clr-menu button { display: flex; align-items: center; gap: 7px; padding: 6px 9px; border-radius: 8px; font-size: 12px; color: var(--text); }
 .clr-menu button:hover { background: rgba(236, 236, 232, .09); }
 .clr-menu .sw { width: 13px; height: 13px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, .28); flex: none; }

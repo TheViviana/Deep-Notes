@@ -59,6 +59,9 @@ export function renderMarkdown(md) {
   return marked.parse(src);
 }
 
+// 镜像层内部使用：把 esc 产生的实体还原回原文（供 hiCode 重新转义，避免双重转义）。
+const unesc = s => String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+
 // —— 行级混合显示：光标所在行显示 Markdown 源码，其余行把 #、**、` 等符号淡到近隐形 ——
 // 视觉上等于「其他位置是阅读模式」，但正文仍是同一个 textarea：双链补全 / 斜杠菜单 / 格式栏 / 打字机模式全部无感。
 // 镜像层与 textarea 逐字对齐（字体等排版属性从 textarea 读取）；textarea 文字透明，光标与选区仍由它绘制。
@@ -85,7 +88,7 @@ export function LineMirror({text, taRef}) {
   // 文本变化重渲染后强制对齐滚动位置（innerHTML 重建会重置 scrollTop）
   useEffect(() => { const el = taRef.current, m = box.current; if (el && m) m.scrollTop = el.scrollTop; });
   const html = useMemo(() => {
-    let fence = false; // 是否处于 ``` 围栏代码块内（跨行状态）
+    let fence = false, lang = ''; // 是否处于 ``` 围栏内（跨行状态）与围栏声明的语言
     return String(text || '').split('\n').map((l, i) => {
       // 逐字保形染色：<span style="color:…"> 与 ==高亮== 的源码字符原样保留（.lm-tag，随行淡显），
       // 只把内容包进真标签上色 —— 源码字符一个不少，镜像与 textarea 永远逐字对齐，
@@ -94,9 +97,14 @@ export function LineMirror({text, taRef}) {
         .replace(/&lt;span style=&quot;color:(#[0-9a-fA-F]{3,8})&quot;&gt;([\s\S]*?)&lt;\/span&gt;/g,
           (_, c, t) => `<span class="lm-tag">&lt;span style=&quot;color:${c}&quot;&gt;</span><span style="color:${c}">${t}</span><span class="lm-tag">&lt;/span&gt;</span>`)
         .replace(/==([^=\n]+)==/g, '<span class="lm-tag">==</span><mark>$1</mark><span class="lm-tag">==</span>');
+      const fenceM = /^\s*```/.exec(l);
       let inner;
       if (i === cur) {
         inner = colored; // 当前行：完整源码形态（代码-文字-代码），与光标、选区逐字对齐
+      } else if (fence && !fenceM) {
+        inner = hiCode(l, lang); // 围栏内：阅读式语法高亮（hiCode 自带转义，零位宽）
+      } else if (fenceM) {
+        inner = esc(l).replace(/^(\s*```)([^\s`]*)/, '<i>$1</i><i>$2</i>'); // 围栏标记与语言名整体淡隐
       } else {
         // 非当前行≈阅读模式：成对语法的内容按语义着色（字重 / 颜色 / 底色，零位宽变化），符号淡到近隐形
         inner = colored
@@ -104,16 +112,18 @@ export function LineMirror({text, taRef}) {
           .replace(/__([^_\n]+)__/g, '<i>__</i><span class="lm-b">$1</span><i>__</i>')
           .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<i>*</i><span class="lm-i">$2</span><i>*</i>')
           .replace(/~~([^~\n]+)~~/g, '<i>~~</i><span class="lm-s">$1</span><i>~~</i>')
-          .replace(/`([^`\n]+)`/g, '<i>`</i><span class="lm-c">$1</span><i>`</i>')
+          .replace(/`([^`\n]+)`/g, (_, t) => '<i>`</i><span class="lm-c">' + hiCode(unesc(t), '') + '</span><i>`</i>')
           .replace(/\[\[([^\]\n]+)\]\]/g, '<i>[[</i><span class="lm-a">$1</span><i>]]</i>')
           .replace(/(^#{1,6}\s?)|(^\s*(?:[-+*>]|\d+[.)])\s?)|(\*\*|\*|__|~~|`{1,3}|\[\[|\]\]|\[|\]|!|\|)/g, '<i>$&</i>');
       }
-      const isFence = /^\s*```/.test(l);
+      if (fenceM) {
+        if (!fence) { fence = true; lang = (l.match(/^\s*```([^\s`]*)/) || ['', ''])[1]; }
+        else { fence = false; lang = ''; }
+      }
       const cls = ['lm-line', i === cur ? 'cur' : '',
-        /^#{1,6}\s/.test(l) ? 'lm-h' : '',
-        /^\s*>/.test(l) ? 'lm-quote' : '',
-        (isFence || fence) ? 'lm-code' : ''].filter(Boolean).join(' ');
-      if (isFence) fence = !fence;
+        !fenceM && !fence && /^#{1,6}\s/.test(l) ? 'lm-h' : '',
+        !fenceM && !fence && /^\s*>/.test(l) ? 'lm-quote' : '',
+        (fenceM || fence) ? 'lm-code' : ''].filter(Boolean).join(' ');
       return `<div class="${cls}">${inner || '&#8203;'}</div>`;
     }).join('');
   }, [text, cur]);
