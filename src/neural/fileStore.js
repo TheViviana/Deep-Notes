@@ -10,12 +10,19 @@ export const capable = () => !!api();
 export function getRoot() {
   try { return localStorage.getItem(ROOT_KEY) || null; } catch { return null; }
 }
-export function setRoot(dir) {
+
+// 写盘失败回调（权限不足 / 磁盘满等），由渲染层注册用来提示用户。
+let errorHandler = null;
+export function setErrorHandler(fn) { errorHandler = fn; }
+
+// 切库 / 停用写回：先把旧队列按各自捕获的旧根目录写完，再作废队列换根目录，
+// 这样 800ms 防抖窗口内的编辑不会丢，也不会写进新库。
+export async function setRoot(dir) {
+  await flush();
   try {
     if (dir) localStorage.setItem(ROOT_KEY, dir);
     else localStorage.removeItem(ROOT_KEY);
   } catch {}
-  // 换库时旧队列里的待写操作路径属于旧库，全部作废，防止误写。
   clearTimeout(timer);
   timer = null;
   queue.clear();
@@ -34,6 +41,33 @@ export function pathOf(kind, item) {
   const dir = DIRS[kind];
   if (!dir) return null;
   return `${dir}/${safe(item.title)}.md`;
+}
+
+// 同名标题会映射到同一个 .md 文件、互相覆盖：对撞车的那组文件名追加 id 短码消歧
+// （每组第一条保持原名）。notes 用自身 path 由调用方保证唯一，不参与。
+const shortId = id => String(id || '').replace(/[^a-zA-Z0-9]/g, '').slice(-6) || 'x';
+export function resolveRels(kind, items) {
+  if (kind === 'notes') return new Map(items.filter(x => x?.id).map(x => [x.id, pathOf(kind, x)]));
+  const counts = new Map();
+  for (const x of items) {
+    if (!x?.id) continue;
+    const rel = pathOf(kind, x);
+    if (rel) counts.set(rel, (counts.get(rel) || 0) + 1);
+  }
+  const seen = new Set();
+  const map = new Map();
+  for (const x of items) {
+    if (!x?.id) continue;
+    let rel = pathOf(kind, x);
+    if (rel && counts.get(rel) > 1) {
+      let dedup = rel.replace(/\.md$/, `--${shortId(x.id)}.md`);
+      while (seen.has(dedup)) dedup = dedup.replace(/\.md$/, `-${shortId(x.id)}.md`);
+      rel = dedup;
+    }
+    if (rel) seen.add(rel);
+    map.set(x.id, rel);
+  }
+  return map;
 }
 
 // 序列化成带 frontmatter 的 Markdown；deepnotes-id 保证再次导入时不产生重复节点。
@@ -72,26 +106,32 @@ function enqueue(op) {
 export async function flush() {
   clearTimeout(timer);
   timer = null;
-  const root = getRoot();
   const v = api();
-  if (!root || !v || !queue.size) return;
+  if (!v || !queue.size) return;
   const ops = [...queue.values()];
   queue.clear();
+  const failed = [];
   for (const op of ops) {
     try {
+      // 用 op 捕获时的根目录：即使中途切库，旧编辑也只写进旧库
+      const root = op.root || getRoot();
+      if (!root) continue;
       if (op.trash) await v.trash(root, op.rel);
       else await v.write(root, op.rel, op.body);
-    } catch {}
+    } catch (err) { failed.push(op.rel); }
   }
+  if (failed.length && errorHandler) errorHandler(failed);
 }
 
 // 同步一条内容到磁盘。item 为 null 表示删除；old 为变更前的旧记录（路径变了会先移走旧文件）。
 // old 与 item 同引用（其他 kind 变化引发的全量 diff）时无需重写。
-export function queueSync(kind, item, old) {
+// relMap 来自 resolveRels：同名标题的内容在此取得消歧后的真实路径，删除/重命名场景必须用它算旧路径。
+export function queueSync(kind, item, old, relMap) {
   const root = getRoot();
   if (!root || !api() || kind === 'ideas') return;
-  const newRel = item ? pathOf(kind, item) : null;
-  const oldRel = old ? pathOf(kind, old) : null;
+  const relOf = x => (relMap && x && relMap.get(x.id)) || pathOf(kind, x);
+  const newRel = item ? relOf(item) : null;
+  const oldRel = old ? relOf(old) : null;
   if (old === item && oldRel === newRel) return;
   if (!item) {
     if (oldRel) enqueue({root, rel: oldRel, trash: true});

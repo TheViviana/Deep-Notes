@@ -59,7 +59,8 @@ ipcMain.handle('vault:trash', async (_e, { root, rel }) => {
     if (!inside(root, full)) return { ok: false, error: '路径越界' };
     const trashDir = path.join(root, '.trash');
     await fsp.mkdir(trashDir, { recursive: true });
-    const dest = path.join(trashDir, Date.now() + '-' + path.basename(full));
+    // 随机后缀避免同毫秒同名互相覆盖（先删的内容也要能找回）
+    const dest = path.join(trashDir, Date.now() + '-' + Math.random().toString(36).slice(2, 6) + '-' + path.basename(full));
     await fsp.rename(full, dest).catch(err => {
       if (err?.code === 'ENOENT') return; // 文件本就不存在，视为已删除
       throw err;

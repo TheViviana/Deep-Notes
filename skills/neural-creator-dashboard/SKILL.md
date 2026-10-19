@@ -1,6 +1,6 @@
 ---
 name: neural-creator-dashboard
-description: 把用户的 Markdown / Obsidian 笔记和作品数据做成「创作神经网络看板」网页——中心光球、五只发光水母模块、点开后触须伞状展开、右侧分析栏，银灰配色，纯前端本地运行。Use when the user wants a neural-network style creator or knowledge dashboard, wants to visualize Obsidian notes, works metrics and bidirectional links, or mentions neural-creator-dashboard.
+description: 把用户的 Markdown / Obsidian 笔记和作品数据做成「创作神经网络看板」网页——中心光球、六只发光水母模块、点开后触须伞状展开、右侧分析栏，银灰配色，纯前端本地运行。Use when the user wants a neural-network style creator or knowledge dashboard, wants to visualize Obsidian notes, works metrics and bidirectional links, or mentions neural-creator-dashboard.
 license: PolyForm-Noncommercial-1.0.0
 metadata:
   repository: https://github.com/luoluo-121/neural-creator-dashboard
@@ -9,7 +9,7 @@ metadata:
 
 # 创作神经网络看板 · Neural Creator Dashboard
 
-帮用户得到一个属于自己的「创作神经网络看板」：首页是一颗光球和五只代表模块（作品库、概念网络、方法库、选题池、创作台）的发光水母；点开水母，触须伞状展开到每一篇内容；点开一篇，右侧弹出它的数据、出链 / 反链 / 双向共振和二度关联。看板是 React + Vite 纯前端项目，默认断网、数据不出本机（仅两个可选插件在联网开关打开时访问网络，见「注意」）。
+帮用户得到一个属于自己的「创作神经网络看板」：首页是一颗光球和六只代表模块（作品库、概念网络、方法库、选题池、创作台、阅读区）的发光水母；点开水母，触须伞状展开到每一篇内容；点开一篇，右侧弹出它的数据、出链 / 反链 / 双向共振和二度关联。看板是 React + Vite 纯前端项目，默认断网、数据不出本机（仅两个可选插件在联网开关打开时访问网络，见「注意」）。
 
 ## 使用许可
 
@@ -40,7 +40,7 @@ npm install
 npm run dev
 ```
 
-打开终端里显示的地址（默认 http://127.0.0.1:5173/ ）。确认首页出现光球和五只水母后，再进行下一步。仓库里的示例数据全部是虚构的。
+打开终端里显示的地址（默认 http://127.0.0.1:5173/ ）。确认首页出现光球和六只水母后，再进行下一步。仓库里的示例数据全部是虚构的。
 
 ### 3. 导入用户自己的笔记
 
@@ -71,7 +71,7 @@ npm run verify
 npm run build
 ```
 
-两条命令都应通过。再在浏览器里确认：首页有光球和五只水母；点「作品库」水母，触须伞状展开；点其中一篇，右侧弹出分析栏；浏览器控制台没有报错。
+两条命令都应通过。再在浏览器里确认：首页有光球和六只水母；点「作品库」水母，触须伞状展开；点其中一篇，右侧弹出分析栏；浏览器控制台没有报错。
 
 ### 6. 部署（可选）
 
@@ -79,8 +79,8 @@ npm run build
 
 ## 注意
 
-- 发光的光球和五只水母是这个看板的核心动效，个性化时可以换视频素材或颜色，但不要删除、隐藏或改成静态图片；改完运行 `npm run verify` 确认核心动效检查通过。
+- 发光的光球和六只水母是这个看板的核心动效，个性化时可以换视频素材或颜色，但不要删除、隐藏或改成静态图片；改完运行 `npm run verify` 确认核心动效检查通过。
 - `src/data/my-data.js` 含用户的个人笔记，已写进 `.gitignore`。不要提交或公开部署它，除非用户明确要求。
-- 选题、草稿、目标只保存在浏览器 localStorage；换了数据但页面还显示旧的选题和草稿时，改 `src/config.js` 里的 `storagePrefix` 或清空该站点的 localStorage。
+- 选题、草稿、目标只保存在浏览器 localStorage；换了数据但页面还显示旧的选题和草稿时，改 `src/config.js` 里的 `storagePrefix` 或清空该站点的 localStorage。Electron 桌面版额外支持文件夹知识库：导入时在原库旁建「<原名> - Deep Notes」副本，编辑经 `src/neural/fileStore.js` 实时写回副本里的 .md，原文件夹不动。
 - 不要往项目里加额外的联网请求或 AI 调用；图谱分析是本地规则。仅有的两个联网出口是可选插件「沉浸式翻译」与「AI 助手」，二者都必须等顶栏联网开关打开才会访问各自服务（AI 助手还需在插件管理里启用，key 只存本机）。
 - 更多开发约定见项目根目录的 `AGENTS.md`。
