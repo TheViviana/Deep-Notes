@@ -1,16 +1,18 @@
 import React, {useCallback, useDeferredValue, useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {seedIdeas, seedDrafts, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
+import {seedIdeas, seedDrafts, seedReadings, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
 import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags} from './worksStore';
 import {pickVaultFolder, parseVault} from './importer';
+import {capable, getRoot, setRoot, queueSync, flush, chooseDir, readVaultFiles, prepareCopy} from './fileStore';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
 import {Home} from './Home';
-import {Library, Drafts, Ideas, Methods} from './pages';
+import {Library, Drafts, Ideas, Methods, Readings} from './pages';
 import {Count} from './Analysis';
 import {Icon} from './icons';
 import {PluginList, useNetwork, usePlugins, TocPanel, parseOutline} from './plugins';
+import {isTranslatable, translateText} from './translate';
 import {aiRuntime, AiFab} from './ai';
 import {T} from './theme';
 import './neural.css';
@@ -50,11 +52,17 @@ function Modal({title, en, onClose, children, wide}) {
 
 // 「阅读全文」弹窗：默认渲染成阅读视图（双链可点击跳转），右上角可切回 Markdown 原文查看符号。
 // 大纲目录（toc 插件开启时）悬浮在右侧：点击滚动到对应标题。
+// 沉浸式翻译（immersive 插件 + 顶栏联网开关，二者都打开才发请求）与文章预览同一套交互。
 function ReadFull({r, graph, onClose, onGo}) {
   const [src, setSrc] = useState(false);
   const box = useRef(null);
   const {disabled} = usePlugins();
-  const tocOn = !disabled.includes('toc'); // 与其他位置一致：大纲目录由 toc 插件开关控制
+  const net = useNetwork().on;
+  const immersive = !disabled.includes('immersive'); // 与其他位置一致：大纲目录由 toc 插件开关控制
+  const tocOn = !disabled.includes('toc');
+  const [trans, setTrans] = useState({phase: 'idle', done: 0, total: 0}); // idle | running | done
+  const [hint, setHint] = useState('');
+  useEffect(() => { setTrans({phase: 'idle', done: 0, total: 0}); setHint(''); }, [src, r]);
   const outline = useMemo(() => src || !tocOn ? [] : parseOutline(r.body), [src, tocOn, r.body]);
   const jumpHead = line => {
     if (!box.current) return;
@@ -78,10 +86,50 @@ function ReadFull({r, graph, onClose, onGo}) {
     const id = byName.get((a.dataset.target || '').toLowerCase());
     if (id) onGo(id);
   };
+  const runTranslate = async () => {
+    if (!net) { setHint('先打开顶栏联网开关 · Turn on the network switch in the top bar first'); return; }
+    const root = box.current;
+    if (!root || trans.phase === 'running') return;
+    setHint('');
+    // 只翻顶层段落（p / 标题 / 列表项），跳过代码块与已是中文的段落
+    const nodes = [...root.querySelectorAll('p, h1, h2, h3, h4, li')]
+      .filter(el => !el.parentElement.closest('p, h1, h2, h3, h4, li'));
+    const queue = nodes.filter(el => isTranslatable(el.textContent));
+    if (!queue.length) { setHint('没有需要翻译的外语段落 · Nothing foreign to translate'); return; }
+    setTrans({phase: 'running', done: 0, total: queue.length});
+    const out = [];
+    let done = 0;
+    const worker = async () => {
+      while (queue.length) {
+        const el = queue.shift();
+        try { out.push([el, await translateText(el.textContent)]); } catch { out.push([el, null]); }
+        done += 1;
+        setTrans(t => ({...t, done}));
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    for (const [el, text] of out) {
+      if (!text || !el.isConnected || el.querySelector('.md-trans')) continue;
+      const span = document.createElement('span');
+      span.className = 'md-trans';
+      span.textContent = text;
+      el.appendChild(span);
+    }
+    setTrans(t => ({...t, phase: 'done'}));
+  };
+  const restoreTrans = () => {
+    box.current?.querySelectorAll('.md-trans').forEach(s => s.remove());
+    setTrans({phase: 'idle', done: 0, total: 0});
+    setHint('');
+  };
   return <Modal title={r.short || r.title} en={KINDS[r.kind].en} onClose={onClose} wide>
     <div className="reader">
       <div className="reader-bar">
-        <p className="quiet">{r.path || KINDS[r.kind].label}</p>
+        <p className="quiet">{r.path || KINDS[r.kind].label}{hint ? ` · ${hint}` : ''}</p>
+        {!src && immersive && <button className="pill ghost av-trans" onClick={trans.phase === 'running' ? undefined : trans.phase === 'done' ? restoreTrans : runTranslate}
+          disabled={trans.phase === 'running'} aria-label="沉浸式翻译 Immersive translate">
+          {trans.phase === 'running' ? `翻译中 ${trans.done}/${trans.total}` : trans.phase === 'done' ? '收起译文 Restore' : '沉浸翻译 Translate'}
+        </button>}
         <button className="pill ghost" onClick={() => setSrc(v => !v)}>
           {src ? <>阅读模式 <em>Rendered</em></> : <>查看原文 <em>Source</em></>}
         </button>
@@ -93,12 +141,12 @@ function ReadFull({r, graph, onClose, onGo}) {
   </Modal>;
 }
 
-const navs = [['home', '工作台', 'Workspace'], ['library', '作品库', 'Works'], ['methods', '方法库', 'Methods'], ['drafts', '创作台', 'Drafts'], ['ideas', '选题池', 'Ideas']];
+const navs = [['home', '工作台', 'Workspace'], ['library', '作品库', 'Works'], ['methods', '方法库', 'Methods'], ['drafts', '创作台', 'Drafts'], ['ideas', '选题池', 'Ideas'], ['readings', '阅读区', 'Readings']];
 // 移动目标的模块名（toast 与弹窗共用）
-const MOVE_ZH = {works: '作品库', methods: '方法库', drafts: '创作台', ideas: '选题池'};
-const MOVE_EN = {works: 'Works', methods: 'Methods', drafts: 'Drafts', ideas: 'Ideas'};
+const MOVE_ZH = {works: '作品库', methods: '方法库', drafts: '创作台', ideas: '选题池', readings: '阅读区'};
+const MOVE_EN = {works: 'Works', methods: 'Methods', drafts: 'Drafts', ideas: 'Ideas', readings: 'Readings'};
 // 各类内容的常驻模块（移动弹窗里禁用当前所在项）
-const HOME_OF = {post: 'works', note: 'methods', draft: 'drafts', idea: 'ideas'};
+const HOME_OF = {post: 'works', note: 'methods', draft: 'drafts', idea: 'ideas', reading: 'readings'};
 const initialPage = () => { const h = location.hash.slice(1); return navs.some(n => n[0] === h) ? h : 'home'; };
 
 // 联网开关：默认断网；打开后仅「沉浸式翻译」插件会访问翻译服务，其余功能依然全本地。
@@ -158,11 +206,14 @@ function App() {
   const [snap, setSnap] = useSaved(CONFIG.storagePrefix + '-snapshot-v1', snapshot);
   const [kbConcepts, setKbConcepts] = useSaved(CONFIG.storagePrefix + '-concepts-v1', CONCEPTS);
   const [notes, setNotes] = useSaved(CONFIG.storagePrefix + '-notes-v1', SEED_NOTES);
+  const [readings, setReadings] = useSaved(CONFIG.storagePrefix + '-readings-v1', seedReadings);
   const [methSel, setMethSel] = useState(null);
   const [active, setActive] = useState(() => drafts[0]?.id);
   const [focus, setFocus] = useState({mod: null, sel: null});
   const [libSel, setLibSel] = useState(works[1]?.id ?? works[0]?.id);
   const [openArticle, setOpenArticle] = useState(null);
+  const [readSel, setReadSel] = useState(null);
+  const [readOpen, setReadOpen] = useState(null);
   const [editingWork, setEditingWork] = useState(null);
   const [workIsNew, setWorkIsNew] = useState(false);
   const [modal, setModal] = useState(null);
@@ -172,11 +223,36 @@ function App() {
   const reduced = useMemo(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches, []);
   const slowWorks = useDeferredValue(works);
   const slowDrafts = useDeferredValue(drafts);
-  const graph = useMemo(() => buildGraph({works: slowWorks, notes, ideas, drafts: slowDrafts, concepts: kbConcepts}), [slowWorks, notes, ideas, slowDrafts, kbConcepts]);
+  const graph = useMemo(() => buildGraph({works: slowWorks, notes, ideas, drafts: slowDrafts, readings, concepts: kbConcepts}), [slowWorks, notes, ideas, slowDrafts, readings, kbConcepts]);
   const layout = useMemo(() => forceLayout(graph), [graph]);
 
   useEffect(() => { history.replaceState(null, '', page === 'home' ? location.pathname : '#' + page); window.scrollTo({top: 0}); }, [page]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2800); return () => clearTimeout(t); }, [toast]);
+
+  // —— 桌面版文件夹知识库：内容变化全局 diff 后写回 .md（导入时已在原库旁建好副本并 setRoot） ——
+  // 不侵入各处 CRUD：每次渲染对比上一份快照，新增/修改 → 写文件，删除 → 移入 .trash。
+  const prevContent = useRef(null);
+  useEffect(() => {
+    const cur = {works, notes, drafts, readings};
+    const prev = prevContent.current;
+    prevContent.current = cur;
+    if (!capable() || !getRoot()) return;
+    if (!prev) return; // 首次渲染只记录快照；导入流程会主动全量写入
+    for (const kind of ['works', 'notes', 'drafts', 'readings']) {
+      const pv = prev[kind], cv = cur[kind];
+      const pmap = new Map(pv.map(x => [x.id, x]));
+      const cmap = new Map(cv.map(x => [x.id, x]));
+      for (const x of cv) queueSync(kind, x, pmap.get(x.id) || null);
+      for (const x of pv) if (!cmap.has(x.id)) queueSync(kind, null, x);
+    }
+  }, [works, notes, drafts, readings]);
+  // 退出前尽力把防抖队列写完（800ms 内关闭窗口的场景）
+  useEffect(() => {
+    if (!capable()) return;
+    const bye = () => { flush(); };
+    window.addEventListener('beforeunload', bye);
+    return () => window.removeEventListener('beforeunload', bye);
+  }, []);
 
   const close = useCallback(() => setModal(null), []);
   function newDraft(title = '未命名草稿', body = '', source) {
@@ -237,7 +313,26 @@ function App() {
     setMethSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
     setToast('方法笔记已删除 · Note deleted');
   }
-  // —— 跨模块移动：文章 / 笔记 / 草稿 / 选题 四类内容互通，标题与正文一起带走，可随时移回 ——
+  // —— 阅读区 CRUD：收藏别人写好的内容，可批注编辑；标题/作者/来源/日期 ——
+  function newReading() {
+    const id = 'reading-' + Date.now();
+    setReadings(rs => [{id, title: '新建阅读', author: '', source: '', date: nowStamp().slice(0, 10), body: ''}, ...rs]);
+    setReadSel(id); setReadOpen(id); setPage('readings');
+    setToast('阅读条目已创建，粘贴或写入正文 · Reading created');
+  }
+  function updateReading(id, patch) {
+    setReadings(rs => rs.map(r => r.id === id ? {...r, ...patch, updatedAt: nowStamp()} : r));
+  }
+  function deleteReading(id) {
+    const r = readings.find(x => x.id === id);
+    if (!window.confirm(`删除阅读「${r?.title || '未命名阅读'}」？正文与批注会一起删除，此操作只影响当前浏览器。`)) return;
+    const rest = readings.filter(x => x.id !== id);
+    setReadings(rest);
+    setReadSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
+    setReadOpen(o => o === id ? null : o);
+    setToast('阅读条目已删除 · Reading deleted');
+  }
+  // —— 跨模块移动：文章 / 笔记 / 草稿 / 选题 / 阅读 五类内容互通，标题与正文一起带走，可随时移回 ——
   // id 可能带图谱前缀（如 'note:xxx'，来自分析栏的节点），也可能是原始 id，统一剥掉前缀再查找
   function moveContent(fromKind, rawId, toKind) {
     if (fromKind === toKind) return;
@@ -257,6 +352,10 @@ function App() {
       const d = drafts.find(x => x.id === id); if (!d) return;
       moved = {title: d.title, body: d.body || ''};
       setDrafts(ds => { const rest = ds.filter(x => x.id !== id); setActive(a => a === id ? rest[0]?.id : a); return rest; });
+    } else if (fromKind === 'reading') {
+      const r = readings.find(x => x.id === id); if (!r) return;
+      moved = {title: r.title, body: r.body || ''};
+      setReadings(rs => { const rest = rs.filter(x => x.id !== id); setReadOpen(o => o === id ? null : o); return rest; });
     } else if (fromKind === 'idea') {
       const it = ideas.find(x => String(x.id) === String(id)); if (!it) return;
       moved = {title: it.title, body: it.note || ''};
@@ -267,6 +366,7 @@ function App() {
     else if (toKind === 'methods') setNotes(ns => [{id: 'note-' + Date.now(), title: moved.title, path: `05-方法库 methods/新建/${moved.title}.md`, body: moved.body}, ...ns]);
     else if (toKind === 'drafts') setDrafts(ds => [{id: 'draft-' + Date.now(), title: moved.title, body: moved.body, source: null}, ...ds]);
     else if (toKind === 'ideas') setIdeas(is => [...is, {id: Math.max(0, ...is.map(x => Number(x.id) || 0)) + 1, title: moved.title, platform: '', priority: '中', status: '待写', note: moved.body.slice(0, 120)}]);
+    else if (toKind === 'readings') setReadings(rs => [{id: 'reading-' + Date.now(), title: moved.title, author: '', source: '', date: stamp.slice(0, 10), body: moved.body}, ...rs]);
     setModal(null);
     setToast(`已移动到${MOVE_ZH[toKind]} · Moved to ${MOVE_EN[toKind]}`);
   }
@@ -302,6 +402,7 @@ function App() {
     if (a.type === 'editIdea') editIdea(a.idea);
     if (a.type === 'ideaToDraft') toDraft(a.idea);
     if (a.type === 'openArticle') { setLibSel(a.id); setOpenArticle(a.id); if (page !== 'library') setPage('library'); }
+    if (a.type === 'openReading') { setReadSel(a.id); setReadOpen(a.id); if (page !== 'readings') setPage('readings'); }
     if (a.type === 'editWork') { const w = works.find(x => x.id === a.id); if (w) { setEditingWork(w); setWorkIsNew(false); setModal('work'); } }
     // 未创建的 [[双链]] 一键创建：文章走「编辑信息」弹窗，方法笔记就地新建并跳到方法库
     if (a.type === 'newFromGhost') {
@@ -416,31 +517,52 @@ function App() {
   // —— 知识库导入：软件内选文件夹解析 Markdown，替换当前数据（同样只存本浏览器） ——
   function adoptData(data, msg) {
     setWorks(data.works); setNotes(data.notes ?? SEED_NOTES); setIdeas(data.ideas); setDrafts(data.drafts);
+    setReadings(data.readings ?? seedReadings);
     setSnap(data.snapshot); setKbConcepts(data.concepts);
     setLibSel(data.works[0]?.id ?? null); setActive(data.drafts[0]?.id);
+    setReadSel(null); setReadOpen(null);
     setFocus({mod: null, sel: null}); setOpenArticle(null); setPage('home');
     setModal(null); setToast(msg);
   }
   async function importVault(target = 'auto') {
     setModal(null);
-    const files = await pickVaultFolder();
-    if (!files) return;
+    // 桌面版经主进程选目录读文件；网页版走浏览器目录选择器。两种来源都转成同一套 File 列表解析。
+    let files, srcDir = null;
+    if (capable()) {
+      srcDir = await chooseDir();
+      if (!srcDir) return;
+      try { files = readVaultFiles(srcDir, await window.deepnotes.vault.read(srcDir)); }
+      catch { setToast('读取文件夹失败 · Failed to read folder'); return; }
+    } else {
+      files = await pickVaultFolder();
+      if (!files) return;
+    }
     let data;
     try { data = await parseVault(files, target); } catch { setToast('解析失败，请确认选择的是 Markdown 文件夹 · Parse failed'); return; }
     if (!data.counts.all) { setToast('所选文件夹里没有 Markdown 笔记 · No markdown notes'); return; }
-    const extra = Object.entries(data.truncated).filter(([, n]) => n).map(([k, n]) => ({files: '文件', works: '文章', notes: '笔记'}[k] + ` 截断 ${n}`)).join('、');
+    const extra = Object.entries(data.truncated).filter(([, n]) => n).map(([k, n]) => ({files: '文件', works: '文章', notes: '笔记', readings: '阅读'}[k] + ` 截断 ${n}`)).join('、');
     const where = target === 'auto'
-      ? `文章 ${data.counts.works}、方法笔记 ${data.counts.notes}、选题 ${data.counts.ideas}、草稿 ${data.counts.drafts}`
-      : `全部 ${data.counts.all} 个文件将作为「${{works: '作品库', methods: '方法库', ideas: '选题池', drafts: '创作台'}[target]}」的内容导入`;
-    const ok = window.confirm(`将从「${data.vault}」导入：${where}${extra ? '（' + extra + '）' : ''}。\n\n这会替换当前浏览器里的全部文章、选题和草稿，确定继续吗？`);
-    if (ok) adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}`);
+      ? `文章 ${data.counts.works}、方法笔记 ${data.counts.notes}、选题 ${data.counts.ideas}、草稿 ${data.counts.drafts}、阅读 ${data.counts.readings || 0}`
+      : `全部 ${data.counts.all} 个文件将作为「${{works: '作品库', methods: '方法库', ideas: '选题池', drafts: '创作台', readings: '阅读区'}[target]}」的内容导入`;
+    const srcName = srcDir ? srcDir.replace(/\/+$/, '').split('/').pop() : data.vault;
+    const desktopNote = srcDir ? `\n\n桌面版会在「${srcName}」旁新建「${srcName} - Deep Notes」副本作为你的知识库文件夹：之后的编辑会实时写回副本里的 .md 文件，原文件夹内容保持不变。` : '';
+    const ok = window.confirm(`将从「${srcName}」导入：${where}${extra ? '（' + extra + '）' : ''}。${desktopNote}\n\n这会替换当前浏览器里的全部文章、选题和草稿，确定继续吗？`);
+    if (!ok) return;
+    let copyDir = null;
+    if (srcDir) {
+      const copy = await prepareCopy(srcDir);
+      if (copy?.ok) { setRoot(copy.dir); copyDir = copy.dir; }
+      else { setRoot(null); setToast('无法创建知识库副本，本次导入只保存在浏览器 · Copy failed'); }
+    }
+    adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${copyDir ? ` · 已写入「${copyDir.replace(/\/+$/, '').split('/').pop()}」` : ''}`);
   }
   function resetToSample() {
     if (!window.confirm('切回虚构示例数据？当前浏览器里的文章、选题和草稿会被清空替换。')) return;
-    adoptData({works: seedWorks(), notes: SEED_NOTES, ideas: seedIdeas, drafts: seedDrafts, snapshot, concepts: CONCEPTS}, '已切回示例数据 · Sample data restored');
+    setRoot(null); // 桌面版停用文件夹写回；盘上已有的知识库副本原样保留
+    adoptData({works: seedWorks(), notes: SEED_NOTES, ideas: seedIdeas, drafts: seedDrafts, readings: seedReadings, snapshot, concepts: CONCEPTS}, '已切回示例数据 · Sample data restored');
   }
 
-  const openInGraph = id => { const n = graph.index.get(id); const mod = {post: 'works', note: 'methods', idea: 'ideas', draft: 'drafts', concept: 'concepts'}[n?.kind]; if (mod) { setFocus({mod, sel: id}); setPage('home'); } };
+  const openInGraph = id => { const n = graph.index.get(id); const mod = {post: 'works', note: 'methods', idea: 'ideas', draft: 'drafts', reading: 'readings', concept: 'concepts'}[n?.kind]; if (mod) { setFocus({mod, sel: id}); setPage('home'); } };
   const s = stats(graph);
 
   return <div className={`neural page-${page}`}>
@@ -467,6 +589,7 @@ function App() {
       {page === 'methods' && <Methods graph={graph} notes={notes} setNotes={setNotes} selected={methSel} setSelected={setMethSel} onGo={openInGraph} onNew={addNote} onDelete={deleteNote} onUpdate={updateNote} onMove={id => setModal({move: {kind: 'note', id}})}/>}
       {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onGo={openInGraph} works={works} notes={notes} onMove={id => setModal({move: {kind: 'draft', id}})}/>}
       {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onNew={() => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
+      {page === 'readings' && <Readings graph={graph} readings={readings} selected={readSel} setSelected={setReadSel} openReading={readOpen} setOpenReading={setReadOpen} onGo={openInGraph} onAction={onAction} onNew={newReading} onUpdate={updateReading} onDelete={deleteReading}/>}
     </main>
 
     <footer className="site-foot">
@@ -486,6 +609,7 @@ function App() {
         </div>
         <p>知识库 <em>Vault</em>：<strong>{snap.account}</strong> · 导入日期 <em>Imported</em>：{snap.capturedAt}</p>
         <p>数据来源 <em>Source</em>：{snap.source}{snap.publishedFrom ? `；内容时间跨度 ${snap.publishedFrom} — ${snap.publishedTo}` : ''}。</p>
+        {capable() && getRoot() && <p>文件夹知识库 <em>Vault folder</em>：<code>{getRoot()}</code><br/>编辑会实时写回此文件夹里的 .md 文件，被删除的内容移入 <code>.trash</code>；网页版则只保存在浏览器里。</p>}
         <hr/>
         <h3>图谱怎么来的 <em>How the graph is built</em></h3>
         <p>{snap.source === '导入自本地笔记' ? '全部由导入的本地笔记在浏览器中推导，不读取选择范围之外的文件：' : <>全部由 <code>src/data/sample.js</code> 里的资料在浏览器中推导，不读取外部 Obsidian 仓库：</>}</p>
@@ -496,7 +620,7 @@ function App() {
           <li><b>双向共振 Resonance</b>：两条内容共同提及 ≥2 个概念，或选题与草稿互相记录。</li>
           <li><b>选题来源 Source</b>：草稿记录来源选题；选题状态为「已转草稿」时反向成立。</li>
         </ul>
-        <p>作品库：{works.length} 篇文章<b>保存在此浏览器</b>，可自由新建、编辑、删除；导入知识库会整体替换，命令行导入（npm run import）仍然可用。</p>
+        <p>作品库：{works.length} 篇文章<b>保存在此浏览器</b>{capable() && getRoot() ? '，并实时写回上面的知识库文件夹' : ''}，可自由新建、编辑、删除；导入知识库会整体替换，命令行导入（npm run import）仍然可用。</p>
         <p>当前：{s.content} 条内容 · {s.links} 条连接 · {s.mutual} 组双向 · {s.ghosts} 个未创建双链。</p>
         <p className="quiet">图谱分析是本地规则检索，未调用 AI。选题、草稿与目标保存在当前浏览器，不写入 Obsidian、不发布到平台。<em>Local rules only · no AI · nothing is published.</em></p>
       </div>
@@ -511,6 +635,7 @@ function App() {
           <button className="pill" onClick={() => importVault('methods')}><Icon name="methods" size={14}/>全部到方法库 <em>As notes</em></button>
           <button className="pill" onClick={() => importVault('ideas')}><Icon name="idea" size={14}/>全部到选题池 <em>As ideas</em></button>
           <button className="pill" onClick={() => importVault('drafts')}><Icon name="draft" size={14}/>全部到创作台 <em>As drafts</em></button>
+          <button className="pill" onClick={() => importVault('readings')}><Icon name="book" size={14}/>全部到阅读区 <em>As readings</em></button>
         </div>
         <p className="quiet">「按文件夹自动分类」会根据文件夹名识别（作品 / 草稿 / 选题 / 方法），识别不了的一律放进方法库。<em>Unrecognized folders go to Methods.</em></p>
       </div>
@@ -596,7 +721,7 @@ function App() {
           <div className="form-actions import-targets">
             {Object.entries(MOVE_ZH).map(([k, zh]) =>
               <button key={k} className="pill" disabled={k === cur} onClick={() => moveContent(kind, id, k)}>
-                <Icon name={k === 'works' ? 'works' : k === 'methods' ? 'methods' : k === 'drafts' ? 'draft' : 'idea'} size={14}/>{zh} <em>{MOVE_EN[k]}</em>
+                <Icon name={{works: 'works', methods: 'methods', drafts: 'draft', ideas: 'idea', readings: 'book'}[k]} size={14}/>{zh} <em>{MOVE_EN[k]}</em>
               </button>)}
           </div>
           <p className="quiet">当前所在：{MOVE_ZH[cur]}。<em>Currently in {MOVE_EN[cur]}.</em></p>

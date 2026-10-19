@@ -1,7 +1,7 @@
 // 示例数据完整性测试：src/data 是看板与导入的权威字段说明，字段缺失会导致页面静默异常。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {snapshot, posts, postContent, notes, seedIdeas, seedDrafts, concepts} from '../src/data/index.js';
+import {snapshot, posts, postContent, notes, seedIdeas, seedDrafts, seedReadings, concepts} from '../src/data/index.js';
 
 const METRICS = ['views', 'likes', 'comments', 'saves', 'shares', 'follows', 'impressions', 'ctr', 'duration'];
 
@@ -62,6 +62,15 @@ test('seedDrafts：body 为字符串，source 为选题 id 或 null', () => {
   }
 });
 
+test('seedReadings：字段齐全，日期为 YYYY-MM-DD', () => {
+  assert.ok(seedReadings.length > 0);
+  for (const r of seedReadings) {
+    assert.ok(r.id && r.title && typeof r.body === 'string', `阅读「${r.title || r.id}」字段缺失`);
+    assert.match(String(r.date), /^\d{4}-\d{2}-\d{2}$/, `阅读「${r.title}」日期应为 YYYY-MM-DD`);
+    assert.ok(typeof r.author === 'string' && typeof r.source === 'string');
+  }
+});
+
 test('concepts：[概念名, [关键词…]] 结构', () => {
   assert.ok(Array.isArray(concepts) && concepts.length > 0);
   for (const c of concepts) {
@@ -70,6 +79,6 @@ test('concepts：[概念名, [关键词…]] 结构', () => {
 });
 
 test('示例数据为虚构内容：不应包含真实个人信息标记', () => {
-  const all = JSON.stringify({posts, notes, seedIdeas, seedDrafts});
+  const all = JSON.stringify({posts, notes, seedIdeas, seedDrafts, seedReadings});
   assert.ok(!/@(gmail|qq|163|outlook)\./i.test(all), '示例数据不应包含真实邮箱');
 });

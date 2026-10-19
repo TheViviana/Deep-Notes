@@ -22,13 +22,16 @@ const resWorks = [
   {id: 'w2', title: '文章乙', date: '2026-01-01 09:00', body: 'x 与 y 再次出现。', tags: ['alpha', 'beta']}
 ];
 
-test('core 节点与五类内容节点存在，模块归属正确', () => {
-  const g = buildGraph({works: resWorks, notes, ideas, drafts, concepts});
+test('core 节点与内容节点存在，模块归属正确', () => {
+  const g = buildGraph({works: resWorks, notes, ideas, drafts, readings: [{id: 'r1', title: '阅读一', author: '某作者', body: '引用 [[方法一]]'}], concepts});
   assert.ok(g.nodes.some(n => n.id === 'core'));
-  for (const k of ['post', 'note', 'idea', 'draft', 'concept'])
+  for (const k of ['post', 'note', 'idea', 'draft', 'reading', 'concept'])
     assert.ok(g.nodes.some(n => n.kind === k), `缺 ${k} 类节点`);
   assert.equal(moduleOf(g.index.get('post:w1'))?.id, 'works');
   assert.equal(moduleOf(g.index.get('note:n1'))?.id, 'methods');
+  assert.equal(moduleOf(g.index.get('reading:r1'))?.id, 'readings');
+  assert.ok(g.nodes.some(n => n.id === 'f:readings'), '缺阅读区目录节点');
+  assert.ok(g.links.some(l => l.kind === 'wiki' && l.s === 'reading:r1' && l.t === 'note:n1'), '阅读正文的双链应解析');
 });
 
 test('[[双链]]：按标题与路径文件名解析为实链', () => {
@@ -90,6 +93,6 @@ test('双链别名语法 [[目标|别名]] 只按目标解析', () => {
   assert.ok(g.links.some(l => l.kind === 'wiki' && l.s === 'post:w1' && l.t === 'note:n1'));
 });
 
-test('CONTENT 集合覆盖四种内容类型', () => {
-  for (const k of ['post', 'note', 'idea', 'draft']) assert.ok(CONTENT.has(k));
+test('CONTENT 集合覆盖五种内容类型', () => {
+  for (const k of ['post', 'note', 'idea', 'draft', 'reading']) assert.ok(CONTENT.has(k));
 });

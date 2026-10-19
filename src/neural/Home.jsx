@@ -8,7 +8,7 @@ import {CONFIG} from '../config';
 import {usePlugins, linkCheck} from './plugins';
 import {AiChip, AiDockChat, aiSend} from './ai';
 
-const FLIP = {works: 1, concepts: -1, methods: -1, ideas: -1, drafts: 1};
+const FLIP = {works: 1, concepts: -1, methods: -1, ideas: -1, drafts: 1, readings: 1};
 export const MOD_STYLE = Object.fromEntries(Object.entries(T.modules).map(([id, m]) => [id, {...m, flip: FLIP[id]}]));
 
 export const split = n => ({out: n.out - n.mutual, back: n.in - n.mutual, both: n.mutual});
@@ -30,7 +30,8 @@ function moduleSummary(graph, m) {
     concepts: () => [fmt(items.reduce((s, n) => s + n.in, 0)), '提及', 'mentions'],
     methods: () => [graph.links.filter(l => l.kind === 'wiki').length, '双链', 'wikilinks'],
     ideas: () => [items.filter(n => n.idea.status !== '已转草稿').length, '待写', 'to write'],
-    drafts: () => [fmt(items.reduce((s, n) => s + (n.body || '').length, 0)), '字', 'chars']
+    drafts: () => [fmt(items.reduce((s, n) => s + (n.body || '').length, 0)), '字', 'chars'],
+    readings: () => [new Set(items.map(n => n.reading?.author).filter(Boolean)).size, '作者', 'authors']
   }[m.id]();
   return {count: items.length, sub};
 }
@@ -42,6 +43,7 @@ function itemMeta(n) {
     case 'note': return [['出链', 'Out', d.out], ['反链', 'In', d.back], ['↔', '', d.both]];
     case 'idea': return [[n.idea.priority, 'Priority', ''], [n.idea.status, '', ''], ['↔', '', d.both]];
     case 'draft': return [['字', 'Chars', fmt((n.body || '').length)], ['↔', '', d.both]];
+    case 'reading': return [['作者', 'Author', n.reading?.author || '—'], ['↔', '', d.both]];
     case 'concept': return [['提及', 'Mentions', n.in], ['↔', '', d.both]];
     default: return [];
   }
@@ -67,17 +69,17 @@ function targets(L, t) {
     res.orb = {x: 40, y: 156, s: 86};
     MODULES.forEach((m, i) => {
       const sel = m.id === L.mod, k = slotOf(L.mod, m.id);
-      res.jelly[m.id] = {x: 104 + k * (W - 136) / 4, y: 152 + swim * 4 * Math.sin(t * .9 + i * 2), s: sel ? 76 : 54, o: sel ? 1 : .55, tilt: swim * 3 * Math.sin(t * .6 + i)};
+      res.jelly[m.id] = {x: 104 + k * (W - 136) / (MODULES.length - 1), y: 152 + swim * 4 * Math.sin(t * .9 + i * 2), s: sel ? 76 : 54, o: sel ? 1 : .55, tilt: swim * 3 * Math.sin(t * .6 + i)};
     });
     const n = L.items.length, gap = clamp((H - 330) / Math.max(n - 1, 1), 22, 54);
     res.fan = {x: 34, y0: 286, gap};
   } else {
     const ox = Math.max(124, W * .09), cy = H * .53;
     res.orb = {x: ox, y: cy, s: 178};
-    const colX = ox + 158, gap = Math.min(122, (H - 150) / 5);
+    const colX = ox + 158, gap = Math.min(122, (H - 150) / MODULES.length);
     MODULES.forEach((m, i) => {
       const sel = m.id === L.mod, k = slotOf(L.mod, m.id);
-      res.jelly[m.id] = {x: colX + (sel ? 16 : 0), y: cy + (k - 2) * gap + swim * 5 * Math.sin(t * .9 + i * 2), s: sel ? 128 : 92, o: sel ? 1 : .6, tilt: swim * 3 * Math.sin(t * .6 + i)};
+      res.jelly[m.id] = {x: colX + (sel ? 16 : 0), y: cy + (k - (MODULES.length - 1) / 2) * gap + swim * 5 * Math.sin(t * .9 + i * 2), s: sel ? 128 : 92, o: sel ? 1 : .6, tilt: swim * 3 * Math.sin(t * .6 + i)};
     });
     // 伞状条目以右侧分析栏为基准排在它左边约 90px 处（条目最宽约 310px），触须拉长、画面左右均衡；
     // 模块层和打开笔记后位置相同，右侧栏滑入时伞不跳动；右缘留足余量，长文件名不会滑进分析栏底下
@@ -90,10 +92,11 @@ function targets(L, t) {
   return res;
 }
 
-// 选中的模块排在列的正中间（第 2 格），其余模块按原顺序分列上下，触须从中间向上下对称展开。
+// 选中的模块排在列的正中间，其余模块按原顺序分列上下，触须从中间向上下对称展开（偶数个时居中稍偏上）。
 function slotOf(selId, id) {
   const others = MODULES.filter(m => m.id !== selId).map(m => m.id);
-  const order = [others[0], others[1], selId, others[2], others[3]];
+  const mid = Math.floor(others.length / 2);
+  const order = [...others.slice(0, mid), selId, ...others.slice(mid)];
   const k = order.indexOf(id);
   return k < 0 ? MODULES.findIndex(m => m.id === id) : k;
 }

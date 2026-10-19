@@ -8,7 +8,7 @@ const pad = n => String(n).padStart(2, '0');
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 
 // 容量上限：超出时按日期/顺序截断，并在结果里报告，避免图谱节点过多导致卡顿。
-const CAPS = {works: 40, notes: 80, files: 600};
+const CAPS = {works: 40, notes: 80, readings: 60, files: 600};
 const SKIP_DIRS = new Set(['.obsidian', '.trash', '.git', 'node_modules']);
 const isMd = name => /\.(md|markdown)$/i.test(name);
 const clean = body => String(body).replace(/\r/g, '').trim();
@@ -54,9 +54,10 @@ function tagsOf(fm, body) {
   return [...new Set(list.map(t => t.replace(/^#/, '').trim()).filter(t => t && !/^\d+$/.test(t)))].slice(0, 12);
 }
 
-// —— 分类：作品 / 草稿 / 选题 / 方法笔记，按文件夹名识别；未识别的全部作为方法笔记 ——
+// —— 分类：作品 / 草稿 / 选题 / 方法笔记 / 阅读，按文件夹名识别；未识别的全部作为方法笔记 ——
 const RULES = [
   ['works', /(作品|works?$|published|已发布)/i],
+  ['readings', /(阅读|readings?$|书架|书摘|稍后读)/i],
   ['drafts', /(草稿|创作台|drafts?$|正在写|写作中)/i],
   ['ideas', /(选题|ideas?$|灵感)/i],
   ['methods', /(方法|methods?$|模板|templates?$|流程|workflow|知识|卡片|notes?$)/i]
@@ -97,7 +98,7 @@ export async function parseVault(fileList, target = 'auto') {
     return {...x, fm, body};
   }));
 
-  const bucket = {works: [], methods: [], ideas: [], drafts: []};
+  const bucket = {works: [], methods: [], ideas: [], drafts: [], readings: []};
   for (const x of read) {
     const title = String(pick(x.fm, ['title', '标题', 'name']) || x.file.name.replace(/\.(md|markdown)$/i, '')).trim();
     bucket[x.kind].push({...x, title});
@@ -138,6 +139,15 @@ export async function parseVault(fileList, target = 'auto') {
     return {id: 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null};
   });
 
+  // 阅读区：别人写好的内容（作者 / 来源可选，写在 frontmatter 里）。
+  const readings = bucket.readings.map((x, i) => ({
+    id: 'reading-' + (i + 1), title: x.title,
+    author: String(pick(x.fm, ['author', '作者', 'by']) || ''),
+    source: String(pick(x.fm, ['source', '来源', '出处', 'url', '链接']) || ''),
+    date: dateOf(pick(x.fm, ['date', '收藏日期', '发布日期', 'published']), x.file.lastModified).slice(0, 10),
+    body: clean(x.body)
+  })).sort((a, b) => b.date.localeCompare(a.date)).slice(0, CAPS.readings);
+
   // 概念词：至少在两条内容里出现的话题标签，取出现最多的 20 个（与导入脚本同规则）。
   const count = new Map();
   for (const t of [...works.flatMap(w => w.tags), ...noteTags]) count.set(t, (count.get(t) || 0) + 1);
@@ -151,12 +161,13 @@ export async function parseVault(fileList, target = 'auto') {
 
   return {
     vault: (fileList[0]?.webkitRelativePath || '').split('/')[0] || '所选文件夹',
-    works, notes, ideas, drafts, snapshot, concepts,
-    counts: {all: read.length, works: works.length, notes: notes.length, ideas: ideas.length, drafts: drafts.length},
+    works, notes, ideas, drafts, readings, snapshot, concepts,
+    counts: {all: read.length, works: works.length, notes: notes.length, ideas: ideas.length, drafts: drafts.length, readings: readings.length},
     truncated: {
       files: all.length > CAPS.files ? all.length - CAPS.files : 0,
       works: bucket.works.length > CAPS.works ? bucket.works.length - CAPS.works : 0,
-      notes: bucket.methods.length > CAPS.notes ? bucket.methods.length - CAPS.notes : 0
+      notes: bucket.methods.length > CAPS.notes ? bucket.methods.length - CAPS.notes : 0,
+      readings: bucket.readings.length > CAPS.readings ? bucket.readings.length - CAPS.readings : 0
     }
   };
 }
