@@ -11,7 +11,7 @@ const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.g
 const CAPS = {works: 40, notes: 80, files: 600};
 const SKIP_DIRS = new Set(['.obsidian', '.trash', '.git', 'node_modules']);
 const isMd = name => /\.(md|markdown)$/i.test(name);
-const clean = body => String(body).replace(/\r/g, '').trim().slice(0, 6000);
+const clean = body => String(body).replace(/\r/g, '').trim();
 const unquote = s => String(s).trim().replace(/^['"]|['"]$/g, '');
 
 // —— frontmatter：key: value、key: [a, b]、以及「- 项」列表（与导入脚本同一套简化规则） ——
