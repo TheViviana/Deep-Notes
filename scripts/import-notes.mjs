@@ -103,7 +103,7 @@ function tagsOf(fm, body) {
   for (const m of body.matchAll(/(?:^|\s)#([^\s#，。,.!?！？、；;:：()（）[\]]+)/g)) list.push(m[1]);
   return [...new Set(list.map(t => t.replace(/^#/, '').trim()).filter(t => t && !/^\d+$/.test(t)))].slice(0, 12);
 }
-const clean = body => body.replace(/\r/g, '').trim().slice(0, 6000);
+const clean = body => body.replace(/\r/g, '').trim();
 
 // —— 分类 ——
 const RULES = [

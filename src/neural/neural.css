@@ -446,7 +446,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .toc-panel p { margin: 0 4px 6px; font-size: 10.5px; color: var(--muted); }
 .toc-panel p em { font-style: normal; opacity: .7; }
 .toc-list { overflow: auto; display: grid; gap: 1px; align-content: start; min-height: 0; }
-.toc-list button { border: 0; background: none; text-align: left; font-size: 11.5px; line-height: 1.45; color: var(--text-2); padding: 3px 6px; border-radius: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: calc(6px + var(--lv) * 10px); transition: background .15s, color .15s; }
+.toc-list button { border: 0; background: none; text-align: left; font-size: 11.5px; line-height: 1.45; color: var(--text-2); padding: 3px 6px; border-radius: 6px; white-space: normal; overflow-wrap: anywhere; padding-left: calc(6px + var(--lv) * 10px); transition: background .15s, color .15s; }
 .toc-list button:hover { background: rgba(255, 255, 255, .06); color: var(--text); }
 .toc-list button.on { background: rgba(212, 175, 110, .14); color: var(--text); }
 .editor-area:has(.toc-panel) textarea { padding-right: 190px; }
