@@ -455,7 +455,17 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .editor-area.hybrid textarea::selection, .editor-main.hybrid textarea::selection { color: var(--text); background: rgba(212, 175, 110, .22); }
 .line-mirror { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; color: var(--text); }
 .lm-line { min-height: 1.9em; }
-.lm-line i { font-style: normal; opacity: .13; }
+.lm-line i { font-style: normal; opacity: .07; }
+.lm-tag { opacity: .07; }
+.lm-line.cur .lm-tag { opacity: 1; }
+.lm-line.lm-h { font-weight: 600; }
+.lm-line.lm-quote { color: var(--text-2); box-shadow: inset 2px 0 0 var(--gold); }
+.lm-line.lm-code { background: rgba(236, 236, 232, .05); }
+.lm-line .lm-b { font-weight: 600; }
+.lm-line .lm-i { font-style: italic; }
+.lm-line .lm-s { text-decoration: line-through; }
+.lm-line .lm-c { background: rgba(255, 255, 255, .07); border-radius: 4px; }
+.lm-line .lm-a { color: var(--cyan); }
 .editor-area:has(.toc-panel) .line-mirror { padding-right: 190px; }
 /* —— 代码高亮（零依赖极简版）：颜色值 / 字符串 / 注释 / 关键字 / 数字 / 属性 / 标签 —— */
 .md-preview .tk-c { color: #7d8a80; font-style: italic; }

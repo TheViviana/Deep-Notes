@@ -84,16 +84,39 @@ export function LineMirror({text, taRef}) {
   }, [taRef]);
   // 文本变化重渲染后强制对齐滚动位置（innerHTML 重建会重置 scrollTop）
   useEffect(() => { const el = taRef.current, m = box.current; if (el && m) m.scrollTop = el.scrollTop; });
-  const html = useMemo(() => String(text || '').split('\n').map((l, i) => {
-    // 先还原「着色标记」：==高亮== 与 <span style="color:…">（esc 后形态）转成真标签，编辑态也能看到颜色；
-    // 再淡化 Markdown 符号（当前行不淡化）。着色标签不含会被淡化的符号，互不干扰。
-    const safe = esc(l)
-      .replace(/&lt;span style=&quot;color:(#[0-9a-fA-F]{3,8})&quot;&gt;/g, '<span style="color:$1">')
-      .replace(/&lt;\/span&gt;/g, '</span>')
-      .replace(/==([^=\n]+)==/g, '<mark>$1</mark>');
-    const inner = i === cur ? safe : safe.replace(/(^#{1,6}\s?)|(^\s*(?:[-+*>]|\d+[.)])\s?)|(\*\*|\*|__|~~|`{1,3}|\[\[|\]\]|\[|\]|!|\|)/g, '<i>$&</i>');
-    return `<div class="lm-line${i === cur ? ' cur' : ''}">${inner || '&#8203;'}</div>`;
-  }).join(''), [text, cur]);
+  const html = useMemo(() => {
+    let fence = false; // 是否处于 ``` 围栏代码块内（跨行状态）
+    return String(text || '').split('\n').map((l, i) => {
+      // 逐字保形染色：<span style="color:…"> 与 ==高亮== 的源码字符原样保留（.lm-tag，随行淡显），
+      // 只把内容包进真标签上色 —— 源码字符一个不少，镜像与 textarea 永远逐字对齐，
+      // 选区不会再出现「透明代码字符与彩色文字错位叠加」。
+      const colored = esc(l)
+        .replace(/&lt;span style=&quot;color:(#[0-9a-fA-F]{3,8})&quot;&gt;([\s\S]*?)&lt;\/span&gt;/g,
+          (_, c, t) => `<span class="lm-tag">&lt;span style=&quot;color:${c}&quot;&gt;</span><span style="color:${c}">${t}</span><span class="lm-tag">&lt;/span&gt;</span>`)
+        .replace(/==([^=\n]+)==/g, '<span class="lm-tag">==</span><mark>$1</mark><span class="lm-tag">==</span>');
+      let inner;
+      if (i === cur) {
+        inner = colored; // 当前行：完整源码形态（代码-文字-代码），与光标、选区逐字对齐
+      } else {
+        // 非当前行≈阅读模式：成对语法的内容按语义着色（字重 / 颜色 / 底色，零位宽变化），符号淡到近隐形
+        inner = colored
+          .replace(/\*\*([^*\n]+)\*\*/g, '<i>**</i><span class="lm-b">$1</span><i>**</i>')
+          .replace(/__([^_\n]+)__/g, '<i>__</i><span class="lm-b">$1</span><i>__</i>')
+          .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<i>*</i><span class="lm-i">$2</span><i>*</i>')
+          .replace(/~~([^~\n]+)~~/g, '<i>~~</i><span class="lm-s">$1</span><i>~~</i>')
+          .replace(/`([^`\n]+)`/g, '<i>`</i><span class="lm-c">$1</span><i>`</i>')
+          .replace(/\[\[([^\]\n]+)\]\]/g, '<i>[[</i><span class="lm-a">$1</span><i>]]</i>')
+          .replace(/(^#{1,6}\s?)|(^\s*(?:[-+*>]|\d+[.)])\s?)|(\*\*|\*|__|~~|`{1,3}|\[\[|\]\]|\[|\]|!|\|)/g, '<i>$&</i>');
+      }
+      const isFence = /^\s*```/.test(l);
+      const cls = ['lm-line', i === cur ? 'cur' : '',
+        /^#{1,6}\s/.test(l) ? 'lm-h' : '',
+        /^\s*>/.test(l) ? 'lm-quote' : '',
+        (isFence || fence) ? 'lm-code' : ''].filter(Boolean).join(' ');
+      if (isFence) fence = !fence;
+      return `<div class="${cls}">${inner || '&#8203;'}</div>`;
+    }).join('');
+  }, [text, cur]);
   return <div className="line-mirror" ref={box} aria-hidden="true" dangerouslySetInnerHTML={{__html: html}}/>;
 }
 
