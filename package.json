@@ -35,15 +35,15 @@
   },
   "main": "electron/main.cjs",
   "devDependencies": {
-    "electron": "^28.0.0",
-    "electron-builder": "^24.9.1",
     "concurrently": "^8.2.2",
+    "electron": "^38.8.6",
+    "electron-builder": "^24.9.1",
     "vite": "^7.0.0",
     "wait-on": "^7.2.0"
   },
   "allowScripts": {
-    "electron@28.3.3": true,
     "esbuild@0.28.2": true,
-    "fsevents@2.3.3": true
+    "fsevents@2.3.3": true,
+    "electron@38.8.6": true
   }
 }

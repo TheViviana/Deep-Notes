@@ -5,6 +5,47 @@ import {T} from './theme';
 const P = T.canvas;
 const ADD = P.additive ? 'lighter' : 'source-over';
 
+// —— 预渲染精灵：辉光 / 球体 / 脉冲的径向渐变每帧重建上千次是 GPU 光栅化的主要负担，
+// 改成按颜色 + 半径缓存的小画布，每帧只 drawImage，视觉完全一致，图大时帧率不再崩。 ——
+const mkSprite = size => { const c = document.createElement('canvas'); c.width = c.height = size; return c; };
+const glowSprites = new Map();
+function glowOf(color, r) {
+  const R = Math.max(4, Math.round(r * 5));
+  const key = color + '|' + R;
+  if (!glowSprites.has(key)) {
+    const c = mkSprite(R * 2), x = c.getContext('2d');
+    const g = x.createRadialGradient(R, R, 0, R, R, R);
+    g.addColorStop(0, color + P.glow); g.addColorStop(1, color + '00');
+    x.fillStyle = g; x.fillRect(0, 0, R * 2, R * 2);
+    glowSprites.set(key, c);
+  }
+  return glowSprites.get(key);
+}
+const ballSprites = new Map();
+function ballOf(color, r) {
+  const R = Math.max(1, Math.round(r * 2) / 2);
+  const key = color + '|' + R;
+  if (!ballSprites.has(key)) {
+    const s = Math.ceil(R * 2) + 2, c = mkSprite(s), x = c.getContext('2d'), m = s / 2;
+    const g = x.createRadialGradient(m - R * .35, m - R * .35, 0, m, m, R);
+    g.addColorStop(0, P.light); g.addColorStop(.45, color); g.addColorStop(1, color + 'aa');
+    x.fillStyle = g; x.beginPath(); x.arc(m, m, R, 0, 7); x.fill();
+    ballSprites.set(key, c);
+  }
+  return ballSprites.get(key);
+}
+const pulseSprites = new Map();
+function pulseOf(c) {
+  if (!pulseSprites.has(c)) {
+    const s = mkSprite(12), x = s.getContext('2d');
+    const g = x.createRadialGradient(6, 6, 0, 6, 6, 6);
+    g.addColorStop(0, `rgba(${c},1)`); g.addColorStop(1, `rgba(${c},0)`);
+    x.fillStyle = g; x.fillRect(0, 0, 12, 12);
+    pulseSprites.set(c, s);
+  }
+  return pulseSprites.get(c);
+}
+
 // 背景神经网络：从光球蔓延出的全部笔记、话题与概念；双向连接以金色脉冲往返传递。
 export function NetworkCanvas({graph, layout, live, reduced}) {
   const ref = useRef(null);
@@ -102,12 +143,12 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
             let x = x1 + (x2 - x1) * u, y = y1 + (y2 - y1) * u;
             if (k.l.both) { const mx = (k.A.s[0] + k.B.s[0]) / 2 + (k.B.s[1] - k.A.s[1]) * .12, my = (k.A.s[1] + k.B.s[1]) / 2 - (k.B.s[0] - k.A.s[0]) * .12; const uu = fwd ? u : 1 - u; x = (1 - uu) ** 2 * k.A.s[0] + 2 * (1 - uu) * uu * mx + uu * uu * k.B.s[0]; y = (1 - uu) ** 2 * k.A.s[1] + 2 * (1 - uu) * uu * my + uu * uu * k.B.s[1]; }
             const a = Math.sin(u * Math.PI) * (on ? .95 : .2);
-            const g = ctx.createRadialGradient(x, y, 0, x, y, 6);
             const c = k.l.both ? (lane ? P.mutualIn : P.mutual) : P.pulseOne;
-            g.addColorStop(0, `rgba(${c},${a})`); g.addColorStop(1, `rgba(${c},0)`);
-            ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.fill();
+            ctx.globalAlpha = a;
+            ctx.drawImage(pulseOf(c), x - 6, y - 6);
           }
         }
+        ctx.globalAlpha = 1;
         ctx.globalCompositeOperation = 'source-over';
       }
 
@@ -121,12 +162,11 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
         const r = x.r * (hl && on ? 1.35 : 1);
         ctx.globalAlpha = a;
         ctx.globalCompositeOperation = ADD;
-        const g = ctx.createRadialGradient(px, py, 0, px, py, r * 5);
-        g.addColorStop(0, color + P.glow); g.addColorStop(1, color + '00');
-        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, r * 5, 0, 7); ctx.fill();
+        const gl = glowOf(color, r), gw = gl.width / 2;
+        ctx.drawImage(gl, px - gw, py - gw);
         ctx.globalCompositeOperation = 'source-over';
         if (x.n.kind === 'ghost') { ctx.setLineDash([2, 2]); ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(px, py, r + 1, 0, 7); ctx.stroke(); ctx.setLineDash([]); }
-        else { const b = ctx.createRadialGradient(px - r * .35, py - r * .35, 0, px, py, r); b.addColorStop(0, P.light); b.addColorStop(.45, color); b.addColorStop(1, color + 'aa'); ctx.fillStyle = b; ctx.beginPath(); ctx.arc(px, py, r, 0, 7); ctx.fill(); }
+        else { const b = ballOf(color, r), bw = b.width / 2; ctx.drawImage(b, px - bw, py - bw); }
         if (L.stage === 'hub' && p > .9 && (hl ? on && x.n.kind !== 'tag' : x.n.kind === 'concept')) {
           ctx.globalAlpha = a * (hl ? .9 : .42);
           ctx.fillStyle = P.label; ctx.font = `${hl ? 11 : 10}px -apple-system, "PingFang SC", sans-serif`;

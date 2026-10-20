@@ -110,6 +110,15 @@ function spring(st, target, dt, k = 62) {
 const sp = x => ({x, v: 0});
 // 光球边缘向外飘散的光点（光球本地坐标，画布 1012×1012，中心 506）
 const DUST = Array.from({length: 110}, (_, i) => ({a: i * 2.39996, v: .035 + (i * 37 % 100) / 100 * .06, o: (i * .618034) % 1, w: (i % 2 ? 1 : -1) * (.15 + (i % 7) * .05), s: .7 + (i % 5) * .32, b: .45 + (i % 3) * .25, c: T.dust[i % T.dust.length]}));
+// 尘埃径向渐变预渲染成精灵（每帧 110 次渐变创建 → 一次 drawImage），视觉不变
+const DUST_SPRITES = T.dust.map(c => {
+  const s = document.createElement('canvas'); s.width = s.height = 32;
+  const x = s.getContext('2d'), g = x.createRadialGradient(16, 16, 0, 16, 16, 16);
+  g.addColorStop(0, `rgba(${c},1)`); g.addColorStop(1, `rgba(${c},0)`);
+  x.fillStyle = g; x.fillRect(0, 0, 32, 32);
+  return {img: s, c};
+});
+const dustSpriteOf = c => DUST_SPRITES.find(s => s.c === c).img;
 // 光球与水母的视频逐帧画到 <canvas> 上显示：部分内置 / 嵌入式浏览器不合成 <video> 画面（解码正常但页面上是空的），
 // 画布在所有浏览器里都能显示。视频本身透明地留在原位负责播放；未加载好时先画封面图。
 const posterCache = new Map();
@@ -176,10 +185,10 @@ function Scene({graph, items, onModule, onItem, live, sel}) {
             const ph = ((t * p.v + p.o) % 1 + 1) % 1, r = 150 + ph * 340, a = p.a + ph * p.w;
             const x = 506 + Math.cos(a) * r, y = 506 + Math.sin(a) * r * .96;
             const al = di * Math.pow(Math.max(0, Math.sin(ph * Math.PI)), 1.3) * p.b, rad = p.s / sc * 2.2;
-            const g = ctx.createRadialGradient(x, y, 0, x, y, rad);
-            g.addColorStop(0, `rgba(${p.c},${al})`); g.addColorStop(1, `rgba(${p.c},0)`);
-            ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, rad, 0, 7); ctx.fill();
+            ctx.globalAlpha = al;
+            ctx.drawImage(dustSpriteOf(p.c), x - rad, y - rad, rad * 2, rad * 2);
           }
+          ctx.globalAlpha = 1;
         }
       }
       // 水母
