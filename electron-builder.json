@@ -14,6 +14,7 @@
     "main": "electron/main.cjs",
     "type": "commonjs"
   },
+  "afterPack": "scripts/adhoc-sign.cjs",
   "mac": {
     "category": "public.app-category.productivity",
     "target": [
