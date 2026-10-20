@@ -8,7 +8,7 @@ const pad = n => String(n).padStart(2, '0');
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 
 // 容量上限：超出时按日期/顺序截断，并在结果里报告，避免图谱节点过多导致卡顿。
-const CAPS = {works: 40, notes: 80, readings: 60, files: 600};
+const CAPS = {works: 40, notes: 80, readings: 60, archives: 60, files: 600};
 const SKIP_DIRS = new Set(['.obsidian', '.trash', '.git', 'node_modules']);
 const isMd = name => /\.(md|markdown)$/i.test(name);
 const clean = body => String(body).replace(/\r/g, '').trim();
@@ -54,10 +54,11 @@ function tagsOf(fm, body) {
   return [...new Set(list.map(t => t.replace(/^#/, '').trim()).filter(t => t && !/^\d+$/.test(t)))].slice(0, 12);
 }
 
-// —— 分类：作品 / 草稿 / 选题 / 方法笔记 / 阅读，按文件夹名识别；未识别的全部作为方法笔记 ——
+// —— 分类：作品 / 草稿 / 选题 / 方法笔记 / 阅读 / 档案，按文件夹名识别；未识别的全部作为方法笔记 ——
 const RULES = [
   ['works', /(作品|works?$|published|已发布)/i],
   ['readings', /(阅读|readings?$|书架|书摘|稍后读)/i],
+  ['archives', /(档案|archives?$|个人简介|profile)/i],
   ['drafts', /(草稿|创作台|drafts?$|正在写|写作中)/i],
   ['ideas', /(选题|ideas?$|灵感)/i],
   ['methods', /(方法|methods?$|模板|templates?$|流程|workflow|知识|卡片|notes?$)/i]
@@ -83,7 +84,7 @@ export function pickVaultFolder() {
 }
 
 // —— 主入口：File 列表 → 看板数据（works / ideas / drafts / snapshot / concepts） ——
-// target：'auto' 按文件夹名自动分类；也可指定 'works' | 'methods' | 'ideas' | 'drafts'，把全部文件归入所选模块
+// target：'auto' 按文件夹名自动分类；也可指定 'works' | 'methods' | 'ideas' | 'drafts' | 'readings' | 'archives'，把全部文件归入所选模块
 export async function parseVault(fileList, target = 'auto') {
   const all = fileList.filter(f => f && isMd(f.name) && !f.name.startsWith('.'));
   const files = all.slice(0, CAPS.files).map(f => {
@@ -98,7 +99,7 @@ export async function parseVault(fileList, target = 'auto') {
     return {...x, fm, body};
   }));
 
-  const bucket = {works: [], methods: [], ideas: [], drafts: [], readings: []};
+  const bucket = {works: [], methods: [], ideas: [], drafts: [], readings: [], archives: []};
   for (const x of read) {
     const title = String(pick(x.fm, ['title', '标题', 'name']) || x.file.name.replace(/\.(md|markdown)$/i, '')).trim();
     bucket[x.kind].push({...x, title});
@@ -148,6 +149,13 @@ export async function parseVault(fileList, target = 'auto') {
     body: clean(x.body)
   })).sort((a, b) => b.date.localeCompare(a.date)).slice(0, CAPS.readings);
 
+  // 档案区：创作者自己的个人档案（简介、回顾、清单等），同样参与双链与图谱。
+  const archives = bucket.archives.map((x, i) => ({
+    id: 'archive-' + (i + 1), title: x.title,
+    date: dateOf(pick(x.fm, ['date', '收档日期', '创建日期', 'published']), x.file.lastModified).slice(0, 10),
+    body: clean(x.body)
+  })).sort((a, b) => b.date.localeCompare(a.date)).slice(0, CAPS.archives);
+
   // 概念词：至少在两条内容里出现的话题标签，取出现最多的 20 个（与导入脚本同规则）。
   const count = new Map();
   for (const t of [...works.flatMap(w => w.tags), ...noteTags]) count.set(t, (count.get(t) || 0) + 1);
@@ -161,13 +169,14 @@ export async function parseVault(fileList, target = 'auto') {
 
   return {
     vault: (fileList[0]?.webkitRelativePath || '').split('/')[0] || '所选文件夹',
-    works, notes, ideas, drafts, readings, snapshot, concepts,
-    counts: {all: read.length, works: works.length, notes: notes.length, ideas: ideas.length, drafts: drafts.length, readings: readings.length},
+    works, notes, ideas, drafts, readings, archives, snapshot, concepts,
+    counts: {all: read.length, works: works.length, notes: notes.length, ideas: ideas.length, drafts: drafts.length, readings: readings.length, archives: archives.length},
     truncated: {
       files: all.length > CAPS.files ? all.length - CAPS.files : 0,
       works: bucket.works.length > CAPS.works ? bucket.works.length - CAPS.works : 0,
       notes: bucket.methods.length > CAPS.notes ? bucket.methods.length - CAPS.notes : 0,
-      readings: bucket.readings.length > CAPS.readings ? bucket.readings.length - CAPS.readings : 0
+      readings: bucket.readings.length > CAPS.readings ? bucket.readings.length - CAPS.readings : 0,
+      archives: bucket.archives.length > CAPS.archives ? bucket.archives.length - CAPS.archives : 0
     }
   };
 }

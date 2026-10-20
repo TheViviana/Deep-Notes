@@ -430,10 +430,24 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
   </div>;
 }
 
-// —— 阅读区 Readings：放别人写好的内容，自己拿来阅读（可批注编辑），复用文章全文视图 ——
-export function Readings({graph, readings, selected, setSelected, openReading, setOpenReading, onGo, onAction, onNew, onUpdate, onDelete}) {
+// —— 阅读区 Readings：放别人写好的内容，自己拿来阅读（可批注编辑），左侧分类目录管理 ——
+export function Readings({graph, readings, selected, setSelected, openReading, setOpenReading, onGo, onAction, onNew, onUpdate, onDelete, readFolders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder}) {
   const [q, setQ] = useState('');
-  const rows = readings.filter(r => ((r.title || '') + ' ' + (r.author || '') + ' ' + (r.source || '')).toLowerCase().includes(q.toLowerCase()))
+  const [curFolder, setCurFolder] = useState(null); // null = 全部；「未分类」是删除分类时的兜底去处
+  const [renaming, setRenaming] = useState(null);
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [hover, setHover] = useState(null); // 拖拽悬停的分类
+  const folderOf = r => r.folder || '未分类';
+  // 分类目录：阅读条目的 folder 字段推导 ∪ 手动新建的空分类（-read-folders-v1）
+  const allFolders = useMemo(() => {
+    const names = [];
+    for (const r of readings) { const f = folderOf(r); if (!names.includes(f)) names.push(f); }
+    for (const f of readFolders || []) if (!names.includes(f)) names.push(f);
+    return names;
+  }, [readings, readFolders]);
+  const rows = readings
+    .filter(r => (!curFolder || folderOf(r) === curFolder) && ((r.title || '') + ' ' + (r.author || '') + ' ' + (r.source || '')).toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
   const cur = readings.find(r => r.id === openReading) || null;
   const node = graph.index.get('reading:' + (openReading ?? selected ?? rows[0]?.id));
@@ -445,22 +459,84 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
     const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
     requestAnimationFrame(() => document.querySelector('.article-view')?.scrollIntoView({block: 'start', behavior: smooth ? 'smooth' : 'auto'}));
   }, [openReading]);
+  const commitRename = () => {
+    const {from, value} = renaming || {};
+    const t = (value || '').trim();
+    if (t && t !== from && onRenameFolder) onRenameFolder(from, t);
+    setRenaming(null);
+  };
+  const commitCreate = () => {
+    const t = newName.trim();
+    if (t && onCreateFolder) onCreateFolder(t);
+    setCreating(false); setNewName('');
+  };
+  const startDrag = (r, e) => {
+    if (!setDragging) return;
+    e.dataTransfer.setData('text/plain', r.id);
+    e.dataTransfer.effectAllowed = 'move';
+    setDragging({kind: 'reading', id: r.id});
+  };
   return <div className="page page-readings">
     <PageHead zh="阅读区" en="Readings" sub="别人的好内容，收进自己的网络。" subEn="Reading list — others' words, linked into your graph.">
       <button className="pill primary" onClick={onNew}><Icon name="plus" size={15}/>添加阅读 <em>New reading</em></button>
     </PageHead>
-    <div className="library-layout">
+    <div className="library-layout readings-layout">
+      <aside className="read-folders glass" aria-label="阅读分类目录">
+        <h3>分类 <em>Folders</em></h3>
+        <div className={`rf-row${curFolder == null ? ' active' : ''}`}>
+          <button className="rf-name" onClick={() => setCurFolder(null)}><Icon name="book" size={12}/><span>全部阅读</span><b>{readings.length}</b></button>
+        </div>
+        {allFolders.map(name => {
+          const count = readings.filter(r => folderOf(r) === name).length;
+          const hi = dragging?.kind === 'reading' && hover === name;
+          return <div key={name} className={`rf-wrap${hi ? ' drop-hi' : ''}`}
+            onDragOver={e => { if (dragging?.kind !== 'reading') return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setHover(name); }}
+            onDragLeave={() => setHover(h => h === name ? null : h)}
+            onDrop={e => {
+              if (dragging?.kind !== 'reading') return;
+              e.preventDefault(); setHover(null);
+              onMoveToFolder(dragging.id, name); // 同分类重复投放由 main.jsx 去重，纯 state 更新无刷新
+              setDragging(null);
+            }}>
+            {renaming?.from === name
+              ? <input className="rf-rename" autoFocus value={renaming.value} maxLength={24} aria-label="分类名称 Folder name"
+                  onChange={e => setRenaming({from: name, value: e.target.value})}
+                  onKeyDown={e => { if (e.isComposing) return; if (e.key === 'Enter') commitRename(); else if (e.key === 'Escape') setRenaming(null); }}
+                  onBlur={commitRename}/>
+              : <div className={`rf-row${curFolder === name ? ' active' : ''}`}>
+                  <button className="rf-name" onClick={() => setCurFolder(curFolder === name ? null : name)} title="点击筛选该分类，卡片可拖进来归类">
+                    <Icon name="book" size={12}/><span>{name}</span><b>{count}</b>
+                  </button>
+                  {name !== '未分类' && <span className="rf-tools">
+                    <button title="重命名分类 Rename folder" aria-label={`重命名分类 ${name}`} onClick={() => setRenaming({from: name, value: name})}><Icon name="draft" size={12}/></button>
+                    <button title="删除分类 Delete folder" aria-label={`删除分类 ${name}`} onClick={() => onDeleteFolder(name)}><Icon name="close" size={12}/></button>
+                  </span>}
+                </div>}
+          </div>;
+        })}
+        {creating ? <input className="rf-rename" autoFocus value={newName} maxLength={24}
+            placeholder="分类名称，回车确认 Folder name" aria-label="新建分类 New folder name"
+            onChange={e => setNewName(e.target.value)}
+            onKeyDown={e => { if (e.isComposing) return; if (e.key === 'Enter') commitCreate(); else if (e.key === 'Escape') { setCreating(false); setNewName(''); } }}
+            onBlur={commitCreate}/>
+          : <button className="rf-add" onClick={() => { setCreating(true); setNewName(''); }}>
+              <Icon name="plus" size={12}/>新建分类 <em>New folder</em>
+            </button>}
+        <p className="rf-hint">把阅读卡片拖到分类上即可归类，拖到顶部导航可移动到其他模块 <em>Drag cards onto a folder or the top nav</em></p>
+      </aside>
       <section className="works-col">
         <div className="toolbar-row">
           <label className="search"><Icon name="search" size={15}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索标题、作者或来源… Search" aria-label="搜索阅读条目"/></label>
         </div>
         <div className="read-list">{rows.map(r => {
           const on = (openReading ?? selected) === r.id;
-          return <div key={r.id} className={`read-card glass ${on ? 'active' : ''}`} onClick={() => { setSelected(r.id); setOpenReading(r.id); }} role="button" tabIndex={0}
+          return <div key={r.id} className={`read-card glass ${on ? 'active' : ''}${dragging?.id === r.id ? ' dragging' : ''}`} draggable={!!setDragging}
+            onDragStart={e => startDrag(r, e)} onDragEnd={() => setDragging?.(null)}
+            onClick={() => { setSelected(r.id); setOpenReading(r.id); }} role="button" tabIndex={0}
             onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(r.id); setOpenReading(r.id); } }}>
             <span className="rc-body">
               <span className="rc-title">{r.title || '未命名阅读'}</span>
-              <span className="rc-sub">{r.author || '佚名'}{r.source ? ` · ${r.source}` : ''} · {String(r.date || '').slice(0, 10) || '未标日期'} · {(r.body || '').length.toLocaleString('zh-CN')} 字</span>
+              <span className="rc-sub">{curFolder == null && folderOf(r) !== '未分类' ? `${folderOf(r)} · ` : ''}{r.author || '佚名'}{r.source ? ` · ${r.source}` : ''} · {String(r.date || '').slice(0, 10) || '未标日期'} · {(r.body || '').length.toLocaleString('zh-CN')} 字</span>
             </span>
             <span className="rc-tools">
               <button className="icon-btn" title="删除这条阅读 Delete" aria-label={`删除 ${r.title || '未命名阅读'}`}
@@ -474,6 +550,52 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
       {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'readings')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)}/></aside>}
     </div>
     {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenReading(null)} onGo={onGo} eyebrow={['READING', '阅读全文']}/>}
+  </div>;
+}
+
+// —— 档案区 Archives：放创作者自己的个人档案（简介、回顾、清单等），与阅读区同构，双链汇入图谱 ——
+export function Archives({graph, archives, selected, setSelected, openArchive, setOpenArchive, onGo, onAction, onNew, onUpdate, onDelete}) {
+  const [q, setQ] = useState('');
+  const rows = archives.filter(a => ((a.title || '') + ' ' + (a.body || '')).toLowerCase().includes(q.toLowerCase()))
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  const cur = archives.find(a => a.id === openArchive) || null;
+  const node = graph.index.get('archive:' + (openArchive ?? selected ?? rows[0]?.id));
+  const asWork = a => ({...a, date: a.date || '', tags: [], metaLine: `${String(a.date || '').slice(0, 10) || '未标日期'} 收档 · 个人档案`});
+  // 打开档案后滚动定位：全文视图在列表下方，不滚动会像「按钮没反应」
+  useEffect(() => {
+    if (!openArchive) return;
+    const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+    requestAnimationFrame(() => document.querySelector('.article-view')?.scrollIntoView({block: 'start', behavior: smooth ? 'smooth' : 'auto'}));
+  }, [openArchive]);
+  return <div className="page page-archives">
+    <PageHead zh="档案区" en="Archives" sub="关于自己的资料，归档进同一张网络。" subEn="Personal archives — your own records, linked into the graph.">
+      <button className="pill primary" onClick={onNew}><Icon name="plus" size={15}/>新建档案 <em>New archive</em></button>
+    </PageHead>
+    <div className="library-layout">
+      <section className="works-col">
+        <div className="toolbar-row">
+          <label className="search"><Icon name="search" size={15}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索档案… Search archives" aria-label="搜索档案"/></label>
+        </div>
+        <div className="read-list">{rows.map(a => {
+          const on = (openArchive ?? selected) === a.id;
+          return <div key={a.id} className={`read-card glass ${on ? 'active' : ''}`} onClick={() => { setSelected(a.id); setOpenArchive(a.id); }} role="button" tabIndex={0}
+            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(a.id); setOpenArchive(a.id); } }}>
+            <span className="rc-body">
+              <span className="rc-title">{a.title || '未命名档案'}</span>
+              <span className="rc-sub">{String(a.date || '').slice(0, 10) || '未标日期'} · {(a.body || '').length.toLocaleString('zh-CN')} 字</span>
+            </span>
+            <span className="rc-tools">
+              <button className="icon-btn" title="删除这份档案 Delete" aria-label={`删除 ${a.title || '未命名档案'}`}
+                onClick={e => { e.stopPropagation(); onDelete(a.id); }}><Icon name="trash" size={13}/></button>
+            </span>
+          </div>;
+        })}</div>
+        {!rows.length && <div className="empty"><Icon name="archive" size={30}/><p>还没有档案 <em>Nothing here yet</em></p><button className="pill" onClick={() => setQ('')}>清空搜索 <em>Clear</em></button></div>}
+        <p className="source-line"><Icon name="info" size={13}/>{archives.length} 份档案保存在此浏览器，正文里的 [[双链]] 会汇入图谱 <em>Saved locally</em>。</p>
+      </section>
+      {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'archives')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)}/></aside>}
+    </div>
+    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenArchive(null)} onGo={onGo} eyebrow={['ARCHIVE', '档案全文']}/>}
   </div>;
 }
 

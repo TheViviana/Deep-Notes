@@ -33,7 +33,8 @@ Deep Notes（深度笔记）：原「创作神经网络看板」（neural-creato
 - `src/data/index.js`：数据入口，只有一行 `export * from './sample.js'` 或 `'./my-data.js'`。
 - `src/data/sample.js`：虚构示例数据，也是数据字段的权威说明。
 - `src/neural/graph.js`：图谱推导（目录归属、双链、选题来源、话题、概念提及、双向共振）、布局和本地检索。
-- `src/neural/Home.jsx`：光球、水母、触须场景与三层交互（模块内条目 >15 条折叠为「更多」跳内页）；`Analysis.jsx` 分析栏；`pages.jsx` 五个内页（作品库 / 方法库 / 创作台 / 选题池 / 阅读区）。方法库列表按二级分类分组，支持笔记拖拽归类（分类间 + 拖到顶栏导航跨模块移动，纯 state 更新无刷新）与分类增删改（删除非空分类时内容移入「未分类」，手动空分类存 `-folders-v1`）。
+- `src/neural/Home.jsx`：光球、水母、触须场景与三层交互（模块内条目 >15 条折叠为「更多」跳内页）；`Analysis.jsx` 分析栏；`pages.jsx` 六个内页（作品库 / 方法库 / 创作台 / 选题池 / 阅读区 / 档案区）。方法库列表按二级分类分组，支持笔记拖拽归类（分类间 + 拖到顶栏导航跨模块移动，纯 state 更新无刷新）与分类增删改（删除非空分类时内容移入「未分类」，手动空分类存 `-folders-v1`）；阅读区有同构的左侧分类目录（`reading.folder` 字段，手动空分类存 `-read-folders-v1`）。
+- `src/neural/Intro.jsx`：开屏动画（黑幕粒子四周汇聚成球 → 收缩成奇点 → 爆发把界面染白后淡出）。桌面版每次启动播放，网页同一标签页刷新不重播（sessionStorage `neural-splash-seen`）；`prefers-reduced-motion` 或点击/按键直接跳过。
 - `scripts/import-notes.mjs`：笔记导入；`scripts/verify.mjs`：自检。
 - `src/neural/importer.js`：软件内知识库导入（目录选择器 + 解析，规则与命令行导入一致；`parseVault(files, target)` 的 target 可指定全部内容归入某个模块，默认 'auto' 按文件夹名分类，未识别的一律作为方法笔记）。
 - `src/neural/fileStore.js`：桌面版文件夹知识库（仅 Electron 可用）。导入时在原库旁新建「<原名> - Deep Notes」副本（`vault:prepare-copy` IPC），之后编辑经全局 diff（main.jsx）防抖写回副本里的 .md，删除的内容移入副本 `.trash`，原知识库文件夹内容永不动；根目录路径存 localStorage（`-vault-root-v1`）。
@@ -52,12 +53,13 @@ Deep Notes（深度笔记）：原「创作神经网络看板」（neural-creato
 - `notes`：`id`、`title`、`path`（形如 `05-方法库 methods/<子目录>/<文件名>.md`）、`body`
 - `seedIdeas`：`id`（数字）、`title`、`platform`、`priority`（高 / 中 / 低）、`status`（待写 / 待扩展 / 已转草稿）、`note`
 - `seedDrafts`：`id`、`title`、`body`、`source`（来源选题 id 或 `null`）
-- `seedReadings`：`id`、`title`、`author`、`source`、`date`（`YYYY-MM-DD`）、`body`
+- `seedReadings`：`id`、`title`、`author`、`source`、`date`（`YYYY-MM-DD`）、`body`（可选 `folder` 分类）
+- `seedArchives`：`id`、`title`、`date`（`YYYY-MM-DD`）、`body`
 - `concepts`：`[概念名, [关键词…]]`
 
 ## 规矩
 
-- **发光的光球和六只水母是核心动效，不能删除、隐藏或改成静态图片。** 光球视频 `public/media/orb.mp4`、水母视频 `public/media/jellyfish.mp4`，逐帧动画在 `src/neural/Home.jsx` 的 `step()`。`npm run verify` 会检查它们还在。
+- **发光的光球和七只水母是核心动效，不能删除、隐藏或改成静态图片。** 光球视频 `public/media/orb.mp4`、水母视频 `public/media/jellyfish.mp4`，逐帧动画在 `src/neural/Home.jsx` 的 `step()`。`npm run verify` 会检查它们还在。
 - 动画循环必须保持「先排下一帧、再在 try 里执行本帧」的写法，时间差 `dt` 不能为负：否则某一帧出错就会让光球和水母停在隐形状态（刷新后消失）。
 - 光球和水母的视频由 `paintVideo()` 逐帧画到 `<canvas class="vid">` 上显示，`<video class="vsrc">` 透明地留在原位负责播放。不要改回直接显示 `<video>`：有些内置 / 嵌入式浏览器解码正常却不合成视频画面，光球和水母会变成空白。
 - `src/data/my-data.js` 含用户个人笔记，已在 `.gitignore`；不要提交、不要写进示例或文档。
@@ -68,4 +70,4 @@ Deep Notes（深度笔记）：原「创作神经网络看板」（neural-creato
 ## 改完之后的验证
 
 1. `npm run verify` 和 `npm run build` 通过。
-2. `npm run dev` 打开页面，确认：首页光球和六只水母出现；点「作品库」水母触须伞状展开；点一篇内容右侧弹出分析栏；五个内页（作品库 / 方法库 / 创作台 / 选题池 / 阅读区）正常；浏览器控制台没有报错。
+2. `npm run dev` 打开页面，确认：开屏动画播放一次后淡出（刷新不重播）；首页光球和七只水母出现；点「作品库」水母触须伞状展开；点一篇内容右侧弹出分析栏；六个内页（作品库 / 方法库 / 创作台 / 选题池 / 阅读区 / 档案区）正常；浏览器控制台没有报错。

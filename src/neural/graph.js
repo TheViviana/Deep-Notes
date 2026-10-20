@@ -13,6 +13,7 @@ export const KINDS = {
   idea: {label: '选题', en: 'Idea', color: T.kinds.idea},
   draft: {label: '草稿', en: 'Draft', color: T.kinds.draft},
   reading: {label: '阅读', en: 'Reading', color: T.kinds.reading},
+  archive: {label: '档案', en: 'Archive', color: T.kinds.archive},
   concept: {label: '概念', en: 'Concept', color: T.kinds.concept},
   tag: {label: '话题', en: 'Topic', color: T.kinds.tag},
   ghost: {label: '未创建', en: 'Unresolved', color: T.kinds.ghost}
@@ -26,29 +27,31 @@ export const LINK_KINDS = {
   resonance: '双向共振'
 };
 export const LINK_EN = {contain: 'Contains', wiki: 'Wikilink', source: 'Source', tag: 'Topic', mention: 'Mention', resonance: 'Resonance'};
-export const CONTENT = new Set(['post', 'note', 'idea', 'draft', 'reading']);
+export const CONTENT = new Set(['post', 'note', 'idea', 'draft', 'reading', 'archive']);
 
 const FOLDERS = [
   {id: 'f:works', title: '作品库', path: '02-作品库', angle: 180},
   {id: 'f:drafts', title: '创作台', path: '03-创作台', angle: 145},
   {id: 'f:ideas', title: '选题池', path: '04-选题池', angle: 35},
   {id: 'f:methods', title: '方法库', path: '05-方法库 methods', angle: 0},
-  {id: 'f:readings', title: '阅读区', path: '06-阅读区', angle: 215}
+  {id: 'f:readings', title: '阅读区', path: '06-阅读区', angle: 215},
+  {id: 'f:archives', title: '档案区', path: '07-档案区', angle: 90}
 ];
 
-// 首页围绕光球的六个模块；角度与图谱布局的目录锚点一致，背景网络会朝各自模块蔓延。
+// 首页围绕光球的七个模块；角度与图谱布局的目录锚点一致，背景网络会朝各自模块蔓延。
 export const MODULES = [
   {id: 'works', title: '作品库', en: 'Works', kind: 'post', folder: 'f:works', angle: 180, icon: 'works', page: 'library'},
   {id: 'concepts', title: '概念网络', en: 'Concepts', kind: 'concept', angle: -90, icon: 'concept'},
   {id: 'methods', title: '方法库', en: 'Methods', kind: 'note', folder: 'f:methods', angle: 0, icon: 'methods'},
   {id: 'ideas', title: '选题池', en: 'Ideas', kind: 'idea', folder: 'f:ideas', angle: 35, icon: 'idea', page: 'ideas'},
   {id: 'drafts', title: '创作台', en: 'Drafts', kind: 'draft', folder: 'f:drafts', angle: 145, icon: 'draft', page: 'drafts'},
-  {id: 'readings', title: '阅读区', en: 'Readings', kind: 'reading', folder: 'f:readings', angle: 215, icon: 'book', page: 'readings'}
+  {id: 'readings', title: '阅读区', en: 'Readings', kind: 'reading', folder: 'f:readings', angle: 215, icon: 'book', page: 'readings'},
+  {id: 'archives', title: '档案区', en: 'Archives', kind: 'archive', folder: 'f:archives', angle: 90, icon: 'archive', page: 'archives'}
 ];
 export const moduleOf = node => MODULES.find(m => m.kind === node?.kind) || null;
 
 export const cleanTitle = t => String(t || '').replace(/^\d+[A-Z]?-☑️/, '').replace(/^\d+-/, '').replace(/_/g, ' · ');
-export function buildGraph({works = [], notes = notesRaw, ideas = [], drafts = [], readings = [], concepts} = {}) {
+export function buildGraph({works = [], notes = notesRaw, ideas = [], drafts = [], readings = [], archives = [], concepts} = {}) {
   const nodes = new Map();
   const add = n => { if (!nodes.has(n.id)) nodes.set(n.id, {tags: [], text: '', ...n}); return nodes.get(n.id); };
   const edges = new Map();
@@ -96,6 +99,12 @@ export function buildGraph({works = [], notes = notesRaw, ideas = [], drafts = [
   for (const r of readings) {
     add({id: 'reading:' + r.id, kind: 'reading', title: r.title || '未命名阅读', short: r.title, path: '06-阅读区/' + (r.title || '未命名阅读'), folder: 'f:readings', text: (r.title || '') + '\n' + (r.body || ''), body: r.body || '', date: r.date, reading: r, tags: []});
     link('f:readings', 'reading:' + r.id, 'contain');
+  }
+
+  // 档案区：创作者自己的个人档案（简介、回顾、清单等），同样参与双链与概念推导。
+  for (const a of archives) {
+    add({id: 'archive:' + a.id, kind: 'archive', title: a.title || '未命名档案', short: a.title, path: '07-档案区/' + (a.title || '未命名档案'), folder: 'f:archives', text: (a.title || '') + '\n' + (a.body || ''), body: a.body || '', date: a.date, archive: a, tags: []});
+    link('f:archives', 'archive:' + a.id, 'contain');
   }
 
   // 选题 ⇄ 草稿：草稿记录来源选题；选题状态为「已转草稿」时反向也成立。

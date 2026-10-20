@@ -1,6 +1,6 @@
 import React, {useCallback, useDeferredValue, useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {seedIdeas, seedDrafts, seedReadings, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
+import {seedIdeas, seedDrafts, seedReadings, seedArchives, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
 import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags} from './worksStore';
 import {pickVaultFolder, parseVault} from './importer';
 import {capable, getRoot, setRoot, queueSync, flush, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler} from './fileStore';
@@ -8,7 +8,8 @@ import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
 import {Home} from './Home';
-import {Library, Drafts, Ideas, Methods, Readings} from './pages';
+import {Library, Drafts, Ideas, Methods, Readings, Archives} from './pages';
+import {Intro} from './Intro';
 import {Count} from './Analysis';
 import {Icon} from './icons';
 import {PluginList, useNetwork, usePlugins, TocPanel, parseOutline} from './plugins';
@@ -141,12 +142,12 @@ function ReadFull({r, graph, onClose, onGo}) {
   </Modal>;
 }
 
-const navs = [['home', '工作台', 'Workspace'], ['library', '作品库', 'Works'], ['methods', '方法库', 'Methods'], ['drafts', '创作台', 'Drafts'], ['ideas', '选题池', 'Ideas'], ['readings', '阅读区', 'Readings']];
+const navs = [['home', '工作台', 'Workspace'], ['library', '作品库', 'Works'], ['methods', '方法库', 'Methods'], ['drafts', '创作台', 'Drafts'], ['ideas', '选题池', 'Ideas'], ['readings', '阅读区', 'Readings'], ['archives', '档案区', 'Archives']];
 // 移动目标的模块名（toast 与弹窗共用）
-const MOVE_ZH = {works: '作品库', methods: '方法库', drafts: '创作台', ideas: '选题池', readings: '阅读区'};
-const MOVE_EN = {works: 'Works', methods: 'Methods', drafts: 'Drafts', ideas: 'Ideas', readings: 'Readings'};
+const MOVE_ZH = {works: '作品库', methods: '方法库', drafts: '创作台', ideas: '选题池', readings: '阅读区', archives: '档案区'};
+const MOVE_EN = {works: 'Works', methods: 'Methods', drafts: 'Drafts', ideas: 'Ideas', readings: 'Readings', archives: 'Archives'};
 // 各类内容的常驻模块（移动弹窗里禁用当前所在项）
-const HOME_OF = {post: 'works', note: 'methods', draft: 'drafts', idea: 'ideas', reading: 'readings'};
+const HOME_OF = {post: 'works', note: 'methods', draft: 'drafts', idea: 'ideas', reading: 'readings', archive: 'archives'};
 const initialPage = () => { const h = location.hash.slice(1); return navs.some(n => n[0] === h) ? h : 'home'; };
 
 // 联网开关：默认断网；打开后仅「沉浸式翻译」插件会访问翻译服务，其余功能依然全本地。
@@ -207,8 +208,11 @@ function App() {
   const [kbConcepts, setKbConcepts] = useSaved(CONFIG.storagePrefix + '-concepts-v1', CONCEPTS);
   const [notes, setNotes] = useSaved(CONFIG.storagePrefix + '-notes-v1', SEED_NOTES);
   const [readings, setReadings] = useSaved(CONFIG.storagePrefix + '-readings-v1', seedReadings);
+  const [archives, setArchives] = useSaved(CONFIG.storagePrefix + '-archives-v1', seedArchives);
   // 方法库二级分类：path 第二段推导 + 手动新建的空分类（-folders-v1 只存空分类，导入/切回示例时清空）
   const [folders, setFolders] = useSaved(CONFIG.storagePrefix + '-folders-v1', []);
+  // 阅读区左侧分类：reading.folder 推导 + 手动新建的空分类（-read-folders-v1 只存空分类，导入/切回示例时清空）
+  const [readFolders, setReadFolders] = useSaved(CONFIG.storagePrefix + '-read-folders-v1', []);
   // 方法库列表拖拽中的内容（分类间平移 + 拖到顶栏导航跨模块移动）
   const [dragging, setDragging] = useState(null);
   const [dragNav, setDragNav] = useState(null);
@@ -219,6 +223,8 @@ function App() {
   const [openArticle, setOpenArticle] = useState(null);
   const [readSel, setReadSel] = useState(null);
   const [readOpen, setReadOpen] = useState(null);
+  const [arcSel, setArcSel] = useState(null);
+  const [arcOpen, setArcOpen] = useState(null);
   const [editingWork, setEditingWork] = useState(null);
   const [workIsNew, setWorkIsNew] = useState(false);
   const [modal, setModal] = useState(null);
@@ -228,7 +234,7 @@ function App() {
   const reduced = useMemo(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches, []);
   const slowWorks = useDeferredValue(works);
   const slowDrafts = useDeferredValue(drafts);
-  const graph = useMemo(() => buildGraph({works: slowWorks, notes, ideas, drafts: slowDrafts, readings, concepts: kbConcepts}), [slowWorks, notes, ideas, slowDrafts, readings, kbConcepts]);
+  const graph = useMemo(() => buildGraph({works: slowWorks, notes, ideas, drafts: slowDrafts, readings, archives, concepts: kbConcepts}), [slowWorks, notes, ideas, slowDrafts, readings, archives, kbConcepts]);
   const layout = useMemo(() => forceLayout(graph), [graph]);
 
   useEffect(() => { history.replaceState(null, '', page === 'home' ? location.pathname : '#' + page); window.scrollTo({top: 0}); }, [page]);
@@ -238,12 +244,12 @@ function App() {
   // 不侵入各处 CRUD：每次渲染对比上一份快照，新增/修改 → 写文件，删除 → 移入 .trash。
   const prevContent = useRef(null);
   useEffect(() => {
-    const cur = {works, notes, drafts, readings};
+    const cur = {works, notes, drafts, readings, archives};
     const prev = prevContent.current;
     prevContent.current = cur;
     if (!capable() || !getRoot()) return;
     if (!prev) return; // 首次渲染只记录快照；导入流程会主动全量写入
-    for (const kind of ['works', 'notes', 'drafts', 'readings']) {
+    for (const kind of ['works', 'notes', 'drafts', 'readings', 'archives']) {
       const pv = prev[kind], cv = cur[kind];
       const pmap = new Map(pv.map(x => [x.id, x]));
       const cmap = new Map(cv.map(x => [x.id, x]));
@@ -288,9 +294,10 @@ function App() {
   function toDraft(idea) {
     const existing = drafts.find(d => d.source === idea.id);
     if (existing) { setActive(existing.id); setPage('drafts'); setModal(null); setToast('已打开关联草稿 · Linked draft opened'); return; }
-    const item = {...idea, status: '已转草稿'};
-    setIdeas(ideas.some(i => i.id === item.id) ? ideas.map(i => i.id === item.id ? item : i) : [...ideas, item]);
-    newDraft(item.title, `【根据选题创建的写作提纲，未调用 AI】\n\n创作方向：${item.note}\n\n开场：\n\n核心观点：\n\n操作示例：\n\n结尾：`, item.id);
+    // 转草稿后选题自动移出选题池：草稿的 source 仍记录来源，可从草稿分析栏跳回查看
+    setIdeas(is => is.filter(x => String(x.id) !== String(idea.id)));
+    newDraft(idea.title, `【根据选题创建的写作提纲，未调用 AI】\n\n创作方向：${idea.note}\n\n开场：\n\n核心观点：\n\n操作示例：\n\n结尾：`, idea.id);
+    setToast('已转为草稿，选题已移出选题池 · Drafted, idea removed');
   }
   function deleteDraft(id) {
     const d = drafts.find(x => x.id === id);
@@ -385,7 +392,60 @@ function App() {
     setReadOpen(o => o === id ? null : o);
     setToast('阅读条目已删除 · Reading deleted');
   }
-  // —— 跨模块移动：文章 / 笔记 / 草稿 / 选题 / 阅读 五类内容互通，标题与正文一起带走，可随时移回 ——
+  // —— 阅读区左侧分类：拖拽/下拉只改 folder 字段，id 不变，选中态原地保持（无刷新） ——
+  const READ_TRASH_FOLDER = '未分类'; // 删除非空分类时的兜底去处
+  const readFolderOf = r => r.folder || READ_TRASH_FOLDER;
+  function moveReadingToFolder(id, folder) {
+    if (!folder) return;
+    const r = readings.find(x => x.id === id);
+    if (!r || readFolderOf(r) === folder) return; // 同分类重复投放：原地不动
+    setReadings(rs => rs.map(x => x.id === id ? {...x, folder} : x));
+    setToast(`已移入「${folder}」 · Moved to ${folder}`);
+  }
+  function createReadingFolder(name) {
+    const t = String(name || '').trim().replace(/[/\\]/g, '·').slice(0, 24);
+    if (!t) return;
+    setReadFolders(fs => fs.includes(t) ? fs : [...fs, t]);
+    setToast(`分类「${t}」已创建 · Folder created`);
+  }
+  function renameReadingFolder(from, name) {
+    const t = String(name || '').trim().replace(/[/\\]/g, '·').slice(0, 24);
+    if (!t || t === from) return;
+    setReadings(rs => rs.map(r => readFolderOf(r) === from ? {...r, folder: t} : r));
+    setReadFolders(fs => fs.map(f => f === from ? t : f));
+    setToast(`分类已重命名为「${t}」 · Folder renamed`);
+  }
+  function deleteReadingFolder(name) {
+    if (name === READ_TRASH_FOLDER) { setToast('「未分类」是兜底分类，不能删除 · Keep "未分类"'); return; }
+    const count = readings.filter(r => readFolderOf(r) === name).length;
+    const ok = count
+      ? window.confirm(`删除分类「${name}」？其中 ${count} 篇阅读将移入「${READ_TRASH_FOLDER}」。`)
+      : window.confirm(`删除空分类「${name}」？`);
+    if (!ok) return;
+    setReadings(rs => rs.map(r => readFolderOf(r) === name ? {...r, folder: READ_TRASH_FOLDER} : r));
+    setReadFolders(fs => fs.filter(f => f !== name));
+    setToast(`分类「${name}」已删除 · Folder deleted`);
+  }
+  // —— 档案区 CRUD：创作者自己的个人档案（简介、回顾、清单等），同样参与双链与图谱 ——
+  function newArchive() {
+    const id = 'archive-' + Date.now();
+    setArchives(as => [{id, title: '新建档案', date: nowStamp().slice(0, 10), body: ''}, ...as]);
+    setArcSel(id); setArcOpen(id); setPage('archives');
+    setToast('档案已创建，写入你的个人内容 · Archive created');
+  }
+  function updateArchive(id, patch) {
+    setArchives(as => as.map(a => a.id === id ? {...a, ...patch, updatedAt: nowStamp()} : a));
+  }
+  function deleteArchive(id) {
+    const a = archives.find(x => x.id === id);
+    if (!window.confirm(`删除档案「${a?.title || '未命名档案'}」？正文会一起删除，此操作只影响当前浏览器。`)) return;
+    const rest = archives.filter(x => x.id !== id);
+    setArchives(rest);
+    setArcSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
+    setArcOpen(o => o === id ? null : o);
+    setToast('档案已删除 · Archive deleted');
+  }
+  // —— 跨模块移动：文章 / 笔记 / 草稿 / 选题 / 阅读 / 档案 六类内容互通，标题与正文一起带走，可随时移回 ——
   // id 可能带图谱前缀（如 'note:xxx'，来自分析栏的节点），也可能是原始 id，统一剥掉前缀再查找
   function moveContent(fromKind, rawId, toKind) {
     if (fromKind === toKind) return;
@@ -409,6 +469,10 @@ function App() {
       const r = readings.find(x => x.id === id); if (!r) return;
       moved = {title: r.title, body: r.body || ''};
       setReadings(rs => { const rest = rs.filter(x => x.id !== id); setReadOpen(o => o === id ? null : o); return rest; });
+    } else if (fromKind === 'archive') {
+      const a = archives.find(x => x.id === id); if (!a) return;
+      moved = {title: a.title, body: a.body || ''};
+      setArchives(as => { const rest = as.filter(x => x.id !== id); setArcOpen(o => o === id ? null : o); return rest; });
     } else if (fromKind === 'idea') {
       const it = ideas.find(x => String(x.id) === String(id)); if (!it) return;
       moved = {title: it.title, body: it.note || ''};
@@ -420,6 +484,7 @@ function App() {
     else if (toKind === 'drafts') setDrafts(ds => [{id: 'draft-' + Date.now(), title: moved.title, body: moved.body, source: null}, ...ds]);
     else if (toKind === 'ideas') setIdeas(is => [...is, {id: Math.max(0, ...is.map(x => Number(x.id) || 0)) + 1, title: moved.title, platform: '', priority: '中', status: '待写', note: moved.body.slice(0, 120)}]);
     else if (toKind === 'readings') setReadings(rs => [{id: 'reading-' + Date.now(), title: moved.title, author: '', source: '', date: stamp.slice(0, 10), body: moved.body}, ...rs]);
+    else if (toKind === 'archives') setArchives(as => [{id: 'archive-' + Date.now(), title: moved.title, date: stamp.slice(0, 10), body: moved.body}, ...as]);
     setModal(null);
     setToast(`已移动到${MOVE_ZH[toKind]} · Moved to ${MOVE_EN[toKind]}`);
   }
@@ -456,6 +521,7 @@ function App() {
     if (a.type === 'ideaToDraft') toDraft(a.idea);
     if (a.type === 'openArticle') { setLibSel(a.id); setOpenArticle(a.id); if (page !== 'library') setPage('library'); }
     if (a.type === 'openReading') { setReadSel(a.id); setReadOpen(a.id); if (page !== 'readings') setPage('readings'); }
+    if (a.type === 'openArchive') { setArcSel(a.id); setArcOpen(a.id); if (page !== 'archives') setPage('archives'); }
     if (a.type === 'editWork') { const w = works.find(x => x.id === a.id); if (w) { setEditingWork(w); setWorkIsNew(false); setModal('work'); } }
     // 未创建的 [[双链]] 一键创建：文章走「编辑信息」弹窗，方法笔记就地新建并跳到方法库
     if (a.type === 'newFromGhost') {
@@ -572,9 +638,10 @@ function App() {
   function adoptData(data, msg) {
     setWorks(data.works); setNotes(data.notes ?? SEED_NOTES); setIdeas(data.ideas); setDrafts(data.drafts);
     setReadings(data.readings ?? seedReadings);
-    setSnap(data.snapshot); setKbConcepts(data.concepts); setFolders([]);
+    setArchives(data.archives ?? seedArchives);
+    setSnap(data.snapshot); setKbConcepts(data.concepts); setFolders([]); setReadFolders([]);
     setLibSel(data.works[0]?.id ?? null); setActive(data.drafts[0]?.id);
-    setReadSel(null); setReadOpen(null);
+    setReadSel(null); setReadOpen(null); setArcSel(null); setArcOpen(null);
     setFocus({mod: null, sel: null}); setOpenArticle(null); setPage('home');
     setModal(null); setToast(msg);
   }
@@ -594,10 +661,10 @@ function App() {
     let data;
     try { data = await parseVault(files, target); } catch { setToast('解析失败，请确认选择的是 Markdown 文件夹 · Parse failed'); return; }
     if (!data.counts.all) { setToast('所选文件夹里没有 Markdown 笔记 · No markdown notes'); return; }
-    const extra = Object.entries(data.truncated).filter(([, n]) => n).map(([k, n]) => ({files: '文件', works: '文章', notes: '笔记', readings: '阅读'}[k] + ` 截断 ${n}`)).join('、');
+    const extra = Object.entries(data.truncated).filter(([, n]) => n).map(([k, n]) => ({files: '文件', works: '文章', notes: '笔记', readings: '阅读', archives: '档案'}[k] + ` 截断 ${n}`)).join('、');
     const where = target === 'auto'
-      ? `文章 ${data.counts.works}、方法笔记 ${data.counts.notes}、选题 ${data.counts.ideas}、草稿 ${data.counts.drafts}、阅读 ${data.counts.readings || 0}`
-      : `全部 ${data.counts.all} 个文件将作为「${{works: '作品库', methods: '方法库', ideas: '选题池', drafts: '创作台', readings: '阅读区'}[target]}」的内容导入`;
+      ? `文章 ${data.counts.works}、方法笔记 ${data.counts.notes}、选题 ${data.counts.ideas}、草稿 ${data.counts.drafts}、阅读 ${data.counts.readings || 0}、档案 ${data.counts.archives || 0}`
+      : `全部 ${data.counts.all} 个文件将作为「${{works: '作品库', methods: '方法库', ideas: '选题池', drafts: '创作台', readings: '阅读区', archives: '档案区'}[target]}」的内容导入`;
     const srcName = srcDir ? srcDir.replace(/\/+$/, '').split('/').pop() : data.vault;
     const desktopNote = srcDir ? `\n\n桌面版会在「${srcName}」旁新建「${srcName} - Deep Notes」副本作为你的知识库文件夹（副本初始为空，导入完成后按结果生成 .md）：之后的编辑会实时写回副本，原文件夹内容保持不变。` : '';
     const ok = window.confirm(`将从「${srcName}」导入：${where}${extra ? '（' + extra + '）' : ''}。${desktopNote}\n\n这会替换当前浏览器里的全部文章、选题和草稿，确定继续吗？`);
@@ -608,15 +675,15 @@ function App() {
       if (copy?.ok) { await setRoot(copy.dir); copyDir = copy.dir; } // await：先把旧队列写进旧库再换根目录
       else { await setRoot(null); setToast('无法创建知识库副本，本次导入只保存在浏览器 · Copy failed'); }
     }
-    adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${copyDir ? ` · 已写入「${copyDir.replace(/\/+$/, '').split('/').pop()}」` : ''}`);
+    adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${copyDir ? ` · 已写入「${copyDir.replace(/\/+$/, '').split('/').pop()}」` : ''}`);
   }
   async function resetToSample() {
     if (!window.confirm('切回虚构示例数据？当前浏览器里的文章、选题和草稿会被清空替换。')) return;
     await setRoot(null); // 桌面版停用文件夹写回（先把待写队列写进旧库）；盘上已有的知识库副本原样保留
-    adoptData({works: seedWorks(), notes: SEED_NOTES, ideas: seedIdeas, drafts: seedDrafts, readings: seedReadings, snapshot, concepts: CONCEPTS}, '已切回示例数据 · Sample data restored');
+    adoptData({works: seedWorks(), notes: SEED_NOTES, ideas: seedIdeas, drafts: seedDrafts, readings: seedReadings, archives: seedArchives, snapshot, concepts: CONCEPTS}, '已切回示例数据 · Sample data restored');
   }
 
-  const openInGraph = id => { const n = graph.index.get(id); const mod = {post: 'works', note: 'methods', idea: 'ideas', draft: 'drafts', reading: 'readings', concept: 'concepts'}[n?.kind]; if (mod) { setFocus({mod, sel: id}); setPage('home'); } };
+  const openInGraph = id => { const n = graph.index.get(id); const mod = {post: 'works', note: 'methods', idea: 'ideas', draft: 'drafts', reading: 'readings', archive: 'archives', concept: 'concepts'}[n?.kind]; if (mod) { setFocus({mod, sel: id}); setPage('home'); } };
   const s = stats(graph);
 
   return <div className={`neural page-${page}`}>
@@ -626,10 +693,10 @@ function App() {
         <span className="brand-text">{CONFIG.brand.name} <b>/ {CONFIG.brand.sub}</b><small>{CONFIG.brand.tagline} · {CONFIG.brand.taglineEn}</small></span>
       </a>
       <nav aria-label="主导航">{navs.map(([id, zh, en]) => {
-        // 跨模块拖拽：方法库笔记可直接拖到导航按钮上移动到对应模块（复用 moveContent，会换 id）
-        const PAGE_KIND = {library: 'works', methods: 'methods', drafts: 'drafts', ideas: 'ideas', readings: 'readings'};
+        // 跨模块拖拽：方法库笔记 / 阅读区条目可直接拖到导航按钮上移动到对应模块（复用 moveContent，会换 id）
+        const PAGE_KIND = {library: 'works', methods: 'methods', drafts: 'drafts', ideas: 'ideas', readings: 'readings', archives: 'archives'};
         const toKind = PAGE_KIND[id];
-        const droppable = !!dragging && toKind && dragging.kind === 'note' && HOME_OF[dragging.kind] !== toKind;
+        const droppable = !!dragging && toKind && (dragging.kind === 'note' || dragging.kind === 'reading' || dragging.kind === 'archive') && HOME_OF[dragging.kind] !== toKind;
         return <button key={id} className={`${page === id ? 'active' : ''}${dragNav === id ? ' drop-target' : ''}`}
           aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)}
           onDragOver={e => { if (!droppable) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDragNav(id); }}
@@ -661,7 +728,8 @@ function App() {
       {page === 'methods' && <Methods graph={graph} notes={notes} setNotes={setNotes} selected={methSel} setSelected={setMethSel} onGo={openInGraph} onNew={addNote} onDelete={deleteNote} onUpdate={updateNote} onMove={id => setModal({move: {kind: 'note', id}})} folders={folders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveNoteToFolder} onCreateFolder={createFolder} onRenameFolder={renameFolder} onDeleteFolder={deleteFolder}/>}
       {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onGo={openInGraph} works={works} notes={notes} onMove={id => setModal({move: {kind: 'draft', id}})}/>}
       {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onNew={() => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
-      {page === 'readings' && <Readings graph={graph} readings={readings} selected={readSel} setSelected={setReadSel} openReading={readOpen} setOpenReading={setReadOpen} onGo={openInGraph} onAction={onAction} onNew={newReading} onUpdate={updateReading} onDelete={deleteReading}/>}
+      {page === 'readings' && <Readings graph={graph} readings={readings} selected={readSel} setSelected={setReadSel} openReading={readOpen} setOpenReading={setReadOpen} onGo={openInGraph} onAction={onAction} onNew={newReading} onUpdate={updateReading} onDelete={deleteReading} readFolders={readFolders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveReadingToFolder} onCreateFolder={createReadingFolder} onRenameFolder={renameReadingFolder} onDeleteFolder={deleteReadingFolder}/>}
+      {page === 'archives' && <Archives graph={graph} archives={archives} selected={arcSel} setSelected={setArcSel} openArchive={arcOpen} setOpenArchive={setArcOpen} onGo={openInGraph} onAction={onAction} onNew={newArchive} onUpdate={updateArchive} onDelete={deleteArchive}/>}
     </main>
 
     <footer className="site-foot">
@@ -708,6 +776,7 @@ function App() {
           <button className="pill" onClick={() => importVault('ideas')}><Icon name="idea" size={14}/>全部到选题池 <em>As ideas</em></button>
           <button className="pill" onClick={() => importVault('drafts')}><Icon name="draft" size={14}/>全部到创作台 <em>As drafts</em></button>
           <button className="pill" onClick={() => importVault('readings')}><Icon name="book" size={14}/>全部到阅读区 <em>As readings</em></button>
+          <button className="pill" onClick={() => importVault('archives')}><Icon name="archive" size={14}/>全部到档案区 <em>As archives</em></button>
         </div>
         <p className="quiet">「按文件夹自动分类」会根据文件夹名识别（作品 / 草稿 / 选题 / 方法），识别不了的一律放进方法库。<em>Unrecognized folders go to Methods.</em></p>
       </div>
@@ -793,7 +862,7 @@ function App() {
           <div className="form-actions import-targets">
             {Object.entries(MOVE_ZH).map(([k, zh]) =>
               <button key={k} className="pill" disabled={k === cur} onClick={() => moveContent(kind, id, k)}>
-                <Icon name={{works: 'works', methods: 'methods', drafts: 'draft', ideas: 'idea', readings: 'book'}[k]} size={14}/>{zh} <em>{MOVE_EN[k]}</em>
+                <Icon name={{works: 'works', methods: 'methods', drafts: 'draft', ideas: 'idea', readings: 'book', archives: 'archive'}[k]} size={14}/>{zh} <em>{MOVE_EN[k]}</em>
               </button>)}
           </div>
           <p className="quiet">当前所在：{MOVE_ZH[cur]}。<em>Currently in {MOVE_EN[cur]}.</em></p>
@@ -803,4 +872,4 @@ function App() {
   </div>;
 }
 
-createRoot(document.getElementById('root')).render(<App/>);
+createRoot(document.getElementById('root')).render(<><Intro/><App/></>);

@@ -281,6 +281,20 @@ function analyze(graph, node) {
         ['提及概念', 'Concepts', node.shared.length ? node.shared.join('、') : '正文没有命中概念词。', 'info']]
     };
   }
+  if (node.kind === 'archive') {
+    const ghosts = nb.out.filter(x => graph.index.get(x.id).kind === 'ghost');
+    return {
+      badge: ['个人档案', 'Archive'], status: String(node.archive.date || '').slice(0, 10) || '未标日期',
+      action: ['打开档案', 'Open', {type: 'openArchive', id: node.archive.id}],
+      action2: ['阅读全文', 'Read full', {type: 'read', id: node.id}],
+      action3: ['移动到…', 'Move', {type: 'move', kind: 'archive', id: node.archive.id}],
+      metric: connectivity(),
+      tiles: [['file', (node.body || '').length, '字数', 'Chars'], ['outlink', d.out, '出链', 'Outgoing'], ['back', d.back, '反链', 'Backlinks'], ['link', d.both, '双向共振', 'Mutual']],
+      insights: [...resonance,
+        ...(ghosts.length ? [['未创建的双链', 'Unresolved links', `${ghosts.length} 个 [[双链]] 指向尚未出现的笔记：${ghosts.slice(0, 3).map(x => graph.index.get(x.id).short).join('、')}${ghosts.length > 3 ? ' 等' : ''}。`, 'warn']] : []),
+        ['提及概念', 'Concepts', node.shared.length ? node.shared.join('、') : '正文没有命中概念词。', 'info']]
+    };
+  }
   if (node.kind === 'idea') {
     const I = C.filter(n => n.kind === 'idea');
     const reach = x => 100 * latent(graph, x.id).length / Math.max(1, C.length - 1);

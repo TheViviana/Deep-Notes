@@ -46,7 +46,7 @@ for (const f of ['skills/neural-creator-dashboard/SKILL.md', 'README.md', 'AGENT
 // 2. 数据结构
 function check(m, label) {
   const errs = [];
-  for (const k of ['snapshot', 'posts', 'postContent', 'notes', 'seedIdeas', 'seedDrafts', 'seedReadings', 'concepts']) if (!(k in m)) errs.push(`缺少导出 ${k}`);
+  for (const k of ['snapshot', 'posts', 'postContent', 'notes', 'seedIdeas', 'seedDrafts', 'seedReadings', 'seedArchives', 'concepts']) if (!(k in m)) errs.push(`缺少导出 ${k}`);
   if (errs.length) return errs;
   if (!m.posts.length) errs.push('posts 为空');
   for (const p of m.posts) {
@@ -60,6 +60,7 @@ function check(m, label) {
   for (const i of m.seedIdeas) if (typeof i.id !== 'number' || !['待写', '待扩展', '已转草稿'].includes(i.status)) errs.push(`选题 id 须为数字、status 须为 待写/待扩展/已转草稿：${i.title}`);
   for (const d of m.seedDrafts) if (d.source != null && !m.seedIdeas.some(i => i.id === d.source)) errs.push(`草稿的来源选题不存在：${d.title}`);
   for (const c of m.concepts) if (!Array.isArray(c) || typeof c[0] !== 'string' || !Array.isArray(c[1])) errs.push('concepts 格式应为 [概念名, [关键词…]]');
+  for (const a of m.seedArchives || []) if (!a.id || !a.title || !/^\d{4}-\d{2}-\d{2}/.test(a.date || '')) errs.push(`档案须有 id/title/date：${a.title}`);
   return errs;
 }
 
@@ -71,7 +72,7 @@ try {
   const m = await import(pathToFileURL(out).href);
   const errs = check(m, 'examples');
   if (errs.length) errs.forEach(e => fail('示例导入：' + e));
-  else ok(`examples/vault → 作品 ${m.posts.length}、方法笔记 ${m.notes.length}、选题 ${m.seedIdeas.length}、草稿 ${m.seedDrafts.length}、概念 ${m.concepts.length}`);
+  else ok(`examples/vault → 作品 ${m.posts.length}、方法笔记 ${m.notes.length}、选题 ${m.seedIdeas.length}、草稿 ${m.seedDrafts.length}、档案 ${m.seedArchives?.length || 0}、概念 ${m.concepts.length}`);
 } catch (e) {
   fail('导入脚本运行失败：' + (e.stderr?.toString() || e.message));
 } finally {
@@ -88,7 +89,7 @@ else {
   else ok(`src/data/${source} 结构正确`);
 }
 
-// 3. 核心动效：发光的光球与五只水母是这个看板的核心，不能被删掉或改成静态
+// 3. 核心动效：发光的光球与七只水母是这个看板的核心，不能被删掉或改成静态
 console.log('核心动效（光球与水母）');
 const home = readFileSync(join(ROOT, 'src/neural/Home.jsx'), 'utf8');
 const graphSrc = readFileSync(join(ROOT, 'src/neural/graph.js'), 'utf8');
@@ -103,8 +104,8 @@ const core = [
 ];
 for (const [label, re] of core) if (!re.test(home)) fail(`Home.jsx 缺少核心动效：${label}`); else ok(label);
 const modules = (graphSrc.match(/export const MODULES = \[([\s\S]*?)\n\];/) || [])[1] || '';
-if ((modules.match(/\{id: '/g) || []).length !== 6) fail('graph.js 的 MODULES 应为 6 个模块（6 只水母）');
-else ok('6 个模块 → 6 只水母');
+if ((modules.match(/\{id: '/g) || []).length !== 7) fail('graph.js 的 MODULES 应为 7 个模块（7 只水母）');
+else ok('7 个模块 → 7 只水母');
 for (const f of ['media/orb.mp4', 'media/jellyfish.mp4']) if (!existsSync(join(ROOT, 'public', f))) fail(`缺少核心素材 public/${f}`);
 
 // 4. 页面与素材

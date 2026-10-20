@@ -29,12 +29,12 @@ export async function setRoot(dir) {
 }
 
 // 各模块内容落盘的默认目录；方法笔记直接使用自身 path（形如 05-方法库 methods/<子目录>/<文件名>.md）。
-const DIRS = {works: '02-作品库', drafts: '03-创作台/正在写', readings: '06-阅读区'};
+const DIRS = {works: '02-作品库', drafts: '03-创作台/正在写', readings: '06-阅读区', archives: '07-档案区'};
 
 // 文件名安全化：路径分隔符换成 ·，去首尾空白，限长 60。
 const safe = t => String(t || '未命名').trim().replace(/[/\\]/g, '·').replace(/\s+/g, ' ').slice(0, 60) || '未命名';
 
-// 计算一条内容对应的库内相对路径（posix 分隔）。kind ∈ works | notes | drafts | readings
+// 计算一条内容对应的库内相对路径（posix 分隔）。kind ∈ works | notes | drafts | readings | archives
 export function pathOf(kind, item) {
   if (!item) return null;
   if (kind === 'notes') return item.path || null;
@@ -87,6 +87,8 @@ export function serialize(kind, item) {
     ]);
   } else if (kind === 'readings') {
     fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['author', item.author || null], ['source', item.source || null], ['date', item.date || null], ['updated', item.updatedAt || null]]);
+  } else if (kind === 'archives') {
+    fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['date', item.date || null], ['updated', item.updatedAt || null]]);
   } else if (kind === 'drafts') {
     fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['updated', item.updatedAt || null]]);
   }

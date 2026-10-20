@@ -8,7 +8,7 @@ import {CONFIG} from '../config';
 import {usePlugins, linkCheck} from './plugins';
 import {AiChip, AiDockChat, aiSend} from './ai';
 
-const FLIP = {works: 1, concepts: -1, methods: -1, ideas: -1, drafts: 1, readings: 1};
+const FLIP = {works: 1, concepts: -1, methods: -1, ideas: -1, drafts: 1, readings: 1, archives: -1};
 export const MOD_STYLE = Object.fromEntries(Object.entries(T.modules).map(([id, m]) => [id, {...m, flip: FLIP[id]}]));
 
 export const split = n => ({out: n.out - n.mutual, back: n.in - n.mutual, both: n.mutual});
@@ -31,7 +31,8 @@ function moduleSummary(graph, m) {
     methods: () => [graph.links.filter(l => l.kind === 'wiki').length, '双链', 'wikilinks'],
     ideas: () => [items.filter(n => n.idea.status !== '已转草稿').length, '待写', 'to write'],
     drafts: () => [fmt(items.reduce((s, n) => s + (n.body || '').length, 0)), '字', 'chars'],
-    readings: () => [new Set(items.map(n => n.reading?.author).filter(Boolean)).size, '作者', 'authors']
+    readings: () => [new Set(items.map(n => n.reading?.author).filter(Boolean)).size, '作者', 'authors'],
+    archives: () => [fmt(items.reduce((s, n) => s + (n.body || '').length, 0)), '字', 'chars']
   }[m.id]();
   return {count: items.length, sub};
 }
@@ -44,6 +45,7 @@ function itemMeta(n) {
     case 'idea': return [[n.idea.priority, 'Priority', ''], [n.idea.status, '', ''], ['↔', '', d.both]];
     case 'draft': return [['字', 'Chars', fmt((n.body || '').length)], ['↔', '', d.both]];
     case 'reading': return [['作者', 'Author', n.reading?.author || '—'], ['↔', '', d.both]];
+    case 'archive': return [['字', 'Chars', fmt((n.body || '').length)], ['↔', '', d.both]];
     case 'concept': return [['提及', 'Mentions', n.in], ['↔', '', d.both]];
     default: return [];
   }
@@ -483,7 +485,7 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
     <Scene graph={graph} items={stage === 'hub' ? [] : items} sel={sel} live={live} onModule={id => setFocus({mod: id === mod && stage !== 'hub' ? mod : id, sel: null})} onItem={id => {
       if (id === '__more__') {
         // 「更多」条目：有内页的模块直接跳内页；概念网络没有内页，回到光球全景用检索看
-        const dest = {works: 'library', methods: 'methods', ideas: 'ideas', drafts: 'drafts', readings: 'readings'}[mod];
+        const dest = {works: 'library', methods: 'methods', ideas: 'ideas', drafts: 'drafts', readings: 'readings', archives: 'archives'}[mod];
         if (dest) onAction({type: 'page', page: dest});
         else setFocus({mod: null, sel: null});
         return;
