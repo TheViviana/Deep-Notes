@@ -2,9 +2,9 @@
 
 **[下载 macOS 安装包 (.dmg)](https://github.com/TheViviana/Deep-Notes/releases/latest)** · [查看版本与附件](https://github.com/TheViviana/Deep-Notes/releases) · [完整使用教程](docs/使用教程.md)
 
-把你的作品、笔记、选题和草稿，变成一张会呼吸的神经网络：中心是一颗光球，六只发光的水母代表六个模块，点开水母，触须像伞一样展开到每一篇内容；点开一篇，右侧弹出它的全部数据和双向链接。
+把你的作品、笔记、选题和草稿，变成一张会呼吸的神经网络：中心是一颗光球，七只发光的水母代表七个模块，点开水母，触须像伞一样展开到每一篇内容；点开一篇，右侧弹出它的全部数据和双向链接。
 
-Turn your works, notes, ideas and drafts into a living neural network — an orb, six glowing jellyfish modules, umbrella-like tentacles to every piece, and a full analysis panel for each one.
+Turn your works, notes, ideas and drafts into a living neural network — an orb, seven glowing jellyfish modules, umbrella-like tentacles to every piece, and a full analysis panel for each one.
 
 > 仓库里的账号、作品、笔记、选题、草稿**全部是虚构的示例数据**。
 
@@ -40,10 +40,10 @@ Turn your works, notes, ideas and drafts into a living neural network — an orb
 
 ## 它能做什么
 
-- **工作台**：光球点亮、粒子迸发，背景网络从光球蔓延开，六只水母（作品库、概念网络、方法库、选题池、创作台、阅读区）围绕光球游动。
+- **工作台**：光球点亮、粒子迸发，背景网络从光球蔓延开，七只水母（作品库、概念网络、方法库、选题池、创作台、阅读区、档案区）围绕光球游动。
 - **三层交互**：点水母 → 光球退到左侧、水母列队，触须扇形展开到该模块的每一篇内容；点内容 → 右侧滑出分析栏（指标、收藏率、出链 / 反链 / 双向、话题、二度关联）；Esc 或面包屑逐层返回。
 - **问你的图谱**：底部对话框可以问「最核心的内容」「双向连接有哪些」「下一篇写什么」「未创建的笔记」，按本地规则检索，不调用 AI。
-- **作品库 / 创作台 / 选题池 / 阅读区**等内页：作品卡片与排序、草稿编辑（支持 `[[` 双链补全）、选题转草稿、阅读收藏与批注。
+- **作品库 / 创作台 / 选题池 / 阅读区 / 档案区**等内页：作品卡片与排序、草稿编辑（支持 `[[` 双链补全）、选题转草稿（转后选题自动移出）、阅读收藏与批注、阅读区分类目录与个人档案。
 - **银灰配色**：中性深灰底、银灰光球、香槟金点缀，颜色集中在 `src/neural/theme.js` 和 `neural.css` 顶部的 CSS 变量里。
 - **中英双语**界面，尊重系统的「减少动态效果」设置。
 - 纯前端，选题、草稿和目标保存在浏览器 `localStorage`，无后台同步服务；桌面版可选启用文件夹知识库，把内容同步成本地 `.md` 文件。
@@ -183,7 +183,8 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
     ├── Home.jsx               光球、水母、触须场景与三层交互
     ├── NetworkCanvas.jsx      背景神经网络
     ├── Analysis.jsx           右侧分析栏
-    ├── pages.jsx              作品库 / 方法库 / 创作台 / 选题池
+    ├── pages.jsx              作品库 / 方法库 / 创作台 / 选题池 / 阅读区 / 档案区
+    ├── Intro.jsx              开屏动画（粒子汇聚 → 奇点 → 爆发染白）
     ├── plugins.jsx            插件系统（斜杠命令 / 大纲目录 / AI 助手等）
     ├── importer.js            软件内知识库导入
     ├── main.jsx               页面框架与弹窗
