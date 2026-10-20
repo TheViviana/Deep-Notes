@@ -35,10 +35,11 @@ const FOLDERS = [
   {id: 'f:ideas', title: '选题池', path: '04-选题池', angle: 35},
   {id: 'f:methods', title: '方法库', path: '05-方法库 methods', angle: 0},
   {id: 'f:readings', title: '阅读区', path: '06-阅读区', angle: 215},
-  {id: 'f:archives', title: '档案区', path: '07-档案区', angle: 90}
+  {id: 'f:archives', title: '档案区', path: '07-档案区', angle: -35}
 ];
 
 // 首页围绕光球的七个模块；角度与图谱布局的目录锚点一致，背景网络会朝各自模块蔓延。
+// 角度避开 55°–125° 的正下弧段：那里是主视图问答对话坞的位置，模块条目不得压上去。
 export const MODULES = [
   {id: 'works', title: '作品库', en: 'Works', kind: 'post', folder: 'f:works', angle: 180, icon: 'works', page: 'library'},
   {id: 'concepts', title: '概念网络', en: 'Concepts', kind: 'concept', angle: -90, icon: 'concept'},
@@ -46,7 +47,7 @@ export const MODULES = [
   {id: 'ideas', title: '选题池', en: 'Ideas', kind: 'idea', folder: 'f:ideas', angle: 35, icon: 'idea', page: 'ideas'},
   {id: 'drafts', title: '创作台', en: 'Drafts', kind: 'draft', folder: 'f:drafts', angle: 145, icon: 'draft', page: 'drafts'},
   {id: 'readings', title: '阅读区', en: 'Readings', kind: 'reading', folder: 'f:readings', angle: 215, icon: 'book', page: 'readings'},
-  {id: 'archives', title: '档案区', en: 'Archives', kind: 'archive', folder: 'f:archives', angle: 90, icon: 'archive', page: 'archives'}
+  {id: 'archives', title: '档案区', en: 'Archives', kind: 'archive', folder: 'f:archives', angle: -35, icon: 'archive', page: 'archives'}
 ];
 export const moduleOf = node => MODULES.find(m => m.kind === node?.kind) || null;
 

@@ -58,14 +58,28 @@ function targets(L, t) {
   const swim = L.reduced ? 0 : 1;
   const res = {orb: {}, jelly: {}, fan: null};
   if (st === 'hub') {
-    const s = narrow ? clamp(W * .56, 180, 280) : clamp(Math.min(W, H) * .5, 250, 440);
-    const cy = narrow ? H * .47 : H * .53;
+    // 底部安全带：问答对话坞（KPI + 输入框 + 建议 chips 常折两行，实测约 192px，含下边距按 210 留；
+    // 窄屏还要算上固定在底部的模块导航，按 264 留）。模块角度已把正下弧段让给对话坞，这里再把
+    // 「光球 + 水母环」按剩余高度收放，并保证最下面的水母连同它的下方标签都停在安全带之上。
+    const dockH = narrow ? 264 : 210;
+    const top = narrow ? 206 : 96;
+    const bot = H - dockH;
+    const band = bot - top;
+    const s = narrow ? clamp(W * .56, 180, 280) : clamp(Math.min(band * .55, W * .42), 230, 430);
+    let cy = narrow ? H * .47 : top + band * .54;
+    res.hubSide = !narrow && band < 470;          // 矮窗口：hub 标签改到水母右侧，进一步让出纵向空间
+    // 纵向半径受两条约束：贴着光球边缘（≈ s*.54），以及「最低水母（±35°）+ 游动余量 + 下方标签」不进安全带
+    const sj = narrow ? 92 : clamp(W * .12, 120, 184);
+    const labPad = res.hubSide ? 70 : sj * .36 + 96;
+    const ry = clamp(Math.min(s * .54, (bot - cy - labPad) / .58, 262), 84, 262);
+    const rx = narrow ? W * .36 : Math.min(W * .40, 560);
+    const low = cy + .58 * ry;                    // 最低水母（±35°）的纵向位置
+    if (low > bot - 70) cy -= low - (bot - 70);   // 极矮窗口时整体上移兜底
     res.orb = {x: W / 2, y: cy, s};
-    const rx = narrow ? W * .36 : Math.min(W * .36, 540), ry = narrow ? H * .21 : Math.min(H * .32, 262);
     MODULES.forEach((m, i) => {
       const a = (m.angle + swim * 7 * Math.sin(t * .17 + i * 1.7)) * Math.PI / 180;
       const r = 1 + swim * .04 * Math.sin(t * .23 + i);
-      res.jelly[m.id] = {x: W / 2 + Math.cos(a) * rx * r, y: cy + Math.sin(a) * ry * r + swim * 9 * Math.sin(t * .9 + i * 2.1), s: narrow ? 92 : clamp(W * .12, 120, 184), o: 1, tilt: swim * 6 * Math.sin(t * .6 + i)};
+      res.jelly[m.id] = {x: W / 2 + Math.cos(a) * rx * r, y: cy + Math.sin(a) * ry * r + swim * 9 * Math.sin(t * .9 + i * 2.1), s: sj, o: 1, tilt: swim * 6 * Math.sin(t * .6 + i)};
     });
   } else if (narrow) {
     res.orb = {x: 40, y: 156, s: 86};
@@ -73,7 +87,8 @@ function targets(L, t) {
       const sel = m.id === L.mod, k = slotOf(L.mod, m.id);
       res.jelly[m.id] = {x: 104 + k * (W - 136) / (MODULES.length - 1), y: 152 + swim * 4 * Math.sin(t * .9 + i * 2), s: sel ? 76 : 54, o: sel ? 1 : .55, tilt: swim * 3 * Math.sin(t * .6 + i)};
     });
-    const n = L.items.length, gap = clamp((H - 330) / Math.max(n - 1, 1), 22, 54);
+    // 列表底部固定着模块导航条（约 72px），条目收在它上面：可用高度 = H - 420
+    const n = L.items.length, gap = clamp((H - 420) / Math.max(n - 1, 1), 22, 54);
     res.fan = {x: 34, y0: 286, gap};
   } else {
     const ox = Math.max(124, W * .09), cy = H * .53;
@@ -84,10 +99,11 @@ function targets(L, t) {
       res.jelly[m.id] = {x: colX + (sel ? 16 : 0), y: cy + (k - (MODULES.length - 1) / 2) * gap + swim * 5 * Math.sin(t * .9 + i * 2), s: sel ? 128 : 92, o: sel ? 1 : .6, tilt: swim * 3 * Math.sin(t * .6 + i)};
     });
     // 伞状条目以右侧分析栏为基准排在它左边约 90px 处（条目最宽约 310px），触须拉长、画面左右均衡；
-    // 模块层和打开笔记后位置相同，右侧栏滑入时伞不跳动；右缘留足余量，长文件名不会滑进分析栏底下
+    // 模块层和打开笔记后位置相同，右侧栏滑入时伞不跳动；右缘留足余量，长文件名不会滑进分析栏底下。
+    // 纵向整体收在面包屑之下、窗口底缘之上（留 ~90px 呼吸空间），不再顶到屏幕最底下。
     const panelLeft = W - clamp(W * .33, 380, 470) - 44;
     const n = L.items.length;
-    const span = Math.min(H - 130, Math.max(0, n - 1) * 54);
+    const span = Math.min(H - 240, Math.max(0, n - 1) * 54);
     const originX = colX + 16 + 128 * .5 + 10 + 168;
     res.fan = {x: Math.min(Math.max(panelLeft - 270 - 90, originX + 60), panelLeft - 320), y0: cy - span / 2, gap: n > 1 ? span / (n - 1) : 0};
   }
@@ -206,9 +222,11 @@ function Scene({graph, items, onModule, onItem, live, sel}) {
         if (lab) {
           const lw = lab.offsetWidth, lh = lab.offsetHeight;
           const hub = L.stage === 'hub', narrow = L.size.w < 760;
-          // 侧列时标签放在水母右边缘之外再空 10px，触须不压标签
-          const lx = hub ? x - lw / 2 : narrow ? x - lw / 2 : x + s * .5 + 10;
-          const ly = hub ? y + s * .36 : narrow ? y + s * .36 : y - lh / 2;
+          // 侧列/矮窗口时标签放在水母右边缘之外再空 10px，触须不压标签；
+          // hub 在矮窗口下也改用右侧标签，把纵向空间让给底部对话坞
+          const side = hub ? !!T.hubSide : !narrow;
+          const lx = side ? x + s * .5 + 10 : x - lw / 2;
+          const ly = side ? y - lh / 2 : y + s * .36;
           lab.style.transform = `translate3d(${lx}px,${ly}px,0)`;
           lab.style.opacity = clamp(narrow && !hub && m.id !== L.mod ? 0 : lo, 0, 1);
           j.label = {x: lx, y: ly, w: lw, h: lh};
