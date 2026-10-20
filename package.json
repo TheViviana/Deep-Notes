@@ -15,17 +15,16 @@
     "electron": "electron .",
     "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "npm run build && electron-builder",
-    "electron:dist": "electron-builder",
-    "electron:dist:win": "electron-builder --win",
-    "electron:dist:mac": "electron-builder --mac",
-    "electron:dist:linux": "electron-builder --linux",
-    "electron:dist:all": "electron-builder --mac --win --linux"
+    "electron:dist": "npm run build && electron-builder",
+    "electron:dist:win": "npm run build && electron-builder --win",
+    "electron:dist:mac": "npm run build && electron-builder --mac",
+    "electron:dist:linux": "npm run build && electron-builder --linux",
+    "electron:dist:all": "npm run build && electron-builder --mac --win --linux"
   },
   "dependencies": {
     "marked": "^18.1.1",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "vite": "^7.0.0"
+    "react-dom": "^19.0.0"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
@@ -39,6 +38,7 @@
     "electron": "^28.0.0",
     "electron-builder": "^24.9.1",
     "concurrently": "^8.2.2",
+    "vite": "^7.0.0",
     "wait-on": "^7.2.0"
   },
   "allowScripts": {
