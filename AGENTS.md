@@ -34,7 +34,7 @@ Deep Notes（深度笔记）：原「创作神经网络看板」（neural-creato
 - `src/data/sample.js`：虚构示例数据，也是数据字段的权威说明。
 - `src/neural/graph.js`：图谱推导（目录归属、双链、选题来源、话题、概念提及、双向共振）、布局和本地检索。
 - `src/neural/Home.jsx`：光球、水母、触须场景与三层交互（模块内条目 >15 条折叠为「更多」跳内页）；`Analysis.jsx` 分析栏；`pages.jsx` 六个内页（作品库 / 方法库 / 创作台 / 选题池 / 阅读区 / 档案区）。方法库列表按二级分类分组，支持笔记拖拽归类（分类间 + 拖到顶栏导航跨模块移动，纯 state 更新无刷新）与分类增删改（删除非空分类时内容移入「未分类」，手动空分类存 `-folders-v1`）；阅读区有同构的左侧分类目录（`reading.folder` 字段，手动空分类存 `-read-folders-v1`）。
-- `src/neural/Intro.jsx`：开屏动画（黑幕星野上粒子拖尾螺旋汇聚成球 → 收缩成奇点 → 爆发光条冲击环把界面染白后淡出）。桌面版每次启动播放，网页同一标签页刷新不重播（sessionStorage `neural-splash-seen`）；`prefers-reduced-motion` 或点击/按键直接跳过。
+- `src/neural/Intro.jsx`：开屏动画（关键帧序列：光斑亮起 → 展开为横向线条 → 线条撑开成界面主题底色 → 星野淡入 → 粒子汇聚成球 → 加速旋转 → 粒子炸开 → 白光铺满后淡出进入主界面；高 DPR 锐利渲染）。桌面版每次启动播放，网页同一标签页刷新不重播（sessionStorage `neural-splash-seen`）；`prefers-reduced-motion` 或点击/按键直接跳过。
 - `scripts/import-notes.mjs`：笔记导入；`scripts/verify.mjs`：自检。
 - `src/neural/importer.js`：软件内知识库导入（目录选择器 + 解析，规则与命令行导入一致；`parseVault(files, target)` 的 target 可指定全部内容归入某个模块，默认 'auto' 按文件夹名分类，未识别的一律作为方法笔记）。
 - `src/neural/fileStore.js`：桌面版文件夹知识库（仅 Electron 可用）。导入时在原库旁新建「<原名> - Deep Notes」副本（`vault:prepare-copy` IPC），之后编辑经全局 diff（main.jsx）防抖写回副本里的 .md，删除的内容移入副本 `.trash`，原知识库文件夹内容永不动；根目录路径存 localStorage（`-vault-root-v1`）。
