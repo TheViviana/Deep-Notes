@@ -207,6 +207,11 @@ function App() {
   const [kbConcepts, setKbConcepts] = useSaved(CONFIG.storagePrefix + '-concepts-v1', CONCEPTS);
   const [notes, setNotes] = useSaved(CONFIG.storagePrefix + '-notes-v1', SEED_NOTES);
   const [readings, setReadings] = useSaved(CONFIG.storagePrefix + '-readings-v1', seedReadings);
+  // 方法库二级分类：path 第二段推导 + 手动新建的空分类（-folders-v1 只存空分类，导入/切回示例时清空）
+  const [folders, setFolders] = useSaved(CONFIG.storagePrefix + '-folders-v1', []);
+  // 方法库列表拖拽中的内容（分类间平移 + 拖到顶栏导航跨模块移动）
+  const [dragging, setDragging] = useState(null);
+  const [dragNav, setDragNav] = useState(null);
   const [methSel, setMethSel] = useState(null);
   const [active, setActive] = useState(() => drafts[0]?.id);
   const [focus, setFocus] = useState({mod: null, sel: null});
@@ -319,6 +324,47 @@ function App() {
     setNotes(rest);
     setMethSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
     setToast('方法笔记已删除 · Note deleted');
+  }
+  // —— 方法库二级分类：拖拽/下拉只改 path 第二段，id 不变，选中态与编辑器原地保持（无刷新） ——
+  // 桌面版由全局 diff 自动「旧路径移入 .trash + 新路径写盘」（vault:write 自带建目录）。
+  const TRASH_FOLDER = '未分类'; // 删除非空分类时的兜底去处
+  const subOf = n => (n.path || '').split('/')[1] || '笔记';
+  const notePathIn = (n, folder) => {
+    const parts = String(n.path || '').split('/');
+    if (parts.length < 3) return `05-方法库 methods/${folder}/${(n.title || '未命名').replace(/[/\\]/g, '·').slice(0, 60)}.md`;
+    parts[1] = folder;
+    return parts.join('/');
+  };
+  function moveNoteToFolder(id, folder) {
+    if (!folder) return;
+    const n = notes.find(x => x.id === id);
+    if (!n || subOf(n) === folder) return; // 同分类重复投放：原地不动
+    setNotes(ns => ns.map(x => x.id === id ? {...x, path: notePathIn(x, folder)} : x));
+    setToast(`已移入「${folder}」 · Moved to ${folder}`);
+  }
+  function createFolder(name) {
+    const t = String(name || '').trim().replace(/[/\\]/g, '·').slice(0, 24);
+    if (!t) return;
+    setFolders(fs => fs.includes(t) ? fs : [...fs, t]);
+    setToast(`分类「${t}」已创建 · Folder created`);
+  }
+  function renameFolder(from, name) {
+    const t = String(name || '').trim().replace(/[/\\]/g, '·').slice(0, 24);
+    if (!t || t === from) return;
+    setNotes(ns => ns.map(n => subOf(n) === from ? {...n, path: notePathIn(n, t)} : n));
+    setFolders(fs => fs.map(f => f === from ? t : f));
+    setToast(`分类已重命名为「${t}」 · Folder renamed`);
+  }
+  function deleteFolder(name) {
+    if (name === TRASH_FOLDER) { setToast('「未分类」是兜底分类，不能删除 · Keep "未分类"'); return; }
+    const count = notes.filter(n => subOf(n) === name).length;
+    const ok = count
+      ? window.confirm(`删除分类「${name}」？其中 ${count} 篇笔记将移入「${TRASH_FOLDER}」。`)
+      : window.confirm(`删除空分类「${name}」？`);
+    if (!ok) return;
+    setNotes(ns => ns.map(n => subOf(n) === name ? {...n, path: notePathIn(n, TRASH_FOLDER)} : n));
+    setFolders(fs => fs.filter(f => f !== name));
+    setToast(`分类「${name}」已删除 · Folder deleted`);
   }
   // —— 阅读区 CRUD：收藏别人写好的内容，可批注编辑；标题/作者/来源/日期 ——
   function newReading() {
@@ -526,7 +572,7 @@ function App() {
   function adoptData(data, msg) {
     setWorks(data.works); setNotes(data.notes ?? SEED_NOTES); setIdeas(data.ideas); setDrafts(data.drafts);
     setReadings(data.readings ?? seedReadings);
-    setSnap(data.snapshot); setKbConcepts(data.concepts);
+    setSnap(data.snapshot); setKbConcepts(data.concepts); setFolders([]);
     setLibSel(data.works[0]?.id ?? null); setActive(data.drafts[0]?.id);
     setReadSel(null); setReadOpen(null);
     setFocus({mod: null, sel: null}); setOpenArticle(null); setPage('home');
@@ -579,7 +625,25 @@ function App() {
         <span className="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 28" width="18" height="21"><path fill={T.logo[0]} d="m14 1 8 7-2 12-7 7-10-5L1 12 8 4Z"/><path fill={T.logo[1]} d="m14 1-3 10 2 16 7-7 2-12Z"/><path fill={T.logo[2]} d="m14 1-3 10 11-3Z"/><path fill={T.logo[3]} d="m1 12 10-1 2 16-10-5Z"/></svg></span>
         <span className="brand-text">{CONFIG.brand.name} <b>/ {CONFIG.brand.sub}</b><small>{CONFIG.brand.tagline} · {CONFIG.brand.taglineEn}</small></span>
       </a>
-      <nav aria-label="主导航">{navs.map(([id, zh, en]) => <button key={id} className={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)}>{zh}<em>{en}</em></button>)}</nav>
+      <nav aria-label="主导航">{navs.map(([id, zh, en]) => {
+        // 跨模块拖拽：方法库笔记可直接拖到导航按钮上移动到对应模块（复用 moveContent，会换 id）
+        const PAGE_KIND = {library: 'works', methods: 'methods', drafts: 'drafts', ideas: 'ideas', readings: 'readings'};
+        const toKind = PAGE_KIND[id];
+        const droppable = !!dragging && toKind && dragging.kind === 'note' && HOME_OF[dragging.kind] !== toKind;
+        return <button key={id} className={`${page === id ? 'active' : ''}${dragNav === id ? ' drop-target' : ''}`}
+          aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)}
+          onDragOver={e => { if (!droppable) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDragNav(id); }}
+          onDragLeave={() => setDragNav(n => n === id ? null : n)}
+          onDrop={e => {
+            if (!droppable) return;
+            e.preventDefault(); setDragNav(null);
+            const d = dragging; setDragging(null);
+            moveContent(d.kind, d.id, toKind);
+            setPage(id); // 落到哪个模块就过去看，投放反馈更直观
+          }}>
+          {zh}<em>{en}</em>
+        </button>;
+      })}</nav>
       <div className="top-actions">
         <button className="pill primary" onClick={() => newDraft()}><Icon name="plus" size={14}/>新建草稿 <em>New</em></button>
         <NetSwitch/>
@@ -594,7 +658,7 @@ function App() {
         <Snapshot goal={goal} onGoal={() => { setGoalInput(String(goal)); setModal('goal'); }} ideas={ideas} drafts={drafts} works={works} notes={notes} onIdea={editIdea} onDraft={id => { setActive(id); setPage('drafts'); }} onLibrary={id => { if (typeof id === 'string') setLibSel(id); setPage('library'); }} snap={snap} graph={graph}/>
       </>}
       {page === 'library' && <Library graph={graph} works={works} selected={libSel} setSelected={setLibSel} openArticle={openArticle} setOpenArticle={setOpenArticle} onNewWork={newWork} onUpdateWork={updateWork} onDeleteWork={deleteWork} onGo={openInGraph} onAction={onAction} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts}/>}
-      {page === 'methods' && <Methods graph={graph} notes={notes} setNotes={setNotes} selected={methSel} setSelected={setMethSel} onGo={openInGraph} onNew={addNote} onDelete={deleteNote} onUpdate={updateNote} onMove={id => setModal({move: {kind: 'note', id}})}/>}
+      {page === 'methods' && <Methods graph={graph} notes={notes} setNotes={setNotes} selected={methSel} setSelected={setMethSel} onGo={openInGraph} onNew={addNote} onDelete={deleteNote} onUpdate={updateNote} onMove={id => setModal({move: {kind: 'note', id}})} folders={folders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveNoteToFolder} onCreateFolder={createFolder} onRenameFolder={renameFolder} onDeleteFolder={deleteFolder}/>}
       {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onGo={openInGraph} works={works} notes={notes} onMove={id => setModal({move: {kind: 'draft', id}})}/>}
       {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onNew={() => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
       {page === 'readings' && <Readings graph={graph} readings={readings} selected={readSel} setSelected={setReadSel} openReading={readOpen} setOpenReading={setReadOpen} onGo={openInGraph} onAction={onAction} onNew={newReading} onUpdate={updateReading} onDelete={deleteReading}/>}

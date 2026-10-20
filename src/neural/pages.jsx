@@ -271,8 +271,8 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
 const LANES = [['待写', 'To write'], ['待扩展', 'To expand'], ['已转草稿', 'Drafted']];
 const PRI = {高: ['High', 'high'], 中: ['Medium', 'mid'], 低: ['Low', 'low']};
 
-// —— 方法库 Methods：左侧笔记列表，右侧就地编辑（Markdown + [[双链]] 补全），重命名自动同步 path ——
-export function Methods({graph, notes, setNotes, selected, setSelected, onGo, onNew, onDelete, onUpdate, onMove}) {
+// —— 方法库 Methods：左侧笔记列表按二级分类分组（可折叠、可拖拽归类、分类可增删改），右侧就地编辑 ——
+export function Methods({graph, notes, setNotes, selected, setSelected, onGo, onNew, onDelete, onUpdate, onMove, folders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder}) {
   const note = notes.find(n => n.id === selected) || notes[0];
   const area = useRef(null);
   const pv = useRef(null); // 阅读模式渲染容器（浮动目录在阅读下跳转/高亮用）
@@ -304,6 +304,39 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
   };
   const rows = notes.filter(n => (n.title + ' ' + (n.path || '')).toLowerCase().includes(q.toLowerCase()));
   const subOf = n => (n.path || '').split('/')[1] || '笔记';
+  // —— 二级分类：path 第二段推导 + 手动新建的空分类（folders）；搜索时空分类隐藏 ——
+  const allFolders = useMemo(() => {
+    const names = [];
+    for (const n of notes) { const f = subOf(n); if (!names.includes(f)) names.push(f); }
+    for (const f of folders || []) if (!names.includes(f)) names.push(f);
+    return names;
+  }, [notes, folders]);
+  const groups = useMemo(
+    () => allFolders.map(name => ({name, items: rows.filter(n => subOf(n) === name)})).filter(g => g.items.length || !q.trim()),
+    [allFolders, rows, q]);
+  const [collapsed, setCollapsed] = useState({});
+  const [hover, setHover] = useState(null);       // 拖拽悬停的分类
+  const [renaming, setRenaming] = useState(null); // {from, value} 正在重命名的分类
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState('');
+  const toggle = f => setCollapsed(c => ({...c, [f]: !c[f]}));
+  const commitRename = () => {
+    const {from, value} = renaming || {};
+    const t = (value || '').trim();
+    if (t && t !== from && onRenameFolder) onRenameFolder(from, t);
+    setRenaming(null);
+  };
+  const commitCreate = () => {
+    const t = newName.trim();
+    if (t && onCreateFolder) onCreateFolder(t);
+    setCreating(false); setNewName('');
+  };
+  const startDrag = (n, e) => {
+    if (!setDragging) return;
+    e.dataTransfer.setData('text/plain', n.id);
+    e.dataTransfer.effectAllowed = 'move';
+    setDragging({kind: 'note', id: n.id});
+  };
   return <div className="page page-methods">
     <PageHead zh="方法库" en="Methods" sub="方法可复用，笔记会长出连接。" subEn="Reusable methods — every note grows links in the graph.">
       <button className="pill primary" onClick={onNew}><Icon name="plus" size={15}/>新建笔记 <em>New note</em></button>
@@ -312,14 +345,60 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
       <aside className="draft-list glass">
         <h3>方法笔记 <em>Method notes</em><b>{notes.length}</b></h3>
         <label className="search"><Icon name="search" size={14}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索笔记… Search notes" aria-label="搜索方法笔记"/></label>
-        {rows.map(n => <button key={n.id} className={n.id === note?.id ? 'active' : ''} onClick={() => setSelected(n.id)}>
-          <i/><span>{n.title || '未命名笔记'}<small>{subOf(n)} · {(n.body || '').length} 字 chars · {graph.index.get('note:' + n.id)?.deg || 0} 连接 links</small></span>
-        </button>)}
-        {!rows.length && <p className="empty-line">没有匹配的笔记 <em>No match</em></p>}
+        {groups.map(g => {
+          const open = !collapsed[g.name];
+          const hi = dragging?.kind === 'note' && hover === g.name;
+          return <div key={g.name} className={`m-folder${open ? '' : ' closed'}${hi ? ' drop-hi' : ''}`}
+            onDragOver={e => { if (dragging?.kind !== 'note') return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setHover(g.name); }}
+            onDragLeave={() => setHover(h => h === g.name ? null : h)}
+            onDrop={e => {
+              if (dragging?.kind !== 'note') return;
+              e.preventDefault(); setHover(null);
+              onMoveToFolder(dragging.id, g.name); // 同分类重复投放由 main.jsx 去重，纯 state 更新无刷新
+              setDragging(null);
+            }}>
+            <div className="m-folder-head">
+              <button className="m-folder-name" onClick={() => toggle(g.name)} aria-expanded={open} title="点击折叠 / 展开该分类">
+                <Icon name="chevron" size={11}/><span className="m-folder-title">{g.name}</span><b>{g.items.length}</b>
+              </button>
+              {g.name !== '未分类' && <span className="m-folder-tools">
+                <button title="重命名分类 Rename folder" aria-label={`重命名分类 ${g.name}`} onClick={() => setRenaming({from: g.name, value: g.name})}><Icon name="draft" size={12}/></button>
+                <button title="删除分类 Delete folder" aria-label={`删除分类 ${g.name}`} onClick={() => onDeleteFolder(g.name)}><Icon name="close" size={12}/></button>
+              </span>}
+            </div>
+            {open && (renaming?.from === g.name
+              ? <input className="m-folder-rename" autoFocus value={renaming.value} maxLength={24} aria-label="分类名称 Folder name"
+                  onChange={e => setRenaming({from: g.name, value: e.target.value})}
+                  onKeyDown={e => { if (e.isComposing) return; if (e.key === 'Enter') commitRename(); else if (e.key === 'Escape') setRenaming(null); }}
+                  onBlur={commitRename}/>
+              : g.items.map(n => <button key={n.id} draggable={!!setDragging}
+                  className={`m-item${n.id === note?.id ? ' active' : ''}${dragging?.id === n.id ? ' dragging' : ''}`}
+                  onClick={() => setSelected(n.id)}
+                  onDragStart={e => startDrag(n, e)} onDragEnd={() => setDragging?.(null)}
+                  title="拖到其他分类或顶部导航即可移动 Drag to a folder or the top nav">
+                  <i/><span>{n.title || '未命名笔记'}<small>{(n.body || '').length} 字 chars · {graph.index.get('note:' + n.id)?.deg || 0} 连接 links</small></span>
+                </button>))}
+          </div>;
+        })}
+        {!groups.length && <p className="empty-line">没有匹配的笔记 <em>No match</em></p>}
+        {creating ? <input className="m-folder-rename" autoFocus value={newName} maxLength={24}
+            placeholder="分类名称，回车确认 Folder name" aria-label="新建分类 New folder name"
+            onChange={e => setNewName(e.target.value)}
+            onKeyDown={e => { if (e.isComposing) return; if (e.key === 'Enter') commitCreate(); else if (e.key === 'Escape') { setCreating(false); setNewName(''); } }}
+            onBlur={commitCreate}/>
+          : <button className="m-folder-add" onClick={() => { setCreating(true); setNewName(''); }}>
+              <Icon name="plus" size={13}/>新建分类 <em>New folder</em>
+            </button>}
       </aside>
       {note ? <section className="editor glass">
         <div className="editor-meta">
-          <span>{subOf(note)} <em>Folder</em></span>
+          <span className="folder-chip">
+            <select value={subOf(note)} aria-label="所属分类，选择即移动 Folder" title="选择即移动到该分类 · Pick to move"
+              onChange={e => onMoveToFolder && onMoveToFolder(note.id, e.target.value)}>
+              {allFolders.map(f => <option key={f} value={f}>{f}</option>)}
+            </select>
+            <em>Folder</em>
+          </span>
           <span className="editor-tools" role="group" aria-label="编辑器视图 Editor views">
             <button type="button" className={focusMode ? 'on' : ''} aria-pressed={focusMode}
               title="隐藏左侧列表，编辑区占满 · Hide the list and widen the editor" onClick={toggleFocus}>专注 <em>Focus</em></button>

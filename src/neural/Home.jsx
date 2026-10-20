@@ -483,7 +483,7 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
     <Scene graph={graph} items={stage === 'hub' ? [] : items} sel={sel} live={live} onModule={id => setFocus({mod: id === mod && stage !== 'hub' ? mod : id, sel: null})} onItem={id => {
       if (id === '__more__') {
         // 「更多」条目：有内页的模块直接跳内页；概念网络没有内页，回到光球全景用检索看
-        const dest = {works: 'library', methods: 'methods', ideas: 'ideas', drafts: 'drafts'}[mod];
+        const dest = {works: 'library', methods: 'methods', ideas: 'ideas', drafts: 'drafts', readings: 'readings'}[mod];
         if (dest) onAction({type: 'page', page: dest});
         else setFocus({mod: null, sel: null});
         return;
