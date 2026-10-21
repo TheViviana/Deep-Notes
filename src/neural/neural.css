@@ -914,3 +914,68 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
   .readings-layout { grid-template-columns: 1fr; }
   .read-folders { position: static; max-height: none; }
 }
+
+/* —— ⌘K 全局命令面板（CommandPalette.jsx） —— */
+.palette-veil { align-items: start; padding-top: 14vh; }
+.palette { width: min(560px, 100%); padding: 10px; display: grid; gap: 8px; animation: fadeUp .22s both; }
+.palette-input { display: flex; align-items: center; gap: 9px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255, 255, 255, .03); color: var(--muted); }
+.palette-input input { flex: 1; min-width: 0; border: 0; background: none; color: var(--text); font-size: 14px; outline: none; }
+.palette-input input::placeholder { color: var(--muted); }
+.palette-list { max-height: 46vh; overflow: auto; display: grid; gap: 2px; padding: 2px; }
+.palette-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid transparent; border-radius: 10px; background: none; color: var(--text); text-align: left; }
+.palette-item.on { background: rgba(213, 200, 164, .12); border-color: rgba(213, 200, 164, .28); }
+.pi-icon { flex: none; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; border: 1px solid var(--line); color: var(--kc, var(--text-2)); background: rgba(255, 255, 255, .04); }
+.pi-zh { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.pi-group { flex: none; color: var(--muted); font-size: 10.5px; }
+.palette-empty { margin: 8px 4px; color: var(--muted); font-size: 12px; text-align: center; }
+.palette-foot { margin: 2px 6px 0; color: var(--muted); font-size: 10.5px; letter-spacing: .04em; }
+@media (prefers-reduced-motion: reduce) { .palette { animation: none; } }
+
+/* —— 选中即问 AI（plugins.jsx）：选中文本上方浮出的胶囊按钮 —— */
+.ask-ai-chip { position: fixed; z-index: 60; display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; border-radius: 999px; border: 1px solid rgba(213, 200, 164, .4); background: rgba(20, 21, 21, .92); color: var(--gold); font-size: 12px; box-shadow: 0 10px 28px rgba(0, 0, 0, .45); animation: fadeUp .18s both; }
+.ask-ai-chip:hover { border-color: var(--gold); }
+@media (prefers-reduced-motion: reduce) { .ask-ai-chip { animation: none; } }
+
+/* —— 概念内页卡片：定义与手动关键词编辑（pages.jsx Concepts） —— */
+.concept-card .rc-title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.rc-title.as-link { flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: var(--text); font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.rc-title.as-link:hover { color: var(--gold); }
+.rc-due { flex: none; padding: 1px 8px; border-radius: 999px; border: 1px solid rgba(230, 207, 152, .38); color: var(--gold); font-size: 10px; }
+.rc-due em { margin-left: .3em; opacity: .7; }
+.concept-card .rc-edit { flex: none; opacity: .55; }
+.concept-card .rc-edit:hover, .concept-card.editing .rc-edit { opacity: 1; }
+.rc-def { margin: 2px 0 0; color: var(--text-2); font-size: 12px; line-height: 1.6; }
+.concept-edit { margin-top: 9px; padding-top: 9px; border-top: 1px dashed var(--line); display: grid; gap: 7px; }
+.concept-edit textarea { width: 100%; resize: vertical; min-height: 44px; padding: 7px 9px; border-radius: 9px; border: 1px solid rgba(230, 207, 152, .45); background: rgba(12, 13, 13, .6); color: var(--text); font-size: 12px; line-height: 1.55; }
+.concept-edit textarea:focus-visible { outline: none; border-color: var(--gold); }
+.concept-edit-row { display: flex; gap: 6px; align-items: center; }
+.concept-edit-row input { flex: 1; min-width: 0; height: 27px; padding: 0 9px; border-radius: 8px; border: 1px solid var(--line); background: rgba(12, 13, 13, .6); color: var(--text); font-size: 12px; }
+.concept-edit-row input:focus-visible { outline: none; border-color: var(--gold); }
+.concept-edit .chip-row { margin: 0; }
+.concept-edit-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+/* —— 概念复习闪卡（pages.jsx Concepts 复习弹窗） —— */
+.review-veil { position: fixed; inset: 0; z-index: 110; display: grid; place-items: center; padding: 20px; background: rgba(4, 4, 4, .66); backdrop-filter: blur(6px); animation: fadeIn .25s both; }
+.review-card { width: min(480px, 100%); padding: 18px 20px 20px; display: grid; gap: 12px; }
+.review-card.done { justify-items: center; text-align: center; color: var(--text-2); }
+.review-card.done svg { color: var(--gold); }
+.review-card.done h3 { margin: 2px 0 0; color: var(--text); }
+.review-card.done p { margin: 0; font-size: 12px; max-width: 300px; }
+.review-card.done .pill { margin-top: 4px; }
+.review-head { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 11px; letter-spacing: .06em; }
+.review-face { display: grid; justify-items: center; gap: 8px; width: 100%; min-height: 190px; padding: 26px 22px; border-radius: 14px; border: 1px solid var(--line-2); background: radial-gradient(120% 130% at 50% 0%, rgba(213, 200, 164, .1), rgba(12, 13, 13, .55) 60%); color: var(--text); text-align: center; transition: transform .25s, border-color .25s; }
+.review-face:hover { transform: translateY(-2px); border-color: rgba(213, 200, 164, .45); }
+.rev-hint { color: var(--gold); font-size: 12px; letter-spacing: .05em; }
+.rev-title { font-size: 24px; font-weight: 600; letter-spacing: .02em; }
+.rev-tip { color: var(--muted); font-size: 11px; }
+.rev-def { margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.65; }
+.rev-links { color: var(--muted); font-size: 11px; }
+.review-grade { display: flex; gap: 10px; justify-content: center; }
+@media (prefers-reduced-motion: reduce) { .review-veil, .review-face { animation: none; transition: none; } }
+
+/* —— 分析栏概念定义行（Analysis.jsx ConceptEditor） —— */
+.le-def { margin: 4px 0 0; display: flex; align-items: baseline; gap: 6px; color: var(--text-2); font-size: 12px; line-height: 1.6; }
+.le-def .le-btn { flex: none; align-self: center; }
+
+/* —— ⌘K 键位提示（关于弹窗） —— */
+.about kbd { display: inline-block; padding: 0 6px; border: 1px solid var(--line-2); border-bottom-width: 2px; border-radius: 6px; background: rgba(255, 255, 255, .05); font-family: inherit; font-size: 11px; }

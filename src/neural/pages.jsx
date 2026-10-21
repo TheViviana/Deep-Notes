@@ -3,8 +3,9 @@ import {KINDS, CONTENT, MODULES, neighbors, latent, LINK_EN} from './graph';
 import {Icon} from './icons';
 import {Analysis, Count} from './Analysis';
 import {ArticleView, LineMirror, renderMarkdown} from './ArticleView';
-import {useWikiComplete, WikiSuggest} from './wiki';
+import {useWikiComplete, WikiSuggest, resolveTarget, scrollToAnchor, headingMap} from './wiki';
 import {useEditorEnhancers} from './plugins';
+import {conceptExtras, setConceptExtra, conceptReview, gradeConcept} from './conceptStore';
 import {CONFIG} from '../config';
 import {T} from './theme';
 
@@ -124,8 +125,9 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
   const [dragSplit, setDragSplit] = useState(false);
   const change = (key, value) => setDrafts(drafts.map(d => d.id === draft.id ? {...d, [key]: value} : d));
   const titles = useMemo(() => graph.nodes.filter(n => CONTENT.has(n.kind) && n.id !== 'draft:' + draft?.id).map(n => ({id: n.id, title: n.path?.split('/').pop().replace(/\.md$/, '') || n.title, short: n.short || n.title, kind: n.kind})), [graph, draft?.id]);
-  const wiki = useWikiComplete({titles, areaRef: area, onChange: body => change('body', body)});
-  const fx = useEditorEnhancers({area, value: draft?.body, onChange: body => change('body', body), wiki, title: draft?.title, preview: pv, previewMode: readMode ? 'preview' : 'edit'});
+  const heads = useMemo(() => headingMap(graph), [graph]);
+  const wiki = useWikiComplete({titles, areaRef: area, onChange: body => change('body', body), headings: heads});
+  const fx = useEditorEnhancers({area, value: draft?.body, onChange: body => change('body', body), wiki, title: draft?.title, titles, preview: pv, previewMode: readMode ? 'preview' : 'edit'});
   const node = draft && graph.index.get('draft:' + draft.id);
   const nb = node ? neighbors(graph, node.id) : null;
   const wikiLinks = node ? graph.links.filter(l => l.kind === 'wiki' && l.s === node.id).map(l => graph.index.get(l.t)) : [];
@@ -157,8 +159,11 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
   const jumpWiki = e => {
     const a = e.target.closest('a[data-target]');
     if (!a) return;
-    const id = byName.get(String(a.dataset.target).toLowerCase());
-    if (id) onGo(id);
+    // 块引用 [[笔记#小节]]：目标是当前这篇时滚动到对应小节，否则跳到目标内容
+    const {id, anchor} = resolveTarget(byName, a.dataset.target);
+    if (!id) return;
+    if (anchor && node && id === node.id) { scrollToAnchor(pv.current, anchor); return; }
+    onGo(id);
   };
   // 可拖动分割线：拖动调左栏宽度（钳制 25–75%），双击恢复对半，左右方向键微调
   const onDividerDown = e => {
@@ -237,6 +242,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
                   onKeyDown={fx.onKeyDown} onBlur={fx.onBlur}/>
                 {wiki.suggest && <WikiSuggest suggest={wiki.suggest} pick={wiki.pick} setPick={wiki.setPick} insert={wiki.insert}/>}
                 {fx.menu}
+                {fx.ask}
               </>}
           </div>
           {fx.toc}
@@ -292,15 +298,19 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
   useEffect(() => () => clearTimeout(focusFx.current), []);
   const change = (key, value) => { if (note) onUpdate(note.id, {[key]: value}); };
   const titles = useMemo(() => graph.nodes.filter(n => CONTENT.has(n.kind) && n.id !== 'note:' + note?.id).map(n => ({id: n.id, title: n.title, short: n.short || n.title, kind: n.kind})), [graph, note?.id]);
-  const wiki = useWikiComplete({titles, areaRef: area, onChange: body => change('body', body)});
-  const fx = useEditorEnhancers({area, value: note?.body, onChange: body => change('body', body), wiki, title: note?.title, preview: pv, previewMode: readMode ? 'preview' : 'edit'});
+  const heads = useMemo(() => headingMap(graph), [graph]);
+  const wiki = useWikiComplete({titles, areaRef: area, onChange: body => change('body', body), headings: heads});
+  const fx = useEditorEnhancers({area, value: note?.body, onChange: body => change('body', body), wiki, title: note?.title, titles, preview: pv, previewMode: readMode ? 'preview' : 'edit'});
   const readHtml = useMemo(() => readMode && note ? renderMarkdown(note.body) : '', [readMode, note]);
   const byName = useMemo(() => nameIndex(graph), [graph]);
   const jumpWiki = e => {
     const a = e.target.closest('a[data-target]');
     if (!a) return;
-    const id = byName.get(String(a.dataset.target).toLowerCase());
-    if (id) onGo(id);
+    // 块引用 [[笔记#小节]]：目标是当前这篇时滚动到对应小节，否则跳到目标内容
+    const {id, anchor} = resolveTarget(byName, a.dataset.target);
+    if (!id) return;
+    if (anchor && note && id === 'note:' + note.id) { scrollToAnchor(pv.current, anchor); return; }
+    onGo(id);
   };
   const rows = notes.filter(n => (n.title + ' ' + (n.path || '')).toLowerCase().includes(q.toLowerCase()));
   const subOf = n => (n.path || '').split('/')[1] || '笔记';
@@ -422,6 +432,7 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
                 placeholder="写方法、记流程，用 [[双链]] 连到别的笔记…" aria-label="笔记正文"/>
               {wiki.suggest && <WikiSuggest suggest={wiki.suggest} pick={wiki.pick} setPick={wiki.setPick} insert={wiki.insert}/>}
               {fx.menu}
+              {fx.ask}
             </>}
           {fx.toc}
         </div>
@@ -549,7 +560,7 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
       </section>
       {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'readings')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)}/></aside>}
     </div>
-    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenReading(null)} onGo={onGo} eyebrow={['READING', '阅读全文']}/>}
+    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenReading(null)} onGo={onGo} eyebrow={['READING', '阅读全文']} exportKind="readings"/>}
   </div>;
 }
 
@@ -595,7 +606,153 @@ export function Archives({graph, archives, selected, setSelected, openArchive, s
       </section>
       {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'archives')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)}/></aside>}
     </div>
-    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenArchive(null)} onGo={onGo} eyebrow={['ARCHIVE', '档案全文']}/>}
+    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenArchive(null)} onGo={onGo} eyebrow={['ARCHIVE', '档案全文']} exportKind="archives"/>}
+  </div>;
+}
+
+// 概念网络内页：全部概念一张清单（模块「还有 x 条」跳到这里）。
+// 每张概念卡可展开编辑（定义 + 手动关键词，存独立键不随导入覆盖）；
+// 页头「开始复习」进入闪卡模式（到期优先，忘了 / 模糊 / 记得三档调度），点击概念回到工作台图谱选中它。
+export function Concepts({graph, onGo}) {
+  const [q, setQ] = useState('');
+  const extras = conceptExtras.use();   // {概念名: {text, terms}}
+  const review = conceptReview.use();   // {概念名: {due, ivl, ef, reps}}
+  const [editing, setEditing] = useState(null);  // 正在展开编辑的概念名
+  const [draftText, setDraftText] = useState(''); // 定义草稿
+  const [termDraft, setTermDraft] = useState(''); // 关键词输入
+  const [rev, setRev] = useState(null); // 复习会话 {queue, i, flipped}
+  const linkedOf = c => graph.links.filter(l => (l.a === c.id || l.b === c.id) && l.kind === 'mention')
+    .map(l => graph.index.get(l.a === c.id ? l.b : l.a)?.title).filter(Boolean);
+  const rows = graph.nodes.filter(n => n.kind === 'concept' && (!q || n.title.toLowerCase().includes(q.toLowerCase())))
+    .sort((a, b) => (b.in || 0) - (a.in || 0) || a.title.localeCompare(b.title, 'zh-CN'));
+  const now = Date.now();
+  const dueCount = rows.filter(c => (review[c.title]?.due || 0) <= now).length;
+  const toggleEdit = c => {
+    if (editing === c) { setEditing(null); return; }
+    setEditing(c);
+    setDraftText(extras[c]?.text || '');
+    setTermDraft('');
+  };
+  const addTerm = name => {
+    const t = termDraft.trim();
+    if (!t) return;
+    const cur = extras[name]?.terms || [];
+    if (!cur.includes(t)) setConceptExtra(name, {terms: [...cur, t]});
+    setTermDraft('');
+  };
+  const removeTerm = (name, t) => setConceptExtra(name, {terms: (extras[name]?.terms || []).filter(x => x !== t)});
+  // 复习队列：到期优先，其次按最近到期时间；一次把全部概念排进去，不设上限
+  const startReview = () => {
+    if (!rows.length) return;
+    const due = rows.filter(c => (review[c.title]?.due || 0) <= now);
+    const rest = rows.filter(c => (review[c.title]?.due || 0) > now).sort((a, b) => (review[a.title]?.due || 0) - (review[b.title]?.due || 0));
+    setRev({queue: [...due, ...rest], i: 0, flipped: false});
+  };
+  const grade = g => {
+    gradeConcept(rev.queue[rev.i].title, g);
+    setRev(r => ({...r, i: r.i + 1, flipped: false}));
+  };
+  // 复习弹窗：Esc 结束本轮
+  useEffect(() => {
+    if (!rev) return;
+    const onKey = e => { if (e.key === 'Escape') setRev(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [rev]);
+  const done = rev && rev.i >= rev.queue.length; // 本轮全部过完 → 总结页
+  return <div className="page page-concepts">
+    <PageHead zh="概念网络" en="Concepts" sub="全部概念，以及它们出现在哪些内容里。" subEn="Every concept and where it shows up.">
+      <button className="pill primary" onClick={startReview} disabled={!rows.length}>
+        <Icon name="replay" size={15}/>开始复习 <em>Review{dueCount ? ` · ${dueCount} due` : ''}</em>
+      </button>
+    </PageHead>
+    <div className="library-layout">
+      <section className="works-col">
+        <div className="toolbar-row">
+          <label className="search"><Icon name="search" size={15}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索概念… Search concepts" aria-label="搜索概念"/></label>
+        </div>
+        <div className="read-list">{rows.map(c => {
+          const linked = linkedOf(c);
+          const ex = extras[c.title] || {};
+          const open = editing === c.title;
+          return <div key={c.id} className={`read-card glass concept-card${open ? ' editing' : ''}`}>
+            <span className="rc-body">
+              <span className="rc-title-row">
+                <button className="rc-title as-link" onClick={() => onGo(c.id)} title="回到工作台，在图谱里查看它的位置 · View in graph">{c.title}</button>
+                {(review[c.title]?.due || 0) <= now && <span className="rc-due">待复习 <em>due</em></span>}
+                <button className="icon-btn rc-edit" aria-label={open ? '收起编辑 Collapse' : '编辑定义与关键词 Edit'} aria-expanded={open} onClick={() => toggleEdit(c.title)}>
+                  <Icon name={open ? 'close' : 'draft'} size={13}/>
+                </button>
+              </span>
+              <span className="rc-sub">提及 {c.in || 0} 次{linked.length ? ' · ' + linked.slice(0, 4).join('、') : ''}</span>
+              {(ex.text || open) && <p className="rc-def">{ex.text || <>还没有定义，写一句它是什么。<em>No definition yet.</em></>}</p>}
+              {ex.terms?.length > 0 && <div className="chip-row">{ex.terms.map(t => <span key={t} className="chip static" style={{'--kc': KINDS.concept.color}}>{t}</span>)}</div>}
+              {open && <div className="concept-edit" onClick={e => e.stopPropagation()}>
+                <textarea value={draftText} rows={2} aria-label={`定义 ${c.title}`}
+                  placeholder="用一句话定义这个概念… Define it in one line"
+                  onChange={e => setDraftText(e.target.value)}/>
+                <div className="concept-edit-row">
+                  <input value={termDraft} aria-label={`新增关键词 ${c.title}`}
+                    placeholder="加关键词，回车确认 Add a keyword"
+                    onChange={e => setTermDraft(e.target.value)}
+                    onKeyDown={e => { if (e.isComposing) return; if (e.key === 'Enter') { e.preventDefault(); addTerm(c.title); } }}/>
+                  <button className="icon-btn" aria-label="添加关键词 Add keyword" onClick={() => addTerm(c.title)}><Icon name="plus" size={13}/></button>
+                </div>
+                {ex.terms?.length > 0 && <div className="chip-row">{ex.terms.map(t => <button key={t} className="chip" style={{'--kc': KINDS.concept.color}}
+                  title="点击移除 Click to remove" onClick={() => removeTerm(c.title, t)}><Icon name="close" size={10}/>{t}</button>)}</div>}
+                <div className="concept-edit-actions">
+                  {(ex.text || ex.terms?.length) ? <button className="pill ghost" onClick={() => { setConceptExtra(c.title, {delete: true}); setDraftText(''); }}>清除 <em>Clear</em></button> : <span/>}
+                  <button className="pill primary" onClick={() => { setConceptExtra(c.title, {text: draftText}); setEditing(null); }}><Icon name="check" size={13}/>保存 <em>Save</em></button>
+                </div>
+              </div>}
+            </span>
+          </div>;
+        })}</div>
+        {!rows.length && <div className="empty"><Icon name="concept" size={30}/><p>还没有概念 <em>No concepts yet</em></p><p className="source-line">给文章或笔记加 #标签，概念就会自动汇入网络 <em>Use #tags</em></p></div>}
+        <p className="source-line"><Icon name="info" size={13}/>共 {rows.length} 个概念；点击概念名回到工作台，在图谱里查看它的位置；定义与关键词只存在本机 <em>Click to view in graph</em>。</p>
+      </section>
+    </div>
+    {rev && !done && (() => {
+      const c = rev.queue[rev.i];
+      const linked = linkedOf(c);
+      const ex = extras[c.title] || {};
+      return <div className="review-veil" role="dialog" aria-modal="true" aria-label="概念复习 Concept review">
+        <div className="review-card glass">
+          <header className="review-head">
+            <span>{rev.i + 1} / {rev.queue.length} · 到期优先 <em>due first</em></span>
+            <button className="icon-btn" aria-label="结束复习 End review" onClick={() => setRev(null)}><Icon name="close" size={14}/></button>
+          </header>
+          <button className={`review-face${rev.flipped ? ' back' : ''}`} onClick={() => setRev(r => ({...r, flipped: !r.flipped}))}
+            aria-label={rev.flipped ? '点击回到正面 Flip back' : '点击翻面看答案 Reveal answer'}>
+            {rev.flipped
+              ? <>
+                <span className="rev-title">{c.title}</span>
+                <p className="rev-def">{ex.text || <>还没有定义 —— 可以去概念页补一句。<em>No definition yet.</em></>}</p>
+                {ex.terms?.length > 0 && <div className="chip-row">{ex.terms.map(t => <span key={t} className="chip static" style={{'--kc': KINDS.concept.color}}>{t}</span>)}</div>}
+                {linked.length > 0 && <span className="rev-links">出现在 {linked.slice(0, 6).join('、')}{linked.length > 6 ? ' 等' : ''}</span>}
+              </>
+              : <>
+                <span className="rev-hint">它是什么？回想定义与关键词 <em>What is it? Recall, then flip</em></span>
+                <span className="rev-title">{c.title}</span>
+                <span className="rev-tip">点击卡片显示答案 <em>Click to reveal</em></span>
+              </>}
+          </button>
+          {rev.flipped && <div className="review-grade" role="group" aria-label="给这次回忆打分 Grade recall">
+            <button className="pill ghost" onClick={() => grade(0)}>忘了 <em>Forgot</em></button>
+            <button className="pill" onClick={() => grade(1)}>模糊 <em>Fuzzy</em></button>
+            <button className="pill primary" onClick={() => grade(2)}>记得 <em>Got it</em></button>
+          </div>}
+        </div>
+      </div>;
+    })()}
+    {done && <div className="review-veil" role="dialog" aria-modal="true" aria-label="复习完成 Review done">
+      <div className="review-card glass done">
+        <Icon name="check" size={30}/>
+        <h3>本轮复习完成 <em>Round finished</em></h3>
+        <p>「忘了」的卡片明天会再出现，间隔复习记得更牢。<em>Forgotten cards return tomorrow.</em></p>
+        <button className="pill primary" onClick={() => setRev(null)}>好的 <em>Done</em></button>
+      </div>
+    </div>}
   </div>;
 }
 

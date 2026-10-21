@@ -1,24 +1,42 @@
 // [[ 双链补全：文章全文编辑器与创作台草稿编辑器共用的输入辅助。
+// 输入 [[名称# 时列出该笔记正文的小节（块引用双链）；↑↓ 选择、Enter 插入、Esc 关闭。
 import React, {useRef, useState} from 'react';
-import {KINDS} from './graph';
+import {KINDS, CONTENT} from './graph';
+import {parseOutline} from './plugins';
 
 // 输入 [[ 后按标题 / 短标题过滤候选：↑↓ 选择、Enter 插入、Esc 关闭。
-// titles: [{id, title, short, kind}]；areaRef 指向 textarea；onChange 接收插入后的完整文本。
-export function useWikiComplete({titles, areaRef, onChange}) {
+// titles: [{id, title, short, kind}]；areaRef 指向 textarea；onChange 接收插入后的完整文本；
+// headings: Map（小写标题 → [{text}] 小节清单），输入 # 时列出目标笔记的正文小节。
+export function useWikiComplete({titles, areaRef, onChange, headings}) {
   const [suggest, setSuggest] = useState(null);
   const [pick, setPick] = useState(0);
-  const live = useRef(null); live.current = {suggest, pick, titles};
+  const live = useRef(null); live.current = {suggest, pick, titles, headings};
 
   const check = el => {
     if (!el) return;
     const before = el.value.slice(0, el.selectionStart);
     const m = before.match(/\[\[([^\]\n]*)$/);
     if (!m) { setSuggest(null); return; }
-    const q = m[1].toLowerCase();
-    const list = live.current.titles.filter(t =>
-      t.title.toLowerCase().includes(q) || String(t.short || '').toLowerCase().includes(q)).slice(0, 7);
+    const raw = m[1];
+    const hash = raw.indexOf('#');
+    let list;
+    if (hash >= 0 && live.current.headings) {
+      // 块引用补全：[[笔记名#小节 —— 先按名称筛笔记，再列其正文小节
+      const nq = raw.slice(0, hash).toLowerCase(), hq = raw.slice(hash + 1).toLowerCase();
+      list = live.current.titles
+        .filter(t => t.title.toLowerCase().includes(nq) || String(t.short || '').toLowerCase().includes(nq))
+        .slice(0, 4)
+        .flatMap(t => (live.current.headings.get(String(t.title).toLowerCase()) || [])
+          .filter(h => h.text.toLowerCase().includes(hq))
+          .map(h => ({id: t.id + '#' + h.text, title: t.title + '#' + h.text, short: (t.short || t.title) + ' › ' + h.text, kind: t.kind})))
+        .slice(0, 7);
+    } else {
+      const q = raw.toLowerCase();
+      list = live.current.titles.filter(t =>
+        t.title.toLowerCase().includes(q) || String(t.short || '').toLowerCase().includes(q)).slice(0, 7);
+    }
     // end 一并捕获：插入时的切割终点固定为补全菜单打开时的选区，不随实时光标漂移
-    setSuggest({q: m[1], start: el.selectionStart - m[1].length, end: el.selectionEnd, list}); setPick(0);
+    setSuggest({q: raw, start: el.selectionStart - raw.length, end: el.selectionEnd, list}); setPick(0);
   };
   const insert = t => {
     const el = areaRef.current, s = live.current.suggest.start, e = live.current.suggest.end ?? el.selectionStart;
@@ -46,4 +64,29 @@ export function WikiSuggest({suggest, pick, setPick, insert}) {
     {suggest.list.map((t, i) => <button key={t.id} role="option" aria-selected={i === pick} className={i === pick ? 'on' : ''} onMouseDown={e => { e.preventDefault(); insert(t); }} style={{'--kc': KINDS[t.kind].color}}><i/>{t.short}<small>{KINDS[t.kind].label} {KINDS[t.kind].en}</small></button>)}
     {!suggest.list.length && <span className="none">没有匹配，将成为未创建的笔记 <em>Will be unresolved</em></span>}
   </div>;
+}
+
+// —— 块引用双链（[[笔记#小节]]）共用工具 ——
+// 拆分 data-target：前段按 byName 解析成节点 id，后段是目标小节标题。
+export function resolveTarget(byName, target) {
+  const [rawName, anchor] = String(target || '').split('#');
+  return {id: byName.get((rawName || '').trim().toLowerCase()) || null, anchor: (anchor || '').trim()};
+}
+// 在渲染容器里滚动到与 anchor 匹配的标题（完全相等优先，其次包含）；找不到返回 false。
+export function scrollToAnchor(root, anchor) {
+  if (!root || !anchor) return false;
+  const list = root.querySelectorAll('h1,h2,h3,h4');
+  for (const h of list) if (h.textContent.trim() === anchor) { h.scrollIntoView({block: 'start'}); return true; }
+  for (const h of list) if (h.textContent.trim().includes(anchor)) { h.scrollIntoView({block: 'start'}); return true; }
+  return false;
+}
+// 全库小节索引：小写标题 → [{text, line}]，供块引用补全（headingMap）与 AI 建议共用。
+export function headingMap(graph) {
+  const m = new Map();
+  for (const n of graph.nodes) {
+    if (!CONTENT.has(n.kind) || !n.body) continue;
+    const hs = parseOutline(n.body);
+    if (hs.length) m.set(String(n.title).toLowerCase(), hs);
+  }
+  return m;
 }

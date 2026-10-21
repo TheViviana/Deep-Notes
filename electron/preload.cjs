@@ -18,5 +18,6 @@ contextBridge.exposeInMainWorld('deepnotes', {
     write: (root, rel, body) => ipcRenderer.invoke('vault:write', { root, rel, body }),
     trash: (root, rel) => ipcRenderer.invoke('vault:trash', { root, rel }),
     prepareCopy: srcRoot => ipcRenderer.invoke('vault:prepare-copy', srcRoot),
+    exportMany: (root, files) => ipcRenderer.invoke('vault:export', { root, files }),
   },
 });

@@ -33,12 +33,15 @@ Deep Notes（深度笔记）：原「创作神经网络看板」（neural-creato
 - `src/data/index.js`：数据入口，只有一行 `export * from './sample.js'` 或 `'./my-data.js'`。
 - `src/data/sample.js`：虚构示例数据，也是数据字段的权威说明。
 - `src/neural/graph.js`：图谱推导（目录归属、双链、选题来源、话题、概念提及、双向共振）、布局和本地检索。
-- `src/neural/Home.jsx`：光球、水母、触须场景与三层交互（模块内条目 >15 条折叠为「更多」跳内页）；`Analysis.jsx` 分析栏；`pages.jsx` 六个内页（作品库 / 方法库 / 创作台 / 选题池 / 阅读区 / 档案区）。方法库列表按二级分类分组，支持笔记拖拽归类（分类间 + 拖到顶栏导航跨模块移动，纯 state 更新无刷新）与分类增删改（删除非空分类时内容移入「未分类」，手动空分类存 `-folders-v1`）；阅读区有同构的左侧分类目录（`reading.folder` 字段，手动空分类存 `-read-folders-v1`）。
+- `src/neural/Home.jsx`：光球、水母、触须场景与三层交互（模块内条目 >15 条折叠为「更多」跳内页，概念网络的「更多」跳概念内页）；`Analysis.jsx` 分析栏；`pages.jsx` 七个内页（作品库 / 方法库 / 创作台 / 选题池 / 阅读区 / 档案区 / 概念网络，概念内页点击概念回到工作台图谱选中）。方法库列表按二级分类分组，支持笔记拖拽归类（分类间 + 拖到顶栏导航跨模块移动，纯 state 更新无刷新）与分类增删改（删除非空分类时内容移入「未分类」，手动空分类存 `-folders-v1`）；阅读区有同构的左侧分类目录（`reading.folder` 字段，手动空分类存 `-read-folders-v1`）。概念网络内页的卡片可展开编辑定义与关键词（存 `-concept-extras-v1`），页头「开始复习」进入闪卡（Leitner 调度存 `-concept-review-v1`）。
+- `src/neural/CommandPalette.jsx`：全局命令面板，Cmd/Ctrl+K 呼出：全文搜索并打开内容、新建各模块内容、模块与概念网络跳转、导入 / 导出 / 切回示例。
+- `src/neural/wiki.jsx`：[[双链与块引用（`[[笔记#小节]]`）共用工具——编辑器补全（`useWikiComplete`）、正文渲染跳转（`resolveTarget` / `scrollToAnchor`）、全库小节索引（`headingMap`），创作台与方法库编辑器共享，AI 双链建议也复用。
+- `src/neural/conceptStore.js`：概念扩展信息与复习进度的本地存储（`conceptExtras` / `conceptReview` / `gradeConcept`）。
 - `src/neural/Intro.jsx`：开屏动画（关键帧序列：光斑亮起 → 展开为横向线条 → 线条撑开成界面主题底色 → 星野淡入 → 粒子汇聚成球 → 加速旋转 → 粒子炸开 → 白光铺满后淡出进入主界面；高 DPR 锐利渲染）。桌面版每次启动播放，网页同一标签页刷新不重播（sessionStorage `neural-splash-seen`）；`prefers-reduced-motion` 或点击/按键直接跳过。
 - `scripts/import-notes.mjs`：笔记导入；`scripts/verify.mjs`：自检。
-- `src/neural/importer.js`：软件内知识库导入（目录选择器 + 解析，规则与命令行导入一致；`parseVault(files, target)` 的 target 可指定全部内容归入某个模块，默认 'auto' 按文件夹名分类，未识别的一律作为方法笔记）。
-- `src/neural/fileStore.js`：桌面版文件夹知识库（仅 Electron 可用）。导入时在原库旁新建「<原名> - Deep Notes」副本（`vault:prepare-copy` IPC），之后编辑经全局 diff（main.jsx）防抖写回副本里的 .md，删除的内容移入副本 `.trash`，原知识库文件夹内容永不动；根目录路径存 localStorage（`-vault-root-v1`）。
-- `src/neural/ai.jsx`：AI 助手插件（服务商 / 模型 / 推理等级配置、OpenAI 兼容调用、文件增删改查工具协议、dock 内嵌对话与浮动面板）；`plugins.jsx` 的 `TocPanel` 大纲目录平时收进编辑区右缘竖线、悬停弹出。
+- `src/neural/importer.js`：软件内知识库导入（目录选择器 + 解析，规则与命令行导入一致；`parseVault(files, target)` 的 target 可指定全部内容归入某个模块，默认 'auto' 按文件夹名分类，未识别的一律作为方法笔记）。导入不设数量上限：文章 / 笔记 / 阅读 / 档案 / 标签 / 概念全部无上限（概念按出现次数排序，命令行 `--max-works` / `--max-notes` 仍可手动限量）。
+- `src/neural/fileStore.js`：桌面版文件夹知识库（仅 Electron 可用）。导入时在原库旁新建「<原名> - Deep Notes」副本（`vault:prepare-copy` IPC）；文件夹名称本身已带「 - Deep Notes」后缀时直接作为工作库使用、不再复制副本。之后编辑经全局 diff（main.jsx）防抖写回库里的 .md，删除的内容移入库的 `.trash`，普通导入的原知识库文件夹内容永不动；根目录路径存 localStorage（`-vault-root-v1`），导入归类方式存 `-vault-target-v1`。**每次打开软件自动同步**：已连接知识库时重新读取文件夹内容并比对（只比会写进文件的字段，忽略 updatedAt / capturedAt 等应用内字段），有变化才 adoptData 并提示，无变化静默；选题池不落盘，按标题合并（已有优先，文件夹新增补入）。「导出 Markdown」（About 弹窗入口，`exportFiles`）：桌面版选目录逐文件写盘、网页版合并单个 .md 下载；frontmatter 带 `deepnotes-id` 保证再导入不重复，同名标题落盘时追加 id 短码消歧（每组第一条保持原名）。
+- `src/neural/ai.jsx`：AI 助手插件（服务商 / 模型 / 推理等级配置、OpenAI 兼容调用、文件增删改查工具协议、dock 内嵌对话与浮动面板）；`plugins.jsx` 的 `TocPanel` 大纲目录平时收进编辑区右缘竖线、悬停弹出；编辑器增强还提供格式栏「AI 双链建议」按钮与「选中即问」（选中文本浮出胶囊、送入 AI 面板预填），两者都只在联网开关 + AI 插件启用时可用，未启用呈禁用态。
 - `electron/main.cjs`、`electron/preload.cjs`、`electron-builder.json`：Electron 桌面版（由 electronizer 生成，生产模式加载 `dist/index.html`；`ai-fetch` IPC 为主进程转发 AI 请求；`vault:*` IPC 为文件夹知识库读写，写操作一律限制在所选根目录内，`preload.cjs` 暴露为 `window.deepnotes.vault`）。
 - `skills/neural-creator-dashboard/SKILL.md`：通用 Agent Skill，可用 `npx skills add` 安装到各家智能体。
 - `examples/vault/`：虚构的示例笔记库，演示导入格式。
@@ -70,4 +73,4 @@ Deep Notes（深度笔记）：原「创作神经网络看板」（neural-creato
 ## 改完之后的验证
 
 1. `npm run verify` 和 `npm run build` 通过。
-2. `npm run dev` 打开页面，确认：开屏动画播放一次后淡出（刷新不重播）；首页光球和七只水母出现，全部模块条目与标签都停在底部问答坞上方、互不遮挡；点「作品库」水母触须伞状展开；点一篇内容右侧弹出分析栏；六个内页（作品库 / 方法库 / 创作台 / 选题池 / 阅读区 / 档案区）正常；浏览器控制台没有报错。
+2. `npm run dev` 打开页面，确认：开屏动画播放一次后淡出（刷新不重播）；首页光球和七只水母出现，全部模块条目与标签都停在底部问答坞上方、互不遮挡；点「作品库」水母触须伞状展开；点一篇内容右侧弹出分析栏；七个内页（作品库 / 方法库 / 创作台 / 选题池 / 阅读区 / 档案区 / 概念网络）正常；Cmd/Ctrl+K 命令面板能搜索并打开内容；浏览器控制台没有报错。

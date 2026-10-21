@@ -1,6 +1,7 @@
 import React, {useEffect, useMemo, useState} from 'react';
 import {KINDS, CONTENT, MODULES, neighbors, latent, askGraph, LINK_KINDS, LINK_EN} from './graph';
 import {Icon} from './icons';
+import {conceptExtras, setConceptExtra} from './conceptStore';
 
 const fmt = (v, d = 0) => v == null || Number.isNaN(v) ? '—' : Number(v).toLocaleString('zh-CN', {minimumFractionDigits: d, maximumFractionDigits: d});
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -141,18 +142,33 @@ function WikiEditor({graph, node, onBody, onNoteTitle, onAction}) {
   </div>;
 }
 
-// —— 概念词表编辑：重命名概念、增删关键词、删除概念（图谱的提及与共振随之重算） ——
+// —— 概念词表编辑：重命名概念、增删关键词、删除概念（图谱的提及与共振随之重算）；
+// 定义一句话说明（概念内页 / 闪卡复习共用），存在独立键不随导入覆盖 ——
 function ConceptEditor({node, concepts, onConcept}) {
   const terms = (concepts || []).find(([n]) => n === node.title)?.[1] || [];
+  const extras = conceptExtras.use();
+  const def = extras[node.title]?.text || '';
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(node.title);
   const [kw, setKw] = useState('');
+  const [defEdit, setDefEdit] = useState(false);
+  const [defDraft, setDefDraft] = useState(def);
+  const saveDef = () => { setConceptExtra(node.title, {text: defDraft}); setDefEdit(false); };
+  // 重命名时把定义 / 手动关键词一并挪到新名字下，避免与旧名失联
+  const renameTo = newName => {
+    const ex = conceptExtras.get()[node.title];
+    if (ex) { setConceptExtra(node.title, {delete: true}); setConceptExtra(newName, ex); }
+    onConcept(node.title, {name: newName});
+  };
   return <div className="link-ed">
     <div className="le-title">
       {renaming
-        ? <span className="le-edit on"><input autoFocus value={name} onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && name.trim()) { onConcept(node.title, {name}); setRenaming(false); } if (e.key === 'Escape') setRenaming(false); }} placeholder="概念名…"/><button className="le-ok" onClick={() => { if (name.trim()) { onConcept(node.title, {name}); setRenaming(false); } }}><Icon name="check" size={12}/></button></span>
+        ? <span className="le-edit on"><input autoFocus value={name} onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && name.trim()) { renameTo(name.trim()); setRenaming(false); } if (e.key === 'Escape') setRenaming(false); }} placeholder="概念名…"/><button className="le-ok" onClick={() => { if (name.trim()) { renameTo(name.trim()); setRenaming(false); } }}><Icon name="check" size={12}/></button></span>
         : <><span className="le-name">概念：<b>{node.title}</b></span><button className="le-btn" title="重命名概念" onClick={() => { setName(node.title); setRenaming(true); }}><Icon name="draft" size={12}/></button></>}
     </div>
+    {defEdit
+      ? <span className="le-edit on"><input autoFocus value={defDraft} onChange={e => setDefDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') saveDef(); if (e.key === 'Escape') setDefEdit(false); }} placeholder="一句话定义这个概念… Define it"/><button className="le-ok" onClick={saveDef}><Icon name="check" size={12}/></button></span>
+      : <p className="le-def">{def || <>还没有定义。<em>No definition yet.</em></>}<button className="le-btn" title={def ? '编辑定义 Edit definition' : '添加定义 Add definition'} onClick={() => { setDefDraft(def); setDefEdit(true); }}><Icon name="draft" size={11}/></button></p>}
     <div className="chip-row">{terms.map(t => <span key={t} className="chip static">{t}<button className="le-x" title="删除关键词" onClick={() => onConcept(node.title, {keywords: terms.filter(x => x !== t)})}><Icon name="close" size={10}/></button></span>)}
       {!terms.length && <p className="quiet">还没有关键词。 <em>No keywords</em></p>}
     </div>

@@ -3,9 +3,10 @@ import React, {useEffect, useLayoutEffect, useMemo, useRef, useState} from 'reac
 import {marked} from 'marked';
 import {CONTENT} from './graph';
 import {Icon} from './icons';
-import {useWikiComplete, WikiSuggest} from './wiki';
+import {useWikiComplete, WikiSuggest, resolveTarget, scrollToAnchor, headingMap} from './wiki';
 import {useEditorEnhancers, usePlugins, useNetwork} from './plugins';
 import {isTranslatable, translateText} from './translate';
+import {serialize, exportFiles, safeName} from './fileStore';
 
 marked.setOptions({gfm: true, breaks: true});
 
@@ -61,7 +62,12 @@ export function renderMarkdown(md) {
   const wiki = seg => seg
     .replace(/\[\[([^\]\n]+)\]\]/g, (_, t) => {
       const [target, alias] = t.split('|');
-      return `<a class="md-wikilink" data-target="${esc((target || '').trim())}">${esc((alias || target || '').trim())}</a>`;
+      const raw = (target || '').trim();
+      const [name, anchor] = raw.split('#');
+      // 块引用 [[笔记#小节]] 显示为「笔记 › 小节」；别名优先
+      const label = (alias || '').trim()
+        || (anchor ? `${(name || '').trim()} › ${anchor.trim()}` : raw);
+      return `<a class="md-wikilink" data-target="${esc(raw)}">${esc(label)}</a>`;
     })
     .replace(/==([^=\n]+)==/g, '<mark>$1</mark>');
   // 用捕获组 split：奇数段是 ```围栏``` 或 `行内代码`，保持原样；偶数段才替换双链
@@ -517,7 +523,7 @@ export function buildMirrorHtml(text, sel) {
   }).join('');
 }
 
-export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo, eyebrow = ['ARTICLE', '文章全文']}) {
+export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo, eyebrow = ['ARTICLE', '文章全文'], exportKind = 'works'}) {
   const [mode, setMode] = useState('edit');
   // 专注模式：隐藏头部信息与页脚，正文区占满（浮层本身已全屏，这里是榨出最后的可视空间）
   const [focusMode, setFocusMode] = useState(false);
@@ -528,8 +534,9 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo, e
   const titles = useMemo(() => graph.nodes
     .filter(n => CONTENT.has(n.kind) && n.id !== 'post:' + work.id)
     .map(n => ({id: n.id, title: n.path?.split('/').pop().replace(/\.md$/, '') || n.title, short: n.short || n.title, kind: n.kind})), [graph, work.id]);
-  const wiki = useWikiComplete({titles, areaRef: area, onChange: body => onChange({body})});
-  const fx = useEditorEnhancers({area, value: work.body, onChange: body => onChange({body}), wiki, title: work.title});
+  const heads = useMemo(() => headingMap(graph), [graph]);
+  const wiki = useWikiComplete({titles, areaRef: area, onChange: body => onChange({body}), headings: heads});
+  const fx = useEditorEnhancers({area, value: work.body, onChange: body => onChange({body}), wiki, title: work.title, titles});
   const html = useMemo(() => mode === 'preview' ? renderMarkdown(work.body) : '', [mode, work.body]);
   // 双链解析：与 graph.js 的 byName 规则一致（标题 / 路径文件名，忽略大小写）。
   const byName = useMemo(() => {
@@ -586,8 +593,25 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo, e
   const onPreviewClick = e => {
     const a = e.target.closest('.md-wikilink');
     if (!a) return;
-    const hit = byName.get((a.dataset.target || '').toLowerCase());
-    if (hit) onGo(hit.id);
+    // 块引用 [[笔记#小节]]：目标是当前这篇时滚动到对应小节，否则跳到目标内容
+    const {id, anchor} = resolveTarget(byName, a.dataset.target);
+    if (!id) return;
+    const selfId = ['post', 'reading', 'archive', 'draft', 'note'].map(k => k + ':' + work.id).find(x => graph.index.has(x));
+    if (anchor && id === selfId) { scrollToAnchor(previewRef.current, anchor); return; }
+    onGo(id);
+  };
+  // —— 单篇导出：桌面版选目录写 .md；网页版浏览器直接下载 ——
+  const [expHint, setExpHint] = useState('');
+  const doExport = async () => {
+    if (expHint === 'busy') return;
+    setExpHint('busy');
+    try {
+      const dirMap = {works: '02-作品库', drafts: '03-创作台/正在写', readings: '06-阅读区', archives: '07-档案区'};
+      const rel = `${dirMap[exportKind] || '02-作品库'}/${safeName(work.title)}.md`;
+      const where = await exportFiles([{rel, body: serialize(exportKind, work)}]);
+      setExpHint(where === 'download' ? '已下载 Exported' : where ? `已导出到「${where.replace(/\/+$/, '').split('/').pop()}」` : '');
+    } catch { setExpHint('导出失败 Export failed'); }
+    setTimeout(() => setExpHint(''), 2600);
   };
   return <section className={`article-view glass${focusMode ? ' focused' : ''}`} role="region" aria-label={eyebrow[1]}>
     {focusMode && <button className="icon-btn av-unfocus" onClick={() => setFocusMode(false)} title="退出专注 Exit focus" aria-label="退出专注模式"><Icon name="close" size={14}/></button>}
@@ -612,6 +636,8 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo, e
           </button>
           {hint && <span className="av-trans-hint" role="status">{hint}</span>}
         </>}
+        {expHint && <span className="av-trans-hint" role="status">{expHint === 'busy' ? '导出中… Exporting' : expHint}</span>}
+        <button className="icon-btn" onClick={doExport} disabled={expHint === 'busy'} title="导出为 Markdown Export as Markdown" aria-label="导出为 Markdown"><Icon name="save" size={15}/></button>
         {onEditInfo && <button className="icon-btn" onClick={onEditInfo} title="编辑文章信息 Edit article info" aria-label="编辑文章信息"><Icon name="draft" size={15}/></button>}
         <button className="icon-btn" onClick={onClose} aria-label="收起文章全文"><Icon name="close" size={15}/></button>
       </div>
@@ -626,6 +652,7 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo, e
         onKeyDown={fx.onKeyDown} onBlur={fx.onBlur}/>
       {wiki.suggest && <WikiSuggest suggest={wiki.suggest} pick={wiki.pick} setPick={wiki.setPick} insert={wiki.insert}/>}
       {fx.menu}
+      {fx.ask}
       {fx.toc}
     </div> : <article className="md-preview" ref={previewRef} onClick={onPreviewClick} dangerouslySetInnerHTML={{__html: html}}/>}
     <footer className="av-foot">

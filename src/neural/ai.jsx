@@ -151,6 +151,21 @@ export const useAiErr = () => {
 };
 export function clearAiChat() { chatLog = []; chatErr = ''; persistChat(); notify(chatSubs); notify(errSubs); }
 
+// —— 「选中即问」预填通道：编辑器把选中文本写进草稿，AI 输入框消费后自动清空 ——
+let aiDraft = '';
+const draftSubs = new Set();
+export function setAiDraft(text) {
+  aiDraft = String(text || '');
+  for (const f of draftSubs) f(aiDraft);
+}
+export function useAiDraft() {
+  const [v, setV] = useState(aiDraft);
+  useEffect(() => { const f = t => setV(t); draftSubs.add(f); return () => { draftSubs.delete(f); }; }, []);
+  return v;
+}
+// 唤起 AI 面板：非工作台页面打开浮动面板；工作台的 dock 常驻，只需聚焦输入框。
+export const openAiPanel = () => window.dispatchEvent(new CustomEvent('dn-ai-open'));
+
 function buildSystem(ctx = {}) {
   const lines = [
     '你是「创作神经网络看板」笔记软件内置的 AI 助手。用户的全部数据（文章、草稿、方法笔记、选题）都保存在本机。',
@@ -311,9 +326,18 @@ export function AiMsgs({empty, onJump}) {
 export function AiInput({placeholder}) {
   const [q, setQ] = useState('');
   const busy = useAiBusy();
+  const inp = useRef(null);
+  // 「选中即问」：编辑器发来的预填草稿写入输入框并聚焦，消费后清空
+  const draft = useAiDraft();
+  useEffect(() => {
+    if (!draft) return;
+    setQ(draft);
+    inp.current?.focus();
+    setAiDraft('');
+  }, [draft]);
   const submit = e => { e.preventDefault(); if (!q.trim() || busy) return; aiSend(q); setQ(''); };
   return <form className="ai-input" onSubmit={submit}>
-    <input value={q} onChange={e => setQ(e.target.value)} placeholder={placeholder || '让 AI 帮你写、改、查… Ask AI to write, edit or look up'} aria-label="向 AI 提问"/>
+    <input ref={inp} value={q} onChange={e => setQ(e.target.value)} placeholder={placeholder || '让 AI 帮你写、改、查… Ask AI to write, edit or look up'} aria-label="向 AI 提问"/>
     <button className="send" disabled={busy || !q.trim()} aria-label="发送给 AI"><Icon name="send" size={15}/></button>
   </form>;
 }
@@ -345,6 +369,12 @@ export function AiFab() {
   const [open, setOpen] = useState(false);
   const [cfg] = useAiConfig();
   const p = providerOf(cfg);
+  // 「选中即问」等场景经 dn-ai-open 事件唤起面板
+  useEffect(() => {
+    const f = () => setOpen(true);
+    window.addEventListener('dn-ai-open', f);
+    return () => window.removeEventListener('dn-ai-open', f);
+  }, []);
   if (!on('ai')) return null;
   return <>
     <button className={`ai-fab ${open ? 'open' : ''}`} aria-label={open ? '关闭 AI 助手 Close AI assistant' : '打开 AI 助手 Open AI assistant'}

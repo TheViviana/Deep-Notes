@@ -3,6 +3,7 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {Icon} from './icons';
 import {CONFIG} from '../config';
+import {aiChat, setAiDraft, openAiPanel} from './ai';
 
 // —— 内置插件清单 ——
 export const BUILTIN_PLUGINS = [
@@ -203,11 +204,12 @@ export function TocPanel({outline, cur, jump}) {
 }
 
 // —— 编辑器增强：文章全文与创作台草稿共用 ——
-// 用法：const fx = useEditorEnhancers({area, value, onChange, wiki, title});
+// 用法：const fx = useEditorEnhancers({area, value, onChange, wiki, title, titles});
 // textarea: onKeyDown={fx.onKeyDown} onBlur={fx.onBlur} onChange 里追加 fx.onInput(e.target)
-// 渲染 {fx.bar}（编辑区上方）、{fx.toc}（editor-area 内）、{fx.menu}；页脚追加 fx.badges(text)
-export function useEditorEnhancers({area, value, onChange, wiki, title, preview, previewMode}) {
+// 渲染 {fx.bar}（编辑区上方）、{fx.toc}（editor-area 内）、{fx.menu}、{fx.ask}；页脚追加 fx.badges(text)
+export function useEditorEnhancers({area, value, onChange, wiki, title, titles, preview, previewMode}) {
   const {on} = usePlugins();
+  const {on: netOn} = useNetwork();
   const [userTpls, setUserTpls] = useUserTemplates();
   const [menu, setMenu] = useState(null); // {q, start, pick}
   const [tplOpen, setTplOpen] = useState(false);
@@ -425,6 +427,59 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, preview,
     return true;
   };
 
+  // —— AI 双链建议（ai 插件 + 联网开关双闸）：正文节选 + 全部标题发给模型，返回建议列表 ——
+  const [aiSug, setAiSug] = useState(null); // null 收起 | {busy, list, err}
+  const aiReady = on('ai') && netOn;
+  const liveFx = useRef(null); liveFx.current = {on}; // 事件回调里读最新的插件开关
+  const runAiSug = async () => {
+    if (!aiReady || aiSug?.busy) return;
+    setAiSug({busy: true, list: []});
+    try {
+      const all = (titles || []).map(t => t.title);
+      const excerpt = String(value || '').replace(/\s+/g, ' ').slice(0, 3000);
+      const sys = '你是笔记软件的双链建议助手。根据正文内容从给定标题列表里挑出值得建立 [[双链]] 的条目。只输出一个 JSON 字符串数组，不要输出任何其他文字；最多 6 个；没有合适的就输出 []。';
+      const user = `标题列表：\n${all.join('\n')}\n\n正文节选：\n${excerpt}`;
+      const data = await aiChat([{role: 'system', content: sys}, {role: 'user', content: user}]);
+      const txt = String(data?.choices?.[0]?.message?.content || '[]').replace(/```(?:json)?/g, '');
+      const arr = JSON.parse(txt.match(/\[[\s\S]*\]/)?.[0] || '[]');
+      const set = new Set(all);
+      setAiSug({busy: false, list: arr.filter(x => typeof x === 'string' && set.has(x)).slice(0, 6)});
+    } catch (e) { setAiSug({busy: false, list: [], err: String(e?.message || e)}); }
+  };
+  const aiLinkAt = t => { insert(`[[${t}]]`); setAiSug(null); };
+
+  // —— 选中即问（ai 插件）：选中文本后浮出「问 AI」，点击唤起 AI 面板并预填引用 ——
+  const [askSel, setAskSel] = useState(null); // {text, left, top}（视口坐标，fixed 定位）
+  useEffect(() => {
+    const el = area.current;
+    if (!el) return;
+    const check = () => {
+      if (!liveFx.current?.on('ai')) { setAskSel(null); return; }
+      const s = el.selectionStart, e2 = el.selectionEnd;
+      const text = el.value.slice(s, e2);
+      const r = s !== e2 && text.trim() ? el.__mirrorApi?.caretRect?.() : null;
+      setAskSel(r ? {text, left: r.left, top: Math.max(8, r.top - 40)} : null);
+    };
+    const clear = e => { if (!el.contains(e.target) && !e.target.closest?.('.ask-ai-chip')) setAskSel(null); };
+    el.addEventListener('mouseup', check);
+    el.addEventListener('keyup', check); // shift+方向键 / Esc 收起
+    document.addEventListener('mousedown', clear);
+    return () => {
+      el.removeEventListener('mouseup', check);
+      el.removeEventListener('keyup', check);
+      document.removeEventListener('mousedown', clear);
+    };
+  }, [area.current]); // eslint-disable-line react-hooks/exhaustive-deps
+  const ask = askSel && <button className="ask-ai-chip glass" style={{left: askSel.left, top: askSel.top}}
+    onMouseDown={e => e.preventDefault()} onClick={() => {
+      const text = askSel.text;
+      setAskSel(null);
+      setAiDraft(`请围绕我选中的这段内容展开讨论或解答：\n\n「${text.slice(0, 800)}」`);
+      openAiPanel();
+    }}>
+    <Icon name="agent" size={12}/>问 AI <em>Ask</em>
+  </button>;
+
   // —— 格式工具栏（toolbar + templates 插件） ——
   const btn = (label, en, glyph, act) =>
     <button key={label + en} className="fmt-btn" title={`${label} ${en}`} aria-label={`${label} ${en}`}
@@ -459,6 +514,20 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, preview,
       {btn('标注块', 'Callout', '！', () => insert('> [!note] 标题\n> 内容\n'))}
       <i className="fmt-sep" aria-hidden="true"/>
       {btn('双链', 'Wikilink', '[[]]', () => wrap('[[', ']]', '链接目标'))}
+      <span className="tpl-wrap">
+        <button className="fmt-btn" disabled={!aiReady} aria-expanded={!!aiSug}
+          title={aiReady ? 'AI 双链建议 AI link suggestions' : '需要打开联网开关并启用 AI 助手插件 Needs the network switch + AI plugin'}
+          aria-label="AI 双链建议 AI link suggestions"
+          onMouseDown={e => e.preventDefault()} onClick={() => { if (!aiReady) return; aiSug ? setAiSug(null) : runAiSug(); }}>AI</button>
+        {aiSug && <div className="tpl-menu glass" role="menu" aria-label="AI 双链建议 AI suggestions">
+          {aiSug.busy && <span className="none">AI 思考中… <em>thinking</em></span>}
+          {aiSug.err && <span className="none">请求失败：{aiSug.err}</span>}
+          {!aiSug.busy && !aiSug.err && !aiSug.list.length && <span className="none">没有合适的建议 <em>No suggestions</em></span>}
+          {aiSug.list.map(t => <button key={t} role="menuitem" onMouseDown={e => e.preventDefault()} onClick={() => aiLinkAt(t)}>
+            <b>[[{t}]]</b><small>插入双链 <em>insert link</em></small>
+          </button>)}
+        </div>}
+      </span>
       {btn('代码块', 'Code block', '{}', () => insert('```\n\n```', 4))}
       {btn('表格', 'Table', '⊞', () => insert('| 列一 | 列二 |\n| --- | --- |\n|  |  |\n'))}
       {btn('分隔线', 'Divider', '—', () => insert('---\n'))}
@@ -489,8 +558,9 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, preview,
   return {
     onKeyDown: e => { if (on('slash') && slashKey(e)) return; wiki?.onKeyDown(e); },
     onInput: slashCheck,
-    onBlur: () => { setMenu(null); setTplOpen(false); setClrOpen(false); },
+    onBlur: () => { setMenu(null); setTplOpen(false); setClrOpen(false); setAiSug(null); },
     menu: on('slash') && menu && <SlashMenu list={slashFilter(menu.q)} pick={menu.pick} insert={slashInsert}/>,
+    ask,
     badges: text => on('readingtime') ? [readingTime(text)] : [],
     bar,
     toc: tocOn && outline.length ? <TocPanel outline={outline} cur={curLine} jump={jumpTo}/> : null,
