@@ -184,7 +184,7 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
     ├── NetworkCanvas.jsx      背景神经网络
     ├── Analysis.jsx           右侧分析栏
     ├── pages.jsx              作品库 / 方法库 / 创作台 / 选题池 / 阅读区 / 档案区
-    ├── Intro.jsx              开屏动画（粒子汇聚 → 奇点 → 爆发染白）
+    ├── Intro.jsx              开屏动画（星点扩散 → 能量核心 → 波纹 → 发光字样）
     ├── plugins.jsx            插件系统（斜杠命令 / 大纲目录 / AI 助手等）
     ├── importer.js            软件内知识库导入
     ├── main.jsx               页面框架与弹窗

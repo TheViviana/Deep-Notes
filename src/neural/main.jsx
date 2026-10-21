@@ -23,9 +23,14 @@ import {T} from './theme';
 import './neural.css';
 
 // 选题、草稿与目标保存在当前浏览器（localStorage）。
+// 写入防抖：打字等高频变更若每次都同步序列化全量数据（大库 + 粘贴图后可达数 MB）会卡顿，
+// 静默 300ms 后再写，UI 保持跟手；窗口关闭前的最后一次输入最多延迟 300ms 落盘。
 function useSaved(key, fallback) {
   const [v, set] = useState(() => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } });
-  useEffect(() => { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }, [key, v]);
+  useEffect(() => {
+    const t = setTimeout(() => { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }, 300);
+    return () => clearTimeout(t);
+  }, [key, v]);
   return [v, set];
 }
 
@@ -276,6 +281,8 @@ function App() {
   const [modal, setModal] = useState(null);
   const [editing, setEditing] = useState(null);
   const [goalInput, setGoalInput] = useState(String(goal));
+  // 目标弹窗（点写作计划圆环打开）也要显示本月篇数；Snapshot 内的同名变量作用域不覆盖这里
+  const monthPosts = useMemo(() => monthWorks(works), [works]);
   const [toast, setToast] = useState('');
   const [palette, setPalette] = useState(false); // ⌘K 全局命令面板
   const reduced = useMemo(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches, []);
@@ -322,7 +329,7 @@ function App() {
       for (const x of cv) queueSync(kind, x, pmap.get(x.id) || null, relMap);
       for (const x of removed) queueSync(kind, null, x, relMap);
     }
-  }, [works, notes, drafts, readings]);
+  }, [works, notes, drafts, readings, archives]);
   // 写盘失败提示（权限不足 / 磁盘满等）；队列由 flush 触发，这里只负责把错误带给用户
   useEffect(() => {
     setErrorHandler(failed => setToast(`知识库写盘失败（${failed.length} 个文件），内容仍保存在浏览器 · Disk write failed`));

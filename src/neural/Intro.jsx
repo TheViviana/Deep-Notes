@@ -1,58 +1,86 @@
 import React, {useEffect, useRef, useState} from 'react';
 
-// 开屏动画（关键帧序列）：光斑亮起 → 展开为横向线条 → 线条撑开成界面主题底色 →
-// 星野淡入 → 粒子从四周汇聚成球 → 球体加速旋转 → 粒子炸开 → 白光铺满 → 淡出进入主界面。
-// 渲染要点：高 DPR（≤3）逐像素绘制，每帧整幅清屏；粒子只有锐利亮核 + 细短拖尾，
-// 无大光晕、无糊化，星野是小而实的星点，全程清晰。
+// 开屏动画（精密科技感版本，主体约 4.6s + 0.62s 淡出）：
+// 深空底色（纯黑 + 极淡深蓝星云）→ 细小星点从中心向外扩散成星野 → 能量核心球体浮现
+// （几何网格纹路 + 流动蓝色光带 + 三圈细轨道环异速旋转）→ 球体脉冲一次、光环同步扩散成波纹
+// → 画面渐暗 → 中心浮现带动态发光的 DeepNotes 字样 → 淡出进入主界面。
+// 渲染要点：高 DPR（≤3）逐像素绘制；星点颗粒分明、线条 1px 锐利，无噪点、无拖影、无糊化；
+// 每帧只有个位数渐变 + 少量描边，主线程开销极低（不再拖慢启动）。
 // 桌面版每次启动都会播放；网页版同一标签页刷新不重播（sessionStorage 记忆）。
 // prefers-reduced-motion、点击或按任意键都会直接跳过。
 const KEY = 'neural-splash-seen';
-const T_SPOT = 560;               // 光斑亮起
-const T_LINE = T_SPOT + 620;      // 展开为横向线条
-const T_THEME = T_LINE + 760;     // 线条撑开成界面主题底色
-const T_STARS = T_THEME + 680;    // 星野淡入
-const T_GATHER = T_STARS + 1460;  // 粒子汇聚成球
-const T_BURST0 = T_GATHER + 1120; // 旋转蓄势结束，炸开开始
-const BURST = 640;                // 炸开时长
-const T_FLOOD = T_BURST0 + 240;   // 白光从中心铺开
-const T_WHITE = T_FLOOD + 680;    // 白光铺满全屏
-const FADE = 620;                 // 白幕淡出，露出界面
-const VOID = '#070808';           // 开场虚空
-const APP = '#0d0e0e';            // 界面主题底色
-const WHITE = '255,255,255', SILVER = '226,232,246', GREY = '201,212,224';
-const COLORS = [WHITE, SILVER, GREY];
-const N = 260;                    // 粒子数量
+const T_NE = 900;      // 星云淡入
+const T_SPH = 850;     // 球体浮现开始
+const SPH = 800;       // 球体浮现时长
+const T_PULSE = 3000;  // 球体脉冲开始
+const PULSE = 450;     // 脉冲时长
+const T_WAVE = 3080;   // 光环波纹扩散开始
+const WAVE = 1150;     // 波纹时长
+const T_DIM = 3350;    // 画面渐暗开始
+const DIM = 650;
+const T_TEXT = 3600;   // DeepNotes 字样浮现
+const TEXT = 650;
+const T_HOLD = 4600;   // 开始淡出进入应用
+const DEEP = '#01030a';                                  // 深空底色（近纯黑带一丝深蓝）
+const BLUE = '96,178,255', CYAN = '190,235,255', WHITE = '240,248,255'; // 电光蓝 / 青白 / 高光
 const clamp01 = v => Math.min(Math.max(v, 0), 1);
-const easeOutQuart = p => 1 - Math.pow(1 - p, 4);
 const easeOutCubic = p => 1 - Math.pow(1 - p, 3);
-const easeInCubic = p => p * p * p;
-const easeInOutCubic = p => p < .5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
-const easeInOutQuint = p => p < .5 ? 16 * p ** 5 : 1 - Math.pow(-2 * p + 2, 5) / 2;
 
-// 星野一次成型：透明底上只有星点（少量带细十字光芒），铺在主题底色之上。预渲染成离屏画布，
-// 每帧按淡入透明度覆盖一次；星点小而实，不带光晕，保证清晰。
-function makeStars(w, h, dpr) {
+// 星云：离屏预渲染（两三团极淡的深蓝渐变，不对称分布），每帧只 drawImage 一次。
+function makeNebula(w, h, dpr) {
   const c = document.createElement('canvas');
   c.width = Math.max(1, Math.round(w * dpr));
   c.height = Math.max(1, Math.round(h * dpr));
   const g = c.getContext('2d');
   g.scale(dpr, dpr);
-  const n = Math.round(w * h / 9000);
-  for (let i = 0; i < n; i++) {
-    const x = Math.random() * w, y = Math.random() * h;
-    const r = .35 + Math.random() * .8, a = .1 + Math.random() * .34;
-    const col = Math.random() < .6 ? SILVER : GREY;
-    g.fillStyle = `rgba(${col},${a})`;
-    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
-    if (Math.random() < .06) { // 少数亮星带细十字光芒
-      const l = 2.5 + Math.random() * 2.5;
-      g.strokeStyle = `rgba(${col},${a * .55})`;
-      g.lineWidth = 1;
-      g.beginPath(); g.moveTo(x - l, y); g.lineTo(x + l, y); g.stroke();
-      g.beginPath(); g.moveTo(x, y - l); g.lineTo(x, y + l); g.stroke();
-    }
+  const blobs = [
+    [w * .5, h * .46, Math.max(w, h) * .55, '14,40,86', .16],
+    [w * .26, h * .3, Math.max(w, h) * .4, '10,58,96', .10],
+    [w * .76, h * .68, Math.max(w, h) * .42, '16,34,74', .11],
+  ];
+  for (const [x, y, r, col, a] of blobs) {
+    const gr = g.createRadialGradient(x, y, 0, x, y, r);
+    gr.addColorStop(0, `rgba(${col},${a})`);
+    gr.addColorStop(1, `rgba(${col},0)`);
+    g.fillStyle = gr;
+    g.fillRect(x - r, y - r, r * 2, r * 2);
   }
   return c;
+}
+
+// 远景星野：离屏预渲染的极淡小星点（与扩散星点分层，制造纵深），每帧一次 drawImage。
+function makeFarStars(w, h, dpr) {
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w * dpr));
+  c.height = Math.max(1, Math.round(h * dpr));
+  const g = c.getContext('2d');
+  g.scale(dpr, dpr);
+  const n = Math.round(w * h / 14000);
+  for (let i = 0; i < n; i++) {
+    const a = .07 + Math.random() * .2;
+    g.fillStyle = Math.random() < .6 ? `rgba(${CYAN},${a})` : `rgba(${WHITE},${a})`;
+    g.beginPath(); g.arc(Math.random() * w, Math.random() * h, .35 + Math.random() * .5, 0, Math.PI * 2); g.fill();
+  }
+  return c;
+}
+
+// 扩散星点：从画面中心沿随机方位向外扩散，最终落位成主星野；少数带细十字光芒。
+function makeDiffStars(w, h) {
+  const maxR = Math.hypot(w, h) / 2;
+  const n = Math.max(200, Math.min(460, Math.round(w * h / 5200)));
+  const list = [];
+  for (let i = 0; i < n; i++) {
+    const th = Math.random() * Math.PI * 2;
+    list.push({
+      th, rf: Math.sqrt(Math.random()) * maxR * 1.02,
+      jit: Math.random() * 350,                       // 出生错峰
+      s: .5 + Math.random() * .85,                    // 半径：小而实
+      a: .3 + Math.random() * .5,
+      col: Math.random() < .62 ? CYAN : WHITE,
+      cross: Math.random() < .08 ? 2 + Math.random() * 1.6 : 0, // 少数亮星带细十字光芒
+    });
+  }
+  return list;
 }
 
 export function Intro() {
@@ -77,186 +105,200 @@ export function Intro() {
       try { sessionStorage.setItem(KEY, '1'); } catch {}
       setDone(true);
     };
-    const failsafe = setTimeout(finish, T_WHITE + FADE + 1200); // 兜底：任何异常都不能卡住黑幕
+    const failsafe = setTimeout(finish, T_HOLD + 2000); // 兜底：任何异常都不能卡住黑幕
 
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
-    let w = window.innerWidth, h = window.innerHeight, stars = null;
+    let w = window.innerWidth, h = window.innerHeight;
+    let nebula = null, far = null, stars = [];
     const resize = () => {
       w = window.innerWidth; h = window.innerHeight;
       canvas.width = w * dpr; canvas.height = h * dpr;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      stars = makeStars(w, h, dpr);
+      nebula = makeNebula(w, h, dpr);
+      far = makeFarStars(w, h, dpr);
+      stars = makeDiffStars(w, h);
     };
     resize();
     window.addEventListener('resize', resize);
 
-    // 粒子：斐波那契球面目标（点距均匀、球体轮廓清晰）+ 屏幕边缘出生 + 错峰 + 弧线切入
-    const golden = Math.PI * (3 - Math.sqrt(5));
-    const parts = [];
-    for (let i = 0; i < N; i++) {
-      const y = 1 - (i / (N - 1)) * 2;
-      const rr = Math.sqrt(Math.max(0, 1 - y * y));
-      const th = golden * i;
-      const side = Math.floor(Math.random() * 4), m = Math.random();
-      const start = side === 0 ? [m * w, -30] : side === 1 ? [w + 30, m * h] : side === 2 ? [m * w, h + 30] : [-30, m * h];
-      parts.push({
-        dir: [Math.cos(th) * rr, y, Math.sin(th) * rr], // 球面单位方向（x, y, z）
-        start, jit: Math.random() * 380, c: COLORS[i % COLORS.length],
-        s: .7 + Math.random() * .8, tw: Math.random() * Math.PI * 2,
-        sp: 14 + Math.random() * 30,                    // 弧线切入幅度（收敛克制）
-        cw: i % 2 ? 1 : -1,
-        bv: 2.2 + Math.random() * 2.6,                  // 炸开速度系数
-        px: null, py: null,                             // 上一帧位置（画短拖尾用）
-      });
-    }
+    // 三圈轨道环：半径 / 倾角 / 扁率 / 转速各不相同，细如发丝（1px）
+    const RINGS = [
+      {k: 1.55, tilt: -.42, ryk: .30, sp: .0011, ph: .6},
+      {k: 1.95, tilt: .30, ryk: .24, sp: -.0007, ph: 2.7},
+      {k: 2.42, tilt: .62, ryk: .20, sp: .00045, ph: 4.6},
+    ];
 
     const step = now => {
       const t = now - t0;
       const cx = w / 2, cy = h / 2;
-      const pSpot = clamp01(t / T_SPOT);
-      const pLine = clamp01((t - T_SPOT) / (T_LINE - T_SPOT));
-      const pTheme = clamp01((t - T_LINE) / (T_THEME - T_LINE));
-      const pStars = clamp01((t - T_THEME) / (T_STARS - T_THEME));
-      const pSpin = clamp01((t - T_GATHER) / (T_BURST0 - T_GATHER));
-      const pBurst = clamp01((t - T_BURST0) / BURST);
-      const pWhite = clamp01((t - T_FLOOD) / (T_WHITE - T_FLOOD));
+      const pN = clamp01(t / T_NE);
+      const pS = clamp01((t - T_SPH) / SPH);
+      const b = Math.sin(Math.PI * clamp01((t - T_PULSE) / PULSE)); // 脉冲包络（0→1→0）
+      const pW = clamp01((t - T_WAVE) / WAVE);
+      const pDim = clamp01((t - T_DIM) / DIM);
+      const pT = clamp01((t - T_TEXT) / TEXT);
+      const dimK = 1 - pDim; // 渐暗系数（文字阶段不受影响）
 
-      // 背景：主题铺满前是虚空，铺满后是界面底色 + 星野
+      // 背景：深空底色 + 星云 + 远景星野
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
-      ctx.fillStyle = pTheme >= 1 ? APP : VOID;
+      ctx.fillStyle = DEEP;
       ctx.fillRect(0, 0, w, h);
-      if (pTheme >= 1 && stars && pStars > 0) {
-        ctx.globalAlpha = pStars;
-        ctx.drawImage(stars, 0, 0, w, h);
+      if (pN > 0) {
+        if (nebula) { ctx.globalAlpha = pN * (.35 + .65 * dimK); ctx.drawImage(nebula, 0, 0, w, h); }
+        if (far) { ctx.globalAlpha = pN * dimK; ctx.drawImage(far, 0, 0, w, h); }
         ctx.globalAlpha = 1;
       }
 
-      // 光斑 → 横向线条 → 线条撑开成主题底色（铺满前一直存在）
-      if (pTheme < 1) {
-        if (pTheme > 0) { // 线条纵向撑开：上下软边的一带主题色，越撑越高直至盖满
-          const bh = easeInOutCubic(pTheme) * h * 2.4;
-          const g = ctx.createLinearGradient(0, cy - bh / 2, 0, cy + bh / 2);
-          g.addColorStop(0, 'rgba(13,14,14,0)');
-          g.addColorStop(.3, APP);
-          g.addColorStop(.7, APP);
-          g.addColorStop(1, 'rgba(13,14,14,0)');
-          ctx.fillStyle = g;
-          ctx.fillRect(0, cy - bh / 2, w, bh);
+      // 星点扩散：中心向外，落位后成为主星野（微微闪烁但保持锐利）
+      for (const s of stars) {
+        const p = clamp01((t - 60 - s.jit) / 1000);
+        if (p <= 0) continue;
+        const r = s.rf * easeOutCubic(p);
+        const x = cx + Math.cos(s.th) * r, y = cy + Math.sin(s.th) * r;
+        const a = s.a * Math.min(1, p * 3) * (.9 + .1 * Math.sin(now / 700 + s.jit)) * dimK;
+        if (a <= .02) continue;
+        ctx.fillStyle = `rgba(${s.col},${a})`;
+        ctx.beginPath(); ctx.arc(x, y, s.s, 0, Math.PI * 2); ctx.fill();
+        if (s.cross && a > .18) { // 细十字光芒：短直线，干净不发糊
+          ctx.strokeStyle = `rgba(${s.col},${a * .5})`;
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(x - s.cross, y); ctx.lineTo(x + s.cross, y);
+          ctx.moveTo(x, y - s.cross); ctx.lineTo(x, y + s.cross); ctx.stroke();
         }
-        // 光斑：中心亮核 + 小光晕，线条出现后作为线中点继续亮着，随主题撑开淡去
-        const spotA = easeOutCubic(pSpot) * (1 - pTheme * .65);
-        if (spotA > .02) {
-          const hr = 30;
-          const hg = ctx.createRadialGradient(cx, cy, 0, cx, cy, hr);
-          hg.addColorStop(0, `rgba(${SILVER},${spotA * .32})`);
-          hg.addColorStop(1, `rgba(${SILVER},0)`);
-          ctx.fillStyle = hg;
-          ctx.fillRect(cx - hr, cy - hr, hr * 2, hr * 2);
-          ctx.fillStyle = `rgba(${WHITE},${spotA * .95})`;
-          ctx.beginPath(); ctx.arc(cx, cy, 2.1, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // 能量核心球体
+      if (pS > 0 && dimK > .02) {
+        const R = Math.min(w, h) * .155 * easeOutCubic(pS) * (1 + .05 * b);
+        const gA = pS * dimK; // 球体组整体透明度
+        // 核心辉光：紧凑的青白渐变，脉冲时增亮
+        const glow = ctx.createRadialGradient(cx, cy, R * .1, cx, cy, R * 1.75);
+        glow.addColorStop(0, `rgba(${CYAN},${(.30 + .18 * b) * gA})`);
+        glow.addColorStop(.45, `rgba(${BLUE},${(.12 + .08 * b) * gA})`);
+        glow.addColorStop(1, `rgba(${BLUE},0)`);
+        ctx.fillStyle = glow;
+        ctx.fillRect(cx - R * 1.8, cy - R * 1.8, R * 3.6, R * 3.6);
+
+        ctx.save();
+        ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
+        // 纬线：五圈固定纬度的椭圆，透视压扁
+        ctx.lineWidth = 1;
+        for (let i = -2; i <= 2; i++) {
+          const beta = i * Math.PI / 6;
+          const rx = R * Math.cos(beta), yy = cy + R * Math.sin(beta) * .96;
+          ctx.strokeStyle = `rgba(${BLUE},${.16 * gA})`;
+          ctx.beginPath(); ctx.ellipse(cx, yy, rx, Math.max(.5, rx * .30), 0, 0, Math.PI * 2); ctx.stroke();
         }
-        // 横向线条：中点最亮、两端渐隐（透镜光斑质感），主题撑开时同步淡去
-        if (pLine > 0) {
-          const half = Math.min(w, h) * .21 * easeOutQuart(pLine);
-          const la = (1 - pTheme);
-          if (la > .02) {
-            const lg = ctx.createLinearGradient(cx - half, cy, cx + half, cy);
-            lg.addColorStop(0, `rgba(${SILVER},0)`);
-            lg.addColorStop(.5, `rgba(${WHITE},${.92 * la})`);
-            lg.addColorStop(1, `rgba(${SILVER},0)`);
-            ctx.strokeStyle = lg;
-            ctx.lineWidth = 1.25;
-            ctx.beginPath(); ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy); ctx.stroke();
-            ctx.globalAlpha = .12 * la;
-            ctx.lineWidth = 6;
-            ctx.beginPath(); ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy); ctx.stroke();
-            ctx.globalAlpha = 1;
+        // 经线：六条大圆绕纵轴旋转，投影成宽度呼吸的椭圆
+        for (let i = 0; i < 6; i++) {
+          const psi = i * Math.PI / 6 + t * .00055;
+          const rx = R * Math.abs(Math.cos(psi));
+          if (rx < R * .05) continue;
+          ctx.strokeStyle = `rgba(${BLUE},${.20 * gA})`;
+          ctx.beginPath(); ctx.ellipse(cx, cy, rx, R, 0, 0, Math.PI * 2); ctx.stroke();
+        }
+        // 流动光带：两条近赤道的亮弧沿椭圆游走，边缘锐利（butt 端帽 + 窄线宽）
+        const band = (beta, sp, off, al) => {
+          const rx = R * Math.cos(beta), yy = cy + R * Math.sin(beta) * .96, ry = Math.max(.5, rx * .30);
+          const u = (t * sp + off) % (Math.PI * 2);
+          ctx.strokeStyle = `rgba(${BLUE},${al * gA})`;
+          ctx.lineWidth = 1.8; ctx.lineCap = 'butt';
+          ctx.beginPath(); ctx.ellipse(cx, yy, rx, ry, 0, u, u + 2.1); ctx.stroke();
+          ctx.strokeStyle = `rgba(${CYAN},${al * .4 * gA})`;
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.ellipse(cx, yy, rx, ry, 0, u + 2.1, u + 2.9); ctx.stroke();
+          // 前导亮点
+          const lx = cx + rx * Math.cos(u), ly = yy + ry * Math.sin(u);
+          ctx.fillStyle = `rgba(${CYAN},${.9 * gA})`;
+          ctx.beginPath(); ctx.arc(lx, ly, 1.6, 0, Math.PI * 2); ctx.fill();
+        };
+        band(-.21, .0011, 0, .8);
+        band(.14, -.0007, 2.4, .6);
+        ctx.restore();
+
+        // 球体轮廓：一圈清晰的亮边
+        ctx.strokeStyle = `rgba(${CYAN},${(.42 + .3 * b) * gA})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
+
+        // 三圈轨道环：整体细描 + 一段亮弧指示转动
+        const rA = clamp01((t - T_SPH - 500) / 500) * gA;
+        if (rA > .02) {
+          for (const rg of RINGS) {
+            const rx = R * rg.k, ry = rx * rg.ryk;
+            ctx.save();
+            ctx.translate(cx, cy); ctx.rotate(rg.tilt);
+            ctx.strokeStyle = `rgba(${BLUE},${.30 * rA})`;
+            ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2); ctx.stroke();
+            const u = t * rg.sp + rg.ph;
+            ctx.strokeStyle = `rgba(${CYAN},${.9 * rA})`;
+            ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, u, u + .9); ctx.stroke();
+            ctx.restore();
           }
         }
       }
 
-      // 粒子（星野出现后开始汇聚）：汇聚 → 旋转 → 炸开
-      if (t > T_STARS - 400 && pWhite < 1) {
-        const R = Math.min(w, h) * .155;
-        const spin = t / 5200 + easeInCubic(pSpin) * 2.6; // 旋转蓄势：越转越快
-        const cos = Math.cos(spin), sin = Math.sin(spin);
-        ctx.globalCompositeOperation = 'lighter';
-        for (const d of parts) {
-          const pa = clamp01((t - T_STARS - d.jit) / (T_GATHER - T_STARS - 420)); // 汇聚进度（错峰）
-          const eo = easeOutCubic(pa);
-          const x3 = d.dir[0] * cos - d.dir[2] * sin;
-          const z3 = d.dir[0] * sin + d.dir[2] * cos;
-          const y3 = d.dir[1];
-          // 汇聚：起点 → 球面；炸开：沿当前球面方向向外飞散
-          const rf = R * (1 + easeOutCubic(pBurst) * d.bv);
-          const tx = cx + x3 * rf, ty = cy + y3 * rf;
-          let x = d.start[0] + (tx - d.start[0]) * eo;
-          let yy = d.start[1] + (ty - d.start[1]) * eo;
-          // 弧线切入：飞行中段沿垂直方向偏出一条小弧，越接近目标越收直
-          if (pa > 0 && pa < 1 && pSpin <= 0) {
-            const dx = x - cx, dy = yy - cy, dist = Math.hypot(dx, dy) || 1;
-            const bow = Math.sin(pa * Math.PI) * d.sp;
-            x += -dy / dist * bow * d.cw;
-            yy += dx / dist * bow * d.cw;
-          }
-          // 细短拖尾：上一位置 → 当前位置，运动时自然拉成光迹，到位后自动消失
-          if (d.px != null) {
-            const mv = Math.hypot(x - d.px, yy - d.py);
-            if (mv > .6) {
-              ctx.strokeStyle = `rgba(${d.c},${Math.min(.18 + mv * .025, .5) * (1 - pBurst)})`;
-              ctx.lineWidth = 1;
-              ctx.beginPath(); ctx.moveTo(d.px, d.py); ctx.lineTo(x, yy); ctx.stroke();
-            }
-          }
-          d.px = x; d.py = yy;
-          // 锐利光点：微光晕 + 亮核两层，近侧更大更亮、微微闪烁；炸开时渐隐
-          const depth = 1 + z3 * .3;
-          const size = (1.5 + d.s * 1.05) * depth;
-          let a = (.3 + .7 * eo) * (.7 + .3 * z3) * (1 - pBurst);
-          a *= .85 + .15 * Math.sin(now / 300 + d.tw);
-          if (a <= .03) continue;
-          ctx.fillStyle = `rgba(${d.c},${a * .2})`;
-          ctx.beginPath(); ctx.arc(x, yy, size * 2, 0, Math.PI * 2); ctx.fill();
-          ctx.fillStyle = `rgba(${d.c},${Math.min(a, 1)})`;
-          ctx.beginPath(); ctx.arc(x, yy, size, 0, Math.PI * 2); ctx.fill();
-        }
-        // 球心的一点呼吸微光（旋转期的「心脏」），炸开后熄灭
-        if (pBurst < 1) {
-          const coreA = (.2 + .25 * pSpin) * (1 - pBurst) * clamp01((t - T_STARS) / 600);
-          const coreR = 3 + 3 * pSpin;
-          ctx.fillStyle = `rgba(${WHITE},${coreA})`;
-          ctx.beginPath(); ctx.arc(cx, cy, coreR, 0, Math.PI * 2); ctx.fill();
-        }
-        ctx.globalCompositeOperation = 'source-over';
-      }
-
-      // 白光铺满：白盘从中心扩张盖过粒子，前缘一道亮环
-      if (pWhite > 0) {
-        const maxR = Math.hypot(w, h) / 2 + 40;
-        const pr = easeInOutQuint(pWhite) * maxR * 1.02;
-        ctx.fillStyle = '#ffffff';
-        ctx.beginPath(); ctx.arc(cx, cy, pr, 0, Math.PI * 2); ctx.fill();
-        if (pWhite < .92) {
-          ctx.strokeStyle = `rgba(${WHITE},${(1 - pWhite / .92) * .85})`;
-          ctx.lineWidth = 1.5 + 3.5 * (1 - pWhite);
-          ctx.beginPath(); ctx.arc(cx, cy, pr * 1.03, 0, Math.PI * 2); ctx.stroke();
+      // 脉冲光环波纹：一圈清晰的波纹从球面向外扩散并淡去
+      if (pW > 0 && pW < 1) {
+        const maxR = Math.hypot(w, h) / 2 + 30;
+        for (let i = 0; i < 2; i++) {
+          const p = clamp01(pW * 1.25 - i * .22);
+          if (p <= 0 || p >= 1) continue;
+          ctx.strokeStyle = i ? `rgba(${BLUE},${(1 - p) * .55})` : `rgba(${CYAN},${(1 - p) * .8})`;
+          ctx.lineWidth = i ? 1 : 1.5;
+          ctx.beginPath(); ctx.arc(cx, cy, Math.min(w, h) * .155 + p * maxR, 0, Math.PI * 2); ctx.stroke();
         }
       }
 
-      // 铺满后整体淡出，露出底下的应用
-      if (t >= T_WHITE && !fading) {
+      // 画面渐暗（文字在其上绘制，不受影响）
+      if (pDim > 0) {
+        ctx.fillStyle = `rgba(0,1,6,${pDim})`;
+        ctx.fillRect(0, 0, w, h);
+      }
+
+      // DeepNotes 字样：动态发光（浮现时辉光由大收拢，之后缓慢呼吸）
+      if (pT > 0) {
+        const size = Math.round(Math.min(w, h) * .058);
+        ctx.save();
+        ctx.font = `600 ${size}px "SF Pro Display","Segoe UI",system-ui,-apple-system,sans-serif`;
+        try { ctx.letterSpacing = Math.round(size * .16) + 'px'; } catch {}
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        const g = .8 + .2 * Math.sin(now / 230);
+        const blur = 16 + 46 * (1 - easeOutCubic(pT)) * g;
+        const tx = cx, ty = cy - size * .2;
+        ctx.shadowColor = `rgba(${BLUE},.9)`;
+        ctx.shadowBlur = blur;
+        ctx.fillStyle = `rgba(${BLUE},${.55 * pT})`;
+        ctx.fillText('DeepNotes', tx, ty);
+        ctx.shadowBlur = 6;
+        ctx.fillStyle = `rgba(${CYAN},${.95 * pT})`;
+        ctx.fillText('DeepNotes', tx, ty);
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = `rgba(${WHITE},${pT})`;
+        ctx.fillText('DeepNotes', tx, ty);
+        ctx.restore();
+      }
+
+      // 淡出进入应用
+      if (t >= T_HOLD && !fading) {
         fading = true;
         setFade(true);
-        setTimeout(finish, FADE + 80);
+        setTimeout(finish, 720);
       }
     };
     // 与核心动效同一套防中断写法：先排下一帧，再在 try 里执行本帧；出错直接放行进入应用
     const frame = now => { raf = requestAnimationFrame(frame); try { step(now); } catch { finish(); } };
     raf = requestAnimationFrame(frame);
 
-    // 点击或按任意键跳过：直接跳到白光铺满淡出
-    const skip = () => { if (!fading) t0 = performance.now() - T_WHITE; };
+    // 点击或按任意键跳过：直接淡出进入应用
+    const skip = () => {
+      if (fading) return;
+      fading = true;
+      setFade(true);
+      setTimeout(finish, 720);
+    };
     window.addEventListener('pointerdown', skip);
     window.addEventListener('keydown', skip);
     return () => {

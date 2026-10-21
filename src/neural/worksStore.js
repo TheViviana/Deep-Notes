@@ -49,10 +49,13 @@ export function loadWorks() {
   return seedWorks();
 }
 
-// 文章列表状态：localStorage 持久化。
+// 文章列表状态：localStorage 持久化（写入防抖 300ms：大库 + 粘贴图后全量序列化很重，逐键同步写会卡顿）。
 export function useWorks() {
   const [works, setWorks] = useState(loadWorks);
-  useEffect(() => { try { localStorage.setItem(WORKS_KEY, JSON.stringify({seeded: true, items: works})); } catch {} }, [works]);
+  useEffect(() => {
+    const t = setTimeout(() => { try { localStorage.setItem(WORKS_KEY, JSON.stringify({seeded: true, items: works})); } catch {} }, 300);
+    return () => clearTimeout(t);
+  }, [works]);
   return [works, setWorks];
 }
 

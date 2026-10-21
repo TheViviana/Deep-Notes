@@ -37,7 +37,7 @@ Deep Notes（深度笔记）：原「创作神经网络看板」（neural-creato
 - `src/neural/CommandPalette.jsx`：全局命令面板，Cmd/Ctrl+K 呼出：全文搜索并打开内容、新建各模块内容、模块与概念网络跳转、导入 / 导出 / 切回示例。
 - `src/neural/wiki.jsx`：[[双链与块引用（`[[笔记#小节]]`）共用工具——编辑器补全（`useWikiComplete`）、正文渲染跳转（`resolveTarget` / `scrollToAnchor`）、全库小节索引（`headingMap`），创作台与方法库编辑器共享，AI 双链建议也复用。
 - `src/neural/conceptStore.js`：概念扩展信息与复习进度的本地存储（`conceptExtras` / `conceptReview` / `gradeConcept`），以及编辑器存入的段落闪卡（`paraCards` / `paraReview` / `gradePara`），两类卡共用同一条 Leitner 调度曲线。
-- `src/neural/Intro.jsx`：开屏动画（关键帧序列：光斑亮起 → 展开为横向线条 → 线条撑开成界面主题底色 → 星野淡入 → 粒子汇聚成球 → 加速旋转 → 粒子炸开 → 白光铺满后淡出进入主界面；高 DPR 锐利渲染）。桌面版每次启动播放，网页同一标签页刷新不重播（sessionStorage `neural-splash-seen`）；`prefers-reduced-motion` 或点击/按键直接跳过。
+- `src/neural/Intro.jsx`：开屏动画（关键帧序列：深空星云淡入 → 细小星点从中心向外扩散成星野 → 能量核心球体浮现（几何网格纹路 + 流动蓝色光带 + 三圈细轨道环异速旋转）→ 球体脉冲一次、光环同步扩散成波纹 → 画面渐暗 → DeepNotes 发光字样浮现 → 淡出进入主界面；高 DPR 锐利渲染，主体约 4.6s）。桌面版每次启动播放，网页同一标签页刷新不重播（sessionStorage `neural-splash-seen`）；`prefers-reduced-motion` 或点击/按键直接跳过。
 - `src/neural/ArticleView.jsx`：`renderMarkdown` 是全部阅读视图共用的渲染管线——先保护代码段，再按顺序处理：公式摘出进 KaTeX（`$…$` 行内、`$$…$$` 与 `\[…\]` 展示、`\(…\)` 行内，化学式 `\ce{}` 经 `katex/contrib/mhchem`，CSS+字体全本地随包，坏公式回退原文不崩）、脚注（`[^key]` 引用 + 行首定义 → 编号上标 + 文末定义区）、标注块（`> [!note]` 等转加粗标题）、`![[图片.png|宽度]]` 嵌入图（`data-asset`，桌面版经 `vault:asset` 读知识库文件回填，网页版显示占位）、`[[双链]]`、`==高亮==`；Live Preview 镜像层里 dataURL 粘贴图永不显示 base64 源码，直接渲染 `.lm-img` 缩略图。
 - `scripts/import-notes.mjs`：笔记导入；`scripts/verify.mjs`：自检。
 - `src/neural/importer.js`：软件内知识库导入（目录选择器 + 解析，规则与命令行导入一致；`parseVault(files, target)` 的 target 可指定全部内容归入某个模块，默认 'auto' 按文件夹名分类，未识别的一律作为方法笔记）。导入不设数量上限：文章 / 笔记 / 阅读 / 档案 / 标签 / 概念全部无上限（概念按出现次数排序，命令行 `--max-works` / `--max-notes` 仍可手动限量）。
