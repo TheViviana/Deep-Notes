@@ -4,8 +4,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseVault} from '../src/neural/importer.js';
-import {serialize, resolveRels, queueSync, flush, setErrorHandler} from '../src/neural/fileStore.js';
-import {VAULT_ROOT_KEY} from '../src/config.js';
+import {serialize, resolveRels, queueSync, flush, setErrorHandler, retryPending, hasPendingWrites} from '../src/neural/fileStore.js';
+import {VAULT_ROOT_KEY, CONFIG} from '../src/config.js';
 
 // —— 浏览器全局桩：fileStore 引用裸 localStorage 与 window.deepnotes ——
 const store = new Map();
@@ -118,4 +118,62 @@ test('知识库根目录键迁移：旧前缀键里的路径自动迁到固定�
   assert.equal(getRoot(), '/Users/demo/我的库');
   assert.equal(store.get(VAULT_ROOT_KEY), '/Users/demo/我的库'); // 固定键已写入
   assert.equal(store.get('neural-dashboard-vault-root-v1'), '/Users/demo/我的库'); // 旧键保留，回退旧版本不丢
+});
+
+// —— 审计 v2-① 回归：留底不能在写盘结果未知前清掉 ——
+
+const PENDING_KEY = CONFIG.storagePrefix + '-pending-writes-v1';
+const makePending = async (id, title) => {
+  const item = {id, title, body: 'x'};
+  queueSync('drafts', item, null, resolveRels('drafts', [item]));
+  await flush();
+  await flush(); // 两次失败 → 挂起留底
+};
+
+test('retryPending：写盘完成前留底不清除，成功后才清（审计 v2-①）', async () => {
+  store.clear();
+  store.set(VAULT_ROOT_KEY, '/tmp/vault');
+  setErrorHandler(() => {});
+  window.deepnotes = {vault: {write: async () => ({ok: false, error: '磁盘满'})}};
+  await makePending('d10', '挂起稿');
+  assert.ok(JSON.parse(store.get(PENDING_KEY)).length, '两次失败后留底已记录');
+  // 写盘挂起期间：留底必须还在（旧实现先清后写，进程此时被杀就会丢编辑）
+  let release, released = false;
+  window.deepnotes.vault.write = () => released
+    ? Promise.resolve({ok: true})
+    : new Promise(r => { release = () => { released = true; r({ok: true}); }; });
+  const done = retryPending();
+  await new Promise(r => setTimeout(r, 10)); // 让重试的 flush 进入写盘等待
+  assert.ok(JSON.parse(store.get(PENDING_KEY)).length, '写盘结果未知前留底不清');
+  release({ok: true});
+  await done;
+  assert.ok(!hasPendingWrites(), '写盘成功后留底清除');
+  assert.ok(!store.has(PENDING_KEY), 'localStorage 留底键已移除');
+  setErrorHandler(null);
+});
+
+test('retryPending：写盘仍失败时留底保留', async () => {
+  store.clear();
+  store.set(VAULT_ROOT_KEY, '/tmp/vault');
+  setErrorHandler(() => {});
+  window.deepnotes = {vault: {write: async () => ({ok: false, error: '磁盘满'})}};
+  await makePending('d11', '仍失败');
+  const n = await retryPending();
+  assert.equal(n, 1);
+  assert.ok(hasPendingWrites(), '仍失败：留底保留（由 flush 失败路径重新记录）');
+  assert.ok(JSON.parse(store.get(PENDING_KEY)).length, 'localStorage 里的留底还在');
+  setErrorHandler(null);
+});
+
+test('retryPending：没有桌面 API 时不清留底', async () => {
+  store.clear();
+  store.set(VAULT_ROOT_KEY, '/tmp/vault');
+  setErrorHandler(() => {});
+  window.deepnotes = {vault: {write: async () => ({ok: false, error: '磁盘满'})}};
+  await makePending('d12', '无API');
+  window.deepnotes = {}; // 撤掉 vault API
+  assert.equal(await retryPending(), 0);
+  assert.ok(hasPendingWrites(), '留底原样保留（清了就真丢）');
+  assert.ok(JSON.parse(store.get(PENDING_KEY)).length);
+  setErrorHandler(null);
 });

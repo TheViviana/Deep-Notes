@@ -35,47 +35,75 @@ function isSymlink(p) {
 // —— 授权根目录白名单（审计 M1）：只有经系统对话框由用户亲自选过的目录才能作为知识库 root。
 // 渲染层万一被注入，也无法指派磁盘上任意目录让主进程读写，爆炸半径收敛到用户授权过的库。
 // 白名单持久化在 userData，重启后已连接的库无需重新授权；升级老用户的存量根目录在首次
-// 访问时弹一次系统确认框，允许后永久登记（每目录每会话最多弹一次，拒绝则保持未授权）。
+// 访问时弹一次系统确认框，允许后永久登记（每目录每会话最多弹一次）。拒绝的选择同样持久化
+// （审计 v2-③），否则老用户每次启动都会被重复追问；prepare-copy 产生的副本目录不再自动
+// 登记（审计 v2-②），首次访问同样要经一次确认——「只授权用户亲自确认过的目录」没有例外。
 const AUTH_FILE = () => path.join(app.getPath('userData'), 'authorized-roots.json');
-let authorizedRoots = null; // 惰性加载：同时登记「解析路径 + 真实路径」两种写法
-function authSet() {
-  if (!authorizedRoots) {
-    let list = [];
-    try { list = JSON.parse(fs.readFileSync(AUTH_FILE(), 'utf8')); } catch {}
-    authorizedRoots = new Set(Array.isArray(list) ? list : []);
-  }
+let authorizedRoots = null; // 惰性加载：{allowed, denied} 各为 Set，同时登记「解析路径 + 真实路径」两种写法
+function loadAuth() {
+  if (authorizedRoots) return authorizedRoots;
+  let allowed = [], denied = [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(AUTH_FILE(), 'utf8'));
+    if (Array.isArray(raw)) allowed = raw; // 旧格式：纯数组即允许清单
+    else if (raw && typeof raw === 'object') { allowed = raw.allowed || []; denied = raw.denied || []; }
+  } catch {}
+  authorizedRoots = { allowed: new Set(allowed), denied: new Set(denied) };
+  try { fs.chmodSync(AUTH_FILE(), 0o600); } catch {} // 审计 v2-⑩：历史文件权限收紧到仅本用户可读写
   return authorizedRoots;
 }
+function saveAuth() {
+  const { allowed, denied } = authorizedRoots;
+  // 0600：清单本身泄露已授权目录的路径，只留给当前用户
+  try { fs.writeFileSync(AUTH_FILE(), JSON.stringify({ allowed: [...allowed], denied: [...denied] }, null, 2), { mode: 0o600 }); } catch {}
+}
+function authSet() { return loadAuth().allowed; }
 function authorizeRoot(dir) {
   const r = path.resolve(String(dir || ''));
   if (!r) return;
-  const set = authSet();
-  set.add(r);
-  try { set.add(fs.realpathSync(r)); } catch {} // 符号链接路径按真实路径补记，两种写法都能命中
-  try { fs.writeFileSync(AUTH_FILE(), JSON.stringify([...set], null, 2)); } catch {}
+  const auth = loadAuth();
+  auth.allowed.add(r);
+  auth.denied.delete(r); // 用户后来又亲自授权了同一目录：撤销此前的拒绝记录
+  try { auth.allowed.add(fs.realpathSync(r)); } catch {} // 符号链接路径按真实路径补记，两种写法都能命中
+  saveAuth();
+}
+function denyRoot(dir) {
+  const r = path.resolve(String(dir || ''));
+  if (!r) return;
+  const auth = loadAuth();
+  auth.denied.add(r);
+  try { auth.denied.add(fs.realpathSync(r)); } catch {}
+  saveAuth();
 }
 function rootAuthorized(root) {
-  const r = path.resolve(String(root || ''));
-  if (!r || !authSet().has(r)) return false;
-  try { return authSet().has(fs.realpathSync(r)); } catch { return true; } // 目录暂时读不到（磁盘休眠等）：按登记路径放行
+  const raw = String(root || '').trim();
+  if (!raw) return false; // 审计 v2-④：空 root 会 resolve 成 cwd，绝不能把当前目录卷进白名单
+  const r = path.resolve(raw);
+  if (!authSet().has(r)) return false;
+  // 目录暂时读不到（磁盘休眠等）：按登记路径放行。显式复查登记集合而非无条件 true（审计 v2-⑨）
+  try { return authSet().has(fs.realpathSync(r)); } catch { return authSet().has(r); }
 }
 const askedRoots = new Set(); // 确认框每目录每会话最多弹一次
 async function ensureAuthorized(root) {
-  if (rootAuthorized(root)) return true;
-  const key = path.resolve(String(root || ''));
-  if (!key || askedRoots.has(key)) return false;
-  askedRoots.add(key);
+  const raw = String(root || '').trim();
+  if (!raw) return false; // 审计 v2-④：空 root 不弹框，杜绝把 cwd 误授权
+  if (rootAuthorized(raw)) return true;
+  const r = path.resolve(raw);
+  if (loadAuth().denied.has(r)) return false; // 用户明确拒绝过且已持久化：静默保持未授权，不再追问
+  if (askedRoots.has(r)) return false;
+  askedRoots.add(r);
   try {
     const { response } = await dialog.showMessageBox({
       type: 'question',
-      message: `允许 Deep Notes 访问该文件夹？\n${key}`,
+      message: `允许 Deep Notes 访问该文件夹？\n${r}`,
       detail: '只有你亲自选择过的文件夹才会被授权为知识库根目录，允许后将永久记住这个选择。'
         + '\nOnly folders you personally picked can be used as the vault root.',
       buttons: ['允许 Allow', '拒绝 Deny'],
       defaultId: 0,
       cancelId: 1,
     });
-    if (response === 0) { authorizeRoot(key); return true; }
+    if (response === 0) { authorizeRoot(r); return true; }
+    denyRoot(r); // 拒绝也记下来：否则每次启动都对同一目录重复追问
   } catch {}
   return false;
 }
@@ -368,7 +396,8 @@ ipcMain.handle('vault:prepare-copy', async (_e, srcRoot) => {
     if (!(await ensureAuthorized(srcRoot))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
     const resolved = path.resolve(srcRoot);
     if (/ - Deep Notes$/i.test(path.basename(resolved))) {
-      authorizeRoot(resolved); // 直接作工作库使用：同样登记白名单
+      // 审计 v2-②：不再自动登记白名单——「只授权用户亲自确认过的目录」没有例外，
+      // 首次访问该目录时同样会弹一次系统确认框
       return { ok: true, dir: resolved, reused: true };
     }
     const parent = path.dirname(resolved);
@@ -377,7 +406,8 @@ ipcMain.handle('vault:prepare-copy', async (_e, srcRoot) => {
     for (let i = 2; fs.existsSync(dir); i++) dir = path.join(parent, `${base} ${i}`);
     await fsp.mkdir(dir, { recursive: true });
     await copyAssets(resolved, dir);
-    authorizeRoot(dir); // 新副本登记进授权白名单，后续写盘才放行
+    // 审计 v2-②：新副本不再自动登记授权白名单——导入后的首次读取会触发一次系统确认框，
+    // 允许后永久记住；自动授权点会让「只授权用户亲自选过的目录」形同虚设
     return { ok: true, dir };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });

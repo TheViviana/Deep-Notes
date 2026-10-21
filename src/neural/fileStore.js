@@ -213,24 +213,41 @@ function savePending(list) {
     if (pendingList.length) localStorage.setItem(PENDING_KEY, JSON.stringify(pendingList));
     else localStorage.removeItem(PENDING_KEY);
   } catch { saved = false; }
-  if (!saved && pendingList.length) idbPut(pendingList).catch(() => {}); // localStorage 写满：IndexedDB 兜底
-  else if (saved) idbClear().catch(() => {}); // localStorage 写成功后清掉 IndexedDB 旧兜底，避免复活
+  if (!saved && pendingList.length) {
+    // localStorage 写满：IndexedDB 兜底。兜底也写不进（审计 v2-⑧）就必须明确告警——
+    // 此时留底只存在于本次会话的内存里，关窗即失，用户必须知道并尽快处理
+    idbPut(pendingList).catch(err => {
+      console.warn('IndexedDB 留底兜底失败 · IndexedDB backup failed:', err);
+      try { window.dispatchEvent(new Event('deepnotes-pending-persist-failed')); } catch {}
+    });
+  } else if (saved) idbClear().catch(() => {}); // localStorage 写成功后清掉 IndexedDB 旧兜底，避免复活
   try { window.dispatchEvent(new Event('deepnotes-pending-changed')); } catch {} // 横幅状态跟随（出现 / 自动隐藏）
 }
 export function hasPendingWrites() {
   return pendingRecorded || pendingList.length > 0;
 }
 export function clearPendingWrites() { savePending([]); }
-// 把挂起操作重新排队并 flush：成功则记录自动清除，仍失败会再次留底。
-// await 本轮写完才返回——调用方（横幅「重试写盘」）据此判断最终结果，而不是过早报成功。
+let retryingPending = false; // 防递归：flush 末尾会补写历史留底再次进入 retryPending，补写期间由这里拦住
+// 把挂起操作重新排队并 flush：写盘成功的记录才清除，仍失败的由 flush 失败路径重新留底
+//（时间戳最新）。await 本轮写完才返回——调用方（横幅「重试写盘」）据此判断最终结果。
+// 审计 v2-①：留底不能在写盘结果未知前清掉——旧实现先 savePending([]) 再写盘，进程在
+// await flush() 期间被杀（崩溃 / 断电 / 强退）时留底已清而磁盘未必写成，编辑就真丢了。
+// 现在先写后清：中途被杀最坏也就是「留底还在、盘上未知」，下次启动照旧横幅提示。
 export async function retryPending() {
+  if (retryingPending) return 0;
   const list = loadPending();
-  savePending([]);
   const v = api();
-  if (!v || !list.length) return 0;
-  for (const op of list) queue.set(opKey(op), {...op, _retry: true});
-  await flush();
-  return list.length;
+  if (!v || !list.length) return 0; // 没有桌面 API 时更不能清留底（清了就真丢），原样保留
+  retryingPending = true;
+  try {
+    for (const op of list) queue.set(opKey(op), {...op, _retry: true});
+    const failed = (await flush()) || [];
+    const failedKeys = new Set(failed.map(opKey));
+    for (const op of list) if (!op.root) failedKeys.add(opKey(op)); // root 丢失写不了：视为仍失败，保留留底
+    // 留底收敛为「仍失败的」：写盘成功的已从记录清除
+    savePending(loadPending().filter(op => failedKeys.has(opKey(op))));
+    return list.length;
+  } finally { retryingPending = false; }
 }
 function recordPending(ops) {
   const at = new Date().toISOString();
@@ -272,11 +289,12 @@ export async function flush() {
   if (failedOps.length) {
     recordPending(failedOps);
     if (errorHandler) errorHandler(failedOps.map(op => op.rel || op.from));
-  } else if (pendingRecorded) {
+  } else if (pendingRecorded && !retryingPending) {
     // 有历史留底：先补写留底的操作再谈「清除」。直接清掉会让留底内容静默丢失
     //（下次启动按文件夹覆盖），补写失败会重新留底并再次提示。
     retryPending();
   }
+  return failedOps; // 调用方（retryPending）据此知道哪些操作最终仍失败
 }
 
 // 退出前的同步落盘：beforeunload 里异步 IPC（flush）可能页面先卸载、操作根本发不出去，

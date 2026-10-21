@@ -35,18 +35,24 @@ const BACKUP_KEY = CONFIG.storagePrefix + '-data-backup-v1';
 const STORAGE_LIMIT = 5 * 1024 * 1024;
 let storageStrapped = false; // 降级标记：true = 已触发写满降级，本轮会话暂停快照写入
 let snapshotSkipped = false; // 水位预检跳过快照只提示一次，不反复打扰
+let usageCache = { at: 0, n: 0 };
 function storageUsage() {
+  const now = Date.now();
+  // 2 秒内复用上次结果（审计 v2-⑥）：数 MB 数据下每次全量扫描都会构造大字符串，
+  // 内存峰值与 GC 压力不小；调用点只有快照水位预检，短缓存足够新鲜
+  if (now - usageCache.at < 2000) return usageCache.n;
   let n = 0;
   try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); n += k.length + (localStorage.getItem(k) || '').length; } } catch {}
+  usageCache = { at: now, n };
   return n;
 }
 // 带降级的统一写入：写满先清全量快照腾位重试一次（快照可由下次成功保存重建，正文不可丢）；
 // 再失败说明连正文都放不下了，提示用户尽快导出备份。返回是否成功。
 function trySaveLocal(key, val) {
-  try { localStorage.setItem(key, val); return true; }
+  try { localStorage.setItem(key, val); usageCache.at = 0; return true; } // 写入改变水位：缓存作废
   catch (err) {
     console.warn('localStorage 写入失败 · Save failed:', key, err);
-    try { localStorage.removeItem(BACKUP_KEY); } catch {}
+    try { localStorage.removeItem(BACKUP_KEY); usageCache.at = 0; } catch {}
     try {
       localStorage.setItem(key, val);
       if (!storageStrapped) { storageStrapped = true; showGlobalNotice('本地存储空间已满：数据快照已暂停以保证正文保存，建议 ⌘K「导出全部 Markdown」尽快备份 · Storage full'); }
@@ -466,7 +472,15 @@ function App() {
   useEffect(() => {
     const sync = () => setPendingWrites(capable() && !!getRoot() && hasPendingWrites());
     window.addEventListener('deepnotes-pending-changed', sync);
-    return () => window.removeEventListener('deepnotes-pending-changed', sync);
+    // 留底的 IndexedDB 兜底也写不进（审计 v2-⑧）：留底只在本会话内存里，用户必须知道
+    const failNote = () => showGlobalNotice('挂起写盘留底失败（localStorage 与 IndexedDB 均不可用），未落盘的修改仅保留在本次会话内存中，请尽快重试写盘或导出备份 · Pending backup unavailable');
+    window.addEventListener('deepnotes-pending-persist-failed', failNote);
+    // IndexedDB 补灌完成后再对齐一次（审计 v2-⑦）：补灌事件可能早于本监听器注册，只靠事件会漏
+    pendingReady.then(sync).catch(() => {});
+    return () => {
+      window.removeEventListener('deepnotes-pending-changed', sync);
+      window.removeEventListener('deepnotes-pending-persist-failed', failNote);
+    };
   }, []);
   async function retryPendingWrites() {
     const n = await retryPending();
@@ -893,7 +907,7 @@ function App() {
     }
     if (kind === 'note') {
       const safeTitle = patch.title ? patch.title.trim().replace(/[/\\]/g, '·') : patch.title; // 文件名安全化
-      setNotes(ns => ns.map(x => x.id === id ? {...x, ...patch, ...(safeTitle ? {path: x.path.replace(/[^/]+$/, safeTitle + '.md')} : {})} : x));
+      setNotes(ns => ns.map(x => x.id === id ? {...x, ...patch, ...(safeTitle && x.path ? {path: x.path.replace(/[^/]+$/, safeTitle + '.md')} : {})} : x)); // path 缺失时只改内容不改路径（审计 v2-⑤）
       return {ok: true, title: patch.title};
     }
     return {error: '未知类型 ' + kind};
