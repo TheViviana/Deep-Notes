@@ -129,13 +129,17 @@ export function serialize(kind, item) {
 }
 
 // —— 防抖写盘队列：多次编辑合并，800ms 静默后统一 flush ——
-// 以「类型 + rel」为键：同一文件先 trash 后 write（如甲删除、乙顶上原名）两个操作都要执行——
-// 若只按 rel 去重，write 会盖掉 trash，被删内容的旧文件不会进 .trash 就被覆盖（破坏可找回性）
-const queue = new Map(); // 't:rel' -> {root, rel, trash: true} | 'w:rel' -> {root, rel, body}
+// 以「类型 + 路径」为键：move（重命名，原子）、trash（删除）、write（写入）三类，
+// 同一文件先 move/trash 后 write（如甲删除、乙顶上原名）多个操作都要执行——
+// 若只按路径去重，write 会盖掉 trash，被删内容的旧文件不会进 .trash 就被覆盖（破坏可找回性）。
+// 重命名走 move（rename 原子）而不是「trash 旧 + write 新」：中途失败旧文件仍在原处，
+// 内容既不丢、也不往 .trash 塞改名副本。
+const queue = new Map(); // 'm:from' -> {root, from, to, move} | 't:rel' -> {root, rel, trash} | 'w:rel' -> {root, rel, body}
 let timer = null;
+const opKey = op => op.move ? 'm:' + op.from : op.trash ? 't:' + op.rel : 'w:' + op.rel;
 
 function enqueue(op) {
-  queue.set((op.trash ? 't:' : 'w:') + op.rel, op);
+  queue.set(opKey(op), op);
   clearTimeout(timer);
   timer = setTimeout(flush, 800);
 }
@@ -154,13 +158,17 @@ export async function flush() {
       // 用 op 捕获时的根目录：即使中途切库，旧编辑也只写进旧库
       const root = op.root || getRoot();
       if (!root) continue;
-      if (op.trash) await v.trash(root, op.rel);
-      else await v.write(root, op.rel, op.body);
+      const res = op.move ? await v.move(root, op.from, op.to)
+        : op.trash ? await v.trash(root, op.rel)
+        : await v.write(root, op.rel, op.body);
+      // 主进程把业务失败包成 {ok:false} 返回而非抛错：这里必须显式检查，
+      // 否则越界 / 拒写 / 权限不足全被静默吞掉，重试与用户提示都不会触发
+      if (res && res.ok === false) throw new Error(res.error || '写盘失败');
     } catch (err) {
       // 非破坏性增量：瞬时故障（磁盘休眠 / 占用等）不丢操作，稍后自动重试一次；
       // 重试仍失败才报给用户，内容始终还留在浏览器里
-      if (!op._retry) { queue.set((op.trash ? 't:' : 'w:') + op.rel, {...op, _retry: true}); requeued = true; }
-      else failed.push(op.rel);
+      if (!op._retry) { queue.set(opKey(op), {...op, _retry: true}); requeued = true; }
+      else failed.push(op.rel || op.from);
     }
   }
   if (requeued) { clearTimeout(timer); timer = setTimeout(flush, 2500); }
@@ -179,7 +187,7 @@ export function flushSyncNow() {
   try { v.flushSync(ops); } catch (err) { console.warn('退出落盘失败 · Flush on quit failed:', err); }
 }
 
-// 同步一条内容到磁盘。item 为 null 表示删除；old 为变更前的旧记录（路径变了会先移走旧文件）。
+// 同步一条内容到磁盘。item 为 null 表示删除；old 为变更前的旧记录（路径变了走 move 原子移动）。
 // old 与 item 同引用（其他 kind 变化引发的全量 diff）时无需重写。
 // relMap 按「新数组」算出的消歧路径；oldRelMap 按「旧数组」算——旧路径必须用旧的消歧结果：
 // 若按新数组算，同名消歧短码会挪给别的条目，删除/重命名时错删同名文件、留下真孤儿。
@@ -194,7 +202,7 @@ export function queueSync(kind, item, old, relMap, oldRelMap) {
     if (oldRel) enqueue({root, rel: oldRel, trash: true});
     return;
   }
-  if (old && oldRel && oldRel !== newRel) enqueue({root, rel: oldRel, trash: true});
+  if (old && oldRel && oldRel !== newRel) enqueue({root, from: oldRel, to: newRel, move: true});
   if (newRel) enqueue({root, rel: newRel, body: serialize(kind, item)});
 }
 

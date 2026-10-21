@@ -10,7 +10,10 @@ function makeStore(key) {
   const subs = new Set();
   const write = next => {
     state = next;
-    try { localStorage.setItem(full, JSON.stringify(next)); } catch {}
+    // 写失败（配额满 / 隐私模式）不能静默：内存已更新、界面看似保存成功，
+    // 下次启动数据却没了。留 warn 痕迹，与 AI 配置等处的存储写失败提示同一风格。
+    try { localStorage.setItem(full, JSON.stringify(next)); }
+    catch (err) { console.warn('localStorage 写入失败 · Save failed:', full, err); }
     for (const f of subs) f(next);
   };
   return {

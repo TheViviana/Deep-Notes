@@ -469,7 +469,7 @@ function App() {
     setToast('方法笔记已删除 · Note deleted');
   }
   // —— 方法库二级分类：拖拽/下拉只改 path 第二段，id 不变，选中态与编辑器原地保持（无刷新） ——
-  // 桌面版由全局 diff 自动「旧路径移入 .trash + 新路径写盘」（vault:write 自带建目录）。
+  // 桌面版由全局 diff 自动「旧路径 rename 到新路径 + 内容变更时写盘」（vault:move 原子移动，自带建目录）。
   const TRASH_FOLDER = '未分类'; // 删除非空分类时的兜底去处
   const subOf = n => (n.path || '').split('/')[1] || '笔记';
   const notePathIn = (n, folder) => {

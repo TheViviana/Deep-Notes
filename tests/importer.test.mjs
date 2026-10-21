@@ -66,6 +66,18 @@ test('方法笔记路径包含子目录', async () => {
   assert.equal(r.notes[0].path, '05-方法库 methods/写作/方法一.md');
 });
 
+test('方法库根目录直下的文件路径不再重复目录名，兜底归入「笔记」', async () => {
+  const r = await parseVault([
+    f('vault/05-方法库 methods/根下笔记.md', '内容'),
+  ]);
+  assert.equal(r.notes[0].path, '05-方法库 methods/笔记/根下笔记.md');
+  // 分类兜底命中的普通目录名（不匹配方法库规则）仍原样保留
+  const r2 = await parseVault([
+    f('vault/读书笔记/散记.md', '内容'),
+  ]);
+  assert.equal(r2.notes[0].path, '05-方法库 methods/读书笔记/散记.md');
+});
+
 test('选题：优先级识别，正文作为备注回退', async () => {
   const r = await parseVault(files);
   const idea = r.ideas[0];
@@ -124,7 +136,7 @@ test('稳定 id：deepnotes-id 往返，文件顺序变化 / 新增文件后已�
   assert.deepEqual(r1.notes.map(x => x.id), ['n4', 'n9']);
   assert.ok(!r1.notes[0].keep); // deepnotes-id 是通用键，不算自定义 frontmatter
 
-  // 顺序颠倒 + 新增一个无 id 文件：已有 id 一动不动，新文件补号跳过被占用的 n4 / n9
+  // 顺序颠倒 + 新增一个无 id 文件：已有 id 一动不动，新文件按「前缀 + 相对路径散列」补号
   const r2 = await parseVault([
     f('vault/05-方法库 methods/乙笔记.md', b),
     f('vault/05-方法库 methods/甲笔记.md', a),
@@ -133,10 +145,22 @@ test('稳定 id：deepnotes-id 往返，文件顺序变化 / 新增文件后已�
   const byTitle = Object.fromEntries(r2.notes.map(x => [x.title, x.id]));
   assert.equal(byTitle['甲笔记'], 'n4');
   assert.equal(byTitle['乙笔记'], 'n9');
-  assert.equal(byTitle['丙笔记'], 'n1');
+  const pid = byTitle['丙笔记'];
+  assert.match(pid, /^n[0-9a-z]+$/); // 散列 id 仍满足 deepnotes-id 字符集
+  assert.ok(!['n4', 'n9'].includes(pid));
+
+  // 再导入且中间插入另一个无 id 文件：丙的散列 id 不漂移（旧实现按下标会变号触发误删）
+  const r3 = await parseVault([
+    f('vault/05-方法库 methods/甲笔记.md', a),
+    f('vault/05-方法库 methods/丁笔记.md', '---\ntitle: 丁笔记\n---\n内容丁'),
+    f('vault/05-方法库 methods/丙笔记.md', '---\ntitle: 丙笔记\n---\n内容丙'),
+    f('vault/05-方法库 methods/乙笔记.md', b),
+  ]);
+  assert.equal(r3.notes.find(x => x.title === '丙笔记').id, pid);
+  assert.equal(new Set(r3.notes.map(x => x.id)).size, 4);
 });
 
-test('稳定 id：重复 deepnotes-id 只承认第一个，后来者与无 id 文件按序补号', async () => {
+test('稳定 id：重复 deepnotes-id 只承认第一个，后来者与无 id 文件按路径散列补号', async () => {
   const r = await parseVault([
     f('vault/05-方法库 methods/甲.md', '---\ntitle: 甲\ndeepnotes-id: n1\n---\n内容'),
     f('vault/05-方法库 methods/乙.md', '---\ntitle: 乙\ndeepnotes-id: n1\n---\n内容'),

@@ -5,10 +5,30 @@ const fsp = fs.promises;
 
 // —— 文件夹知识库（桌面版）：渲染层经 preload 暴露的 window.deepnotes.vault 调用 ——
 // 所有写操作都限制在所选根目录（root）内，路径越界一律拒绝。
+function realPath(p) {
+  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+}
+// 越界校验必须解析真实路径：库里的符号链接若指向库外，纯字符串前缀比较会放行，
+// writeFile 跟随链接就把内容写到库外了。目标（或中间目录）还不存在时，向上找第一个
+// 真实存在的祖先解析出真实位置再拼回未创建的后缀——藏在中间的符号链接照样被识破。
 function inside(root, target) {
-  const r = path.resolve(root) + path.sep;
-  const t = path.resolve(target);
-  return t === path.resolve(root) || t.startsWith(r);
+  const r = realPath(path.resolve(root));
+  let t = path.resolve(String(target || ''));
+  let suffix = '';
+  for (let cur = t; ; ) {
+    let real = null;
+    try { real = fs.realpathSync(cur); } catch { /* 不存在，继续向上 */ }
+    if (real) { t = real + suffix; break; }
+    suffix = path.sep + path.basename(cur) + suffix;
+    const parent = path.dirname(cur);
+    if (parent === cur) { t = path.resolve(String(target || '')); break; }
+    cur = parent;
+  }
+  return t === r || t.startsWith(r + path.sep);
+}
+// 目标本身是符号链接时直接拒绝（rename / writeFile 会穿过或搬运链接，语义都不对）。
+function isSymlink(p) {
+  try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; }
 }
 
 const SKIP = new Set(['.obsidian', '.trash', '.git', '.DS_Store', 'node_modules']);
@@ -24,10 +44,12 @@ async function atomicWrite(full, body) {
 }
 
 // —— 拒绝不完整覆盖：空内容不允许覆盖已有文件 ——
-// 序列化结果永远带 frontmatter，正常流程不可能写出空文件；空 body 只能来自上游 bug 或损坏，
-// 此时宁可拒写保住盘上原文，也不能用一个空文件把内容毁掉。
+// 正常序列化结果必带 deepnotes-id frontmatter：带这个标识的「空」是用户主动清空正文，放行写入；
+// 连标识都没有的纯空串只可能来自上游 bug 或数据损坏，此时宁可拒写保住盘上原文。
 function rejectIncomplete(full, body) {
-  if (String(body).trim()) return null;
+  const s = String(body);
+  if (s.trim()) return null;
+  if (/^---\r?\n[\s\S]*\bdeepnotes-id:/.test(s)) return null;
   try { if (fs.existsSync(full) && fs.statSync(full).size > 0) return '拒绝用空内容覆盖已有文件'; } catch {}
   return '拒绝写入空文件';
 }
@@ -85,11 +107,29 @@ ipcMain.handle('vault:write', async (_e, { root, rel, body }) => {
   try {
     const full = path.join(root, rel);
     if (!inside(root, full)) return { ok: false, error: '路径越界' };
+    if (isSymlink(full)) return { ok: false, error: '目标是符号链接，拒绝写入' };
     const blocked = rejectIncomplete(full, body);
     if (blocked) return { ok: false, error: blocked };
     await fsp.mkdir(path.dirname(full), { recursive: true });
     await atomicWrite(full, body);
     await pruneUp(root, path.dirname(full)).catch(() => {}); // 顺手清掉因改名/移动而空掉的目录
+    return { ok: true };
+  } catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
+
+// 原子移动 / 重命名：rename 在同一卷内是原子操作。重命名不再拆成「先 trash 旧路径、
+// 再 write 新路径」两步——中间任何一步失败（磁盘满、权限、进程被杀）旧文件已在回收站、
+// 新文件又没写成，内容就真没了；改走 move 后要么成功、要么旧文件原封不动留在原处，
+// 且改名不再往 .trash 塞副本（回收站里只剩用户主动删除的内容）。
+ipcMain.handle('vault:move', async (_e, { root, from, to }) => {
+  try {
+    const a = path.join(root || '', String(from || ''));
+    const b = path.join(root || '', String(to || ''));
+    if (!root || !from || !to || !inside(root, a) || !inside(root, b)) return { ok: false, error: '路径越界' };
+    if (isSymlink(a) || isSymlink(b)) return { ok: false, error: '目标是符号链接，拒绝移动' };
+    await fsp.mkdir(path.dirname(b), { recursive: true });
+    await fsp.rename(a, b).catch(err => { if (err?.code === 'ENOENT') return; throw err; }); // 源本就不存在视为已移走
+    await pruneUp(root, path.dirname(a)).catch(() => {}); // 源目录空了就删掉，不留空文件夹
     return { ok: true };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
@@ -101,6 +141,7 @@ ipcMain.handle('vault:export', async (_e, { root, files }) => {
     for (const f of files) {
       const full = path.join(root, f.rel);
       if (!inside(root, full)) return { ok: false, error: '路径越界' };
+      if (isSymlink(full)) return { ok: false, error: `${f.rel}: 目标是符号链接，拒绝写入` };
       const blocked = rejectIncomplete(full, f.body);
       if (blocked) return { ok: false, error: `${f.rel}: ${blocked}` };
       await fsp.mkdir(path.dirname(full), { recursive: true });
@@ -121,7 +162,12 @@ async function pruneTrash(root) {
     const p = path.join(trashDir, e.name);
     try {
       const st = await fsp.stat(p);
-      if (now - (st.mtimeMs || st.ctimeMs) > TRASH_TTL) await fsp.rm(p, { recursive: true, force: true });
+      if (now - (st.mtimeMs || st.ctimeMs) > TRASH_TTL) {
+        await fsp.rm(p, { recursive: true, force: true });
+        // 清理留痕：误删找回的最后一点线索（文件名与被清时间）
+        await fsp.appendFile(path.join(trashDir, '.cleanup.log'),
+          `${new Date().toISOString()} 清理超期回收站文件 · pruned ${e.name}\n`).catch(() => {});
+      }
     } catch {}
   }
 }
@@ -146,12 +192,22 @@ ipcMain.handle('vault:trash', async (_e, { root, rel }) => {
 
 // 退出前同步落盘：beforeunload 里异步 invoke 不可靠（页面可能先卸载、回调永远不来），
 // 渲染层用 sendSync 调这里，主进程用同步 fs 一次写完才放行关闭。
-// 与 vault:write / vault:trash 同一套越界与拒绝空写规则；队列结构见渲染层 fileStore.js。
+// 与 vault:write / vault:move / vault:trash 同一套越界与拒绝空写规则；队列结构见渲染层 fileStore.js。
 ipcMain.on('vault:flush-sync', (e, ops) => {
   const failed = [];
   for (const op of (Array.isArray(ops) ? ops : [])) {
-    const rel = String(op?.rel || '');
+    const rel = String(op?.rel || op?.from || '');
     try {
+      if (op?.move) {
+        // 与 vault:move 相同的原子移动：退出前一刻的重命名也不走「先 trash 再写」
+        const a = path.join(op?.root || '', String(op.from || ''));
+        const b = path.join(op?.root || '', String(op.to || ''));
+        if (!op?.root || !op.from || !op.to || !inside(op.root, a) || !inside(op.root, b) || isSymlink(a) || isSymlink(b)) { failed.push(rel); continue; }
+        fs.mkdirSync(path.dirname(b), { recursive: true });
+        try { fs.renameSync(a, b); } catch (err) { if (err?.code !== 'ENOENT') throw err; }
+        pruneUp(op.root, path.dirname(a)).catch(() => {});
+        continue;
+      }
       const full = path.join(op?.root || '', rel);
       if (!op?.root || !rel || !inside(op.root, full)) { failed.push(rel); continue; }
       if (op.trash) {
@@ -161,6 +217,7 @@ ipcMain.on('vault:flush-sync', (e, ops) => {
         try { fs.renameSync(full, dest); } catch (err) { if (err?.code !== 'ENOENT') throw err; }
         pruneUp(op.root, path.dirname(full)).catch(() => {});
       } else {
+        if (isSymlink(full)) { failed.push(rel); continue; }
         const blocked = rejectIncomplete(full, op.body);
         if (blocked) { failed.push(rel); continue; }
         fs.mkdirSync(path.dirname(full), { recursive: true });
@@ -259,14 +316,46 @@ try {
 
 // AI 助手插件：主进程转发 OpenAI 兼容请求。
 // 部分服务商不允许浏览器直连（CORS），桌面版经主进程 net 转发；调用仍受渲染层「联网开关 + 插件开关」双闸控制。
+// 转发不是代理跳板：只放行 https 公网与 http 本机回环（本地 Ollama 场景），
+// 内网段 / 云 metadata 端点一律拒绝，防止渲染层被注入后借主进程探测内网（SSRF）。
+const MAX_AI_BODY = 10 * 1024 * 1024; // 响应体上限 10MB，防超大响应打爆内存
+function aiUrlAllowed(raw) {
+  let u;
+  try { u = new URL(String(raw || '')); } catch { return 'URL 无效'; }
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (u.protocol === 'http:') {
+    const loopback = host === 'localhost' || host === '::1' || /^127\./.test(host);
+    if (!loopback) return '明文 http 仅允许本机地址（localhost / 127.0.0.1 / ::1）';
+  } else if (u.protocol !== 'https:') {
+    return '仅允许 http(s) 地址';
+  }
+  const loopback = host === 'localhost' || host === '::1' || /^127\./.test(host);
+  if (!loopback && (
+    /^(10\.|192\.168\.|169\.254\.|0\.)/.test(host)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+    || /^(::|f[cd][0-9a-f]{2}:|fe80:)/i.test(host)
+    || host.endsWith('.local')
+  )) return '禁止访问内网 / 保留段地址';
+  return null;
+}
 ipcMain.handle('ai-fetch', async (_event, { url, headers, body }) => {
   try {
-    const res = await net.fetch(url, {
+    const blocked = aiUrlAllowed(url);
+    if (blocked) return { ok: false, status: 0, error: `请求被拒绝：${blocked}` };
+    const res = await net.fetch(String(url), {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      // 不跟随重定向：白名单只校验了初始 URL，跟随 302 可能把请求引到内网（SSRF 绕过）；
+      // 正规 AI 接口不会重定向 POST 请求，遇到重定向直接报错即可
+      redirect: 'error',
     });
-    const data = await res.json().catch(() => null);
+    const len = Number(res.headers.get('content-length') || 0);
+    if (len > MAX_AI_BODY) return { ok: false, status: res.status, error: '响应体超过 10MB，已拒绝' };
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength > MAX_AI_BODY) return { ok: false, status: res.status, error: '响应体超过 10MB，已拒绝' };
+    let data = null;
+    try { data = JSON.parse(new TextDecoder().decode(buf)); } catch { /* 非 JSON 响应（如纯文本报错）按 null 处理 */ }
     return { ok: res.ok, status: res.status, data };
   } catch (err) {
     return { ok: false, status: 0, error: String(err?.message || err) };

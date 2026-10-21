@@ -70,10 +70,11 @@ marked.use({renderer: {
   },
 }});
 
-// 镜像层行内片段（dataURL 图片 / 彩色 span / 双链 / 高亮 / 加粗 / 斜体 / 删除线 / 行内代码）。
+// 镜像层行内片段（dataURL 图片 / 彩色 span / 下划线 / 双链 / 高亮 / 加粗 / 斜体 / 删除线 / 行内代码）。
 // walk 递归处理嵌套片段，每个 walk 实例化独立正则（共享 lastIndex 会互相踩踏）。
 const INLINE_SRC = '!\\[[^\\]\\n]*\\]\\(data:[^)\\s]+\\)'
   + '|<span style="color:(#[0-9a-fA-F]{3,8})">[\\s\\S]*?<\\/span>'
+  + '|<u>[\\s\\S]*?<\\/u>'
   + '|\\[\\[[^\\]\\n]+\\]\\]|==[^=\\n]+==|\\*\\*[^*\\n]+\\*\\*|__[^_\\n]+__|~~[^~\\n]+~~|\\*[^*\\n]+\\*(?!\\*)|`[^`\\n]+`';
 
 // 公式渲染：KaTeX 全本地（CSS + 字体随包），失败时回退原文。mhchem 已注册，\ce{} 化学式可用。
@@ -137,7 +138,12 @@ export function renderMarkdown(md) {
         const label = unescLt((alias || '').trim())
           || (anchor ? `${(name || '').trim()} › ${anchor.trim()}` : raw);
         return `<a class="md-wikilink" data-target="${esc(raw)}">${esc(label)}</a>`;
-      });
+      })
+      // 格式栏插入的受信标签（文字颜色 / 下划线）成对还原为真标签，阅读视图才能显示效果。
+      // 只还原固定格式（色值限定 #rgb–#rrggbb 十六进制，配不成对的原样转义显示），
+      // 用户手写的其他 HTML（<script>、<img onerror> 等）不受影响，仍是纯文本。
+      .replace(/&lt;(span style="color:#[0-9a-fA-F]{3,8}")>([\s\S]*?)&lt;\/span>/g, '<$1>$2</span>')
+      .replace(/&lt;(u)>([\s\S]*?)&lt;\/u>/g, '<$1>$2</$1>');
   };
   // 用捕获组 split：奇数段是 ```围栏``` 或 `行内代码`，保持原样；偶数段才做替换
   let src = String(md || '').split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g).map((seg, i) => i % 2 ? seg : proc(seg)).join('');
@@ -553,6 +559,8 @@ export function buildMirrorHtml(text, sel) {
         const openLen = t.indexOf('>') + 1;
         out.push(mk(t.slice(0, openLen), at, on) + `<span style="color:${m[1]}">`
           + walk(t.slice(openLen, t.length - 7), at + openLen) + '</span>' + mk('</span>', end - 7, on));
+      } else if (t.startsWith('<u>')) { // 下划线：同彩色文字，首尾标签是语法符号，内容继续 token 化
+        out.push(mk('<u>', at, on) + '<u>' + walk(t.slice(3, -4), at + 3) + '</u>' + mk('</u>', end - 4, on));
       } else if (t.startsWith('[[')) {
         out.push(mk('[[', at, on) + '<span class="lm-a">' + walk(t.slice(2, -2), at + 2) + '</span>' + mk(']]', end - 2, on));
       } else if (t.startsWith('==')) {

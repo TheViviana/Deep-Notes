@@ -139,20 +139,22 @@ for (const file of files) {
 }
 
 // —— 稳定 id：优先用 frontmatter 的 deepnotes-id（与软件内导入同一套规则）；
-// 没有的文件按下标补号且跳过已占用号——否则两次导入的「n4」指向不同文件，再导入时按 id 配对
+// 没有的文件用「前缀 + 文件相对路径散列」兜底——同一文件无论导入次序、中途新增了文件都得到
+// 同一个 id。按下标补号的话，两次导入的「n4」会指向不同文件，再导入时按 id 配对
 // 会把对方路径的文件误移进 .trash。 ——
 const ID_OK = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+const hash32 = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = (h * 33 + s.charCodeAt(i)) >>> 0; return h.toString(36); };
 function settleIds(items, prefix) {
   const used = new Set();
   for (const it of items) {
     const stable = String(pick(it.fm || {}, ['deepnotes-id']) || '');
     if (ID_OK.test(stable) && !used.has(stable)) { it.id = stable; used.add(stable); }
   }
-  let i = 0;
   for (const it of items) {
     if (it.id) continue;
-    let cand;
-    do { cand = prefix + (++i); } while (used.has(cand));
+    const key = String(it.rel || it.file || it.title || '');
+    let cand = prefix + hash32(key);
+    for (let j = 1; used.has(cand); j++) cand = prefix + hash32(key + '-' + j);
     it.id = cand;
     used.add(cand);
   }
@@ -175,18 +177,25 @@ const worksRaw = bucket.works.map(x => {
     ctr: num(pick(x.fm, ['ctr', '点击率', '封面点击率'])),
     duration: num(pick(x.fm, ['duration', '平均观看', '平均观看时长', '时长']))
   };
-  return {fm: x.fm, post: p, content: {title: x.title, body: clean(x.body), tags: tagsOf(x.fm, x.body), media}};
+  return {fm: x.fm, rel: x.rel, post: p, content: {title: x.title, body: clean(x.body), tags: tagsOf(x.fm, x.body), media}};
 }).sort((a, b) => b.post.date.localeCompare(a.post.date));
 settleIds(worksRaw, 'w');
+for (const w of worksRaw) delete w.rel;
 const works = worksRaw.slice(0, maxWorks)
   .map(w => ({...w, post: {id: w.id, ...w.post}}));
 
 const notes = bucket.methods.slice(0, maxNotes).map(x => {
   const parts = x.rel.split(sep);
-  const sub = parts[x.root] && x.root < parts.length - 1 ? parts[x.root] : (parts[x.root - 1] || '笔记');
-  return {fm: x.fm, title: x.title, path: `05-方法库 methods/${sub}/${parts[parts.length - 1]}`, body: clean(x.body), tags: tagsOf(x.fm, x.body)};
+  // 子目录全链保留；文件直接在分类根目录下时根名不能再拼一遍（会得到 05-方法库 methods/05-方法库 methods/…），
+  // 归入「笔记」兜底；不匹配方法库规则的目录名（分类兜底命中）仍原样保留
+  const METHODS_RE = RULES.find(([k]) => k === 'methods')[1];
+  const rootName = parts[x.root - 1] || '';
+  const sub = parts[x.root] && x.root < parts.length - 1 ? parts[x.root]
+    : (rootName && !METHODS_RE.test(rootName) ? rootName : '笔记');
+  return {fm: x.fm, rel: x.rel, title: x.title, path: `05-方法库 methods/${sub}/${parts[parts.length - 1]}`, body: clean(x.body), tags: tagsOf(x.fm, x.body)};
 });
 settleIds(notes, 'n');
+for (const n of notes) delete n.rel;
 
 const ideas = bucket.ideas.map((x, i) => {
   const status = String(pick(x.fm, ['status', '状态']) || '待写');
@@ -197,13 +206,14 @@ const ideas = bucket.ideas.map((x, i) => {
 const drafts = bucket.drafts.map(x => {
   const src = String(pick(x.fm, ['source', '来源选题', '选题']) || '');
   const idea = ideas.find(d => d.title === src);
-  return {fm: x.fm, title: x.title, body: clean(x.body), source: idea ? idea.id : null};
+  return {fm: x.fm, rel: x.rel, title: x.title, body: clean(x.body), source: idea ? idea.id : null};
 });
 settleIds(drafts, 'draft-');
+for (const d of drafts) delete d.rel;
 
 // 阅读区：别人写好的内容（作者 / 来源 / 分类可选，写在 frontmatter 里；folder 是应用内左侧分类）。
 const readings = bucket.readings.map(x => ({
-  fm: x.fm, title: x.title,
+  fm: x.fm, rel: x.rel, title: x.title,
   author: String(pick(x.fm, ['author', '作者', 'by']) || ''),
   source: String(pick(x.fm, ['source', '来源', '出处', 'url', '链接']) || ''),
   folder: String(pick(x.fm, ['folder', '分类', '目录', 'group']) || '').trim(),
@@ -211,15 +221,17 @@ const readings = bucket.readings.map(x => ({
   body: clean(x.body)
 }));
 settleIds(readings, 'reading-');
+for (const r of readings) delete r.rel;
 readings.sort((a, b) => b.date.localeCompare(a.date));
 
 // 档案区：创作者自己的个人档案（简介、回顾、清单等），同样参与双链与图谱。
 const archives = bucket.archives.map(x => ({
-  fm: x.fm, title: x.title,
+  fm: x.fm, rel: x.rel, title: x.title,
   date: dateOf(pick(x.fm, ['date', '收档日期', '创建日期', 'published']), x.file).slice(0, 10),
   body: clean(x.body)
 }));
 settleIds(archives, 'archive-');
+for (const a of archives) delete a.rel;
 archives.sort((a, b) => b.date.localeCompare(a.date));
 
 // 概念词：内容里出现的全部话题标签（不设数量上限），出现越多在概念网络里越靠前。
