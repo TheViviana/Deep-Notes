@@ -80,6 +80,7 @@ export function pathOf(kind, item) {
 // 同名标题会映射到同一个 .md 文件、互相覆盖：对撞车的那组文件名追加 id 短码消歧
 // （每组第一条保持原名）。notes 用自身 path 由调用方保证唯一，不参与。
 const shortId = id => String(id || '').replace(/[^a-zA-Z0-9]/g, '').slice(-6) || 'x';
+export {shortId};
 export function resolveRels(kind, items) {
   if (kind === 'notes') return new Map(items.filter(x => x?.id).map(x => [x.id, pathOf(kind, x)]));
   const seen = new Set();
@@ -115,7 +116,8 @@ export function serialize(kind, item) {
       ['曝光', item.impressions ?? null], ['封面点击率', item.ctr ?? null], ['平均观看时长', item.duration ?? null],
     ]);
   } else if (kind === 'readings') {
-    fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['author', item.author || null], ['source', item.source || null], ['date', item.date || null], ['updated', item.updatedAt || null]]);
+    // folder 一并落盘：阅读区分类随 .md 文件走，重新导入 / 自动同步都不会再丢分类
+    fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['author', item.author || null], ['source', item.source || null], ['folder', item.folder || null], ['date', item.date || null], ['updated', item.updatedAt || null]]);
   } else if (kind === 'archives') {
     fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['date', item.date || null], ['updated', item.updatedAt || null]]);
   } else if (kind === 'drafts') {
@@ -125,11 +127,13 @@ export function serialize(kind, item) {
 }
 
 // —— 防抖写盘队列：多次编辑合并，800ms 静默后统一 flush ——
-const queue = new Map(); // rel -> {root, rel, body} | {root, rel, trash: true}
+// 以「类型 + rel」为键：同一文件先 trash 后 write（如甲删除、乙顶上原名）两个操作都要执行——
+// 若只按 rel 去重，write 会盖掉 trash，被删内容的旧文件不会进 .trash 就被覆盖（破坏可找回性）
+const queue = new Map(); // 't:rel' -> {root, rel, trash: true} | 'w:rel' -> {root, rel, body}
 let timer = null;
 
 function enqueue(op) {
-  queue.set(op.rel, op);
+  queue.set((op.trash ? 't:' : 'w:') + op.rel, op);
   clearTimeout(timer);
   timer = setTimeout(flush, 800);
 }
@@ -142,6 +146,7 @@ export async function flush() {
   const ops = [...queue.values()];
   queue.clear();
   const failed = [];
+  let requeued = false;
   for (const op of ops) {
     try {
       // 用 op 捕获时的根目录：即使中途切库，旧编辑也只写进旧库
@@ -149,20 +154,27 @@ export async function flush() {
       if (!root) continue;
       if (op.trash) await v.trash(root, op.rel);
       else await v.write(root, op.rel, op.body);
-    } catch (err) { failed.push(op.rel); }
+    } catch (err) {
+      // 非破坏性增量：瞬时故障（磁盘休眠 / 占用等）不丢操作，稍后自动重试一次；
+      // 重试仍失败才报给用户，内容始终还留在浏览器里
+      if (!op._retry) { queue.set((op.trash ? 't:' : 'w:') + op.rel, {...op, _retry: true}); requeued = true; }
+      else failed.push(op.rel);
+    }
   }
+  if (requeued) { clearTimeout(timer); timer = setTimeout(flush, 2500); }
   if (failed.length && errorHandler) errorHandler(failed);
 }
 
 // 同步一条内容到磁盘。item 为 null 表示删除；old 为变更前的旧记录（路径变了会先移走旧文件）。
 // old 与 item 同引用（其他 kind 变化引发的全量 diff）时无需重写。
-// relMap 来自 resolveRels：同名标题的内容在此取得消歧后的真实路径，删除/重命名场景必须用它算旧路径。
-export function queueSync(kind, item, old, relMap) {
+// relMap 按「新数组」算出的消歧路径；oldRelMap 按「旧数组」算——旧路径必须用旧的消歧结果：
+// 若按新数组算，同名消歧短码会挪给别的条目，删除/重命名时错删同名文件、留下真孤儿。
+export function queueSync(kind, item, old, relMap, oldRelMap) {
   const root = getRoot();
   if (!root || !api() || kind === 'ideas') return;
-  const relOf = x => (relMap && x && relMap.get(x.id)) || pathOf(kind, x);
-  const newRel = item ? relOf(item) : null;
-  const oldRel = old ? relOf(old) : null;
+  const relOf = (x, map) => (map && x && map.get(x.id)) || pathOf(kind, x);
+  const newRel = item ? relOf(item, relMap) : null;
+  const oldRel = old ? relOf(old, oldRelMap || relMap) : null;
   if (old === item && oldRel === newRel) return;
   if (!item) {
     if (oldRel) enqueue({root, rel: oldRel, trash: true});

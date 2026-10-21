@@ -82,6 +82,20 @@ export function pickVaultFolder() {
   });
 }
 
+// —— 选定文件导入：不选整个文件夹，只挑一个或多个 .md 文件（解析规则与整库导入一致） ——
+export function pickMdFiles() {
+  return new Promise(resolve => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.accept = '.md,.markdown,text/markdown';
+    let done = false;
+    input.onchange = () => { done = true; resolve(input.files && input.files.length ? [...input.files] : null); };
+    window.addEventListener('focus', () => setTimeout(() => { if (!done) resolve(null); }, 400), {once: true});
+    input.click();
+  });
+}
+
 // —— 主入口：File 列表 → 看板数据（works / ideas / drafts / snapshot / concepts） ——
 // target：'auto' 按文件夹名自动分类；也可指定 'works' | 'methods' | 'ideas' | 'drafts' | 'readings' | 'archives'，把全部文件归入所选模块
 export async function parseVault(fileList, target = 'auto') {
@@ -139,11 +153,13 @@ export async function parseVault(fileList, target = 'auto') {
     return {id: 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null};
   });
 
-  // 阅读区：别人写好的内容（作者 / 来源可选，写在 frontmatter 里）。
+  // 阅读区：别人写好的内容（作者 / 来源 / 分类可选，写在 frontmatter 里）。
+  // folder 是应用内的左侧分类：落盘在每篇 .md 的 frontmatter 里，导入 / 自动同步都不会丢。
   const readings = bucket.readings.map((x, i) => ({
     id: 'reading-' + (i + 1), title: x.title,
     author: String(pick(x.fm, ['author', '作者', 'by']) || ''),
     source: String(pick(x.fm, ['source', '来源', '出处', 'url', '链接']) || ''),
+    folder: String(pick(x.fm, ['folder', '分类', '目录', 'group']) || '').trim(),
     date: dateOf(pick(x.fm, ['date', '收藏日期', '发布日期', 'published']), x.file.lastModified).slice(0, 10),
     body: clean(x.body)
   })).sort((a, b) => b.date.localeCompare(a.date));

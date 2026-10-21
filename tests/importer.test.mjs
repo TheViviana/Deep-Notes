@@ -1,8 +1,9 @@
 // 软件内知识库导入测试（src/neural/importer.js）：目录分类、frontmatter 中英文字段、
-// 数值简写（1.2万）、媒体类型、选题来源解析、概念词推导。File 对象用桩代替。
+// 数值简写（1.2万）、媒体类型、选题来源解析、概念词推导、阅读区分类往返。File 对象用桩代替。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseVault} from '../src/neural/importer.js';
+import {serialize} from '../src/neural/fileStore.js';
 
 const f = (path, text, lastModified = 0) => ({
   name: path.split('/').pop(),
@@ -94,4 +95,20 @@ test('快照：来源说明为本地导入，日期区间来自作品', async ()
   assert.equal(r.snapshot.source, '导入自本地笔记');
   assert.equal(r.snapshot.publishedFrom, '2026-01-01');
   assert.equal(r.snapshot.publishedTo, '2026-01-02');
+});
+
+test('阅读区分类往返：folder 落盘进 frontmatter，再导入不丢分类', async () => {
+  const md = serialize('readings', {
+    id: 'reading-1', title: '阅读一', author: '某作者', source: '某博客',
+    folder: '技术长文', date: '2026-02-10', body: '阅读正文',
+  });
+  assert.ok(md.includes('folder: 技术长文'));
+  const r = await parseVault([f('vault/06-阅读区 readings/阅读一.md', md)]);
+  const rd = r.readings[0];
+  assert.equal(rd.folder, '技术长文'); // 再导入 / 自动同步后分类还在
+  assert.equal(rd.title, '阅读一');
+  assert.equal(rd.body, '阅读正文');
+  // 没有分类的阅读不受影响：folder 为空字符串，落盘时不写 folder 行
+  const plain = serialize('readings', {id: 'reading-2', title: '无分类', folder: '', date: '2026-02-11', body: 'x'});
+  assert.ok(!plain.includes('folder:'));
 });

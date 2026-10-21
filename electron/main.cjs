@@ -13,6 +13,41 @@ function inside(root, target) {
 
 const SKIP = new Set(['.obsidian', '.trash', '.git', '.DS_Store', 'node_modules']);
 
+// —— 原子写入：先写同目录隐藏临时文件，再 rename 到位 ——
+// 写一半崩溃 / 断电时要么是完整旧文件、要么是完整新文件，不会留下截断的半截 .md。
+// 临时文件以 . 开头：readMd 与 vault:asset 都会跳过，永远不会被当成笔记读出来。
+async function atomicWrite(full, body) {
+  const tmp = path.join(path.dirname(full), '.' + path.basename(full) + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8));
+  await fsp.writeFile(tmp, body, 'utf8');
+  try { await fsp.rename(tmp, full); }
+  catch (err) { await fsp.unlink(tmp).catch(() => {}); throw err; }
+}
+
+// —— 拒绝不完整覆盖：空内容不允许覆盖已有文件 ——
+// 序列化结果永远带 frontmatter，正常流程不可能写出空文件；空 body 只能来自上游 bug 或损坏，
+// 此时宁可拒写保住盘上原文，也不能用一个空文件把内容毁掉。
+function rejectIncomplete(full, body) {
+  if (String(body).trim()) return null;
+  try { if (fs.existsSync(full) && fs.statSync(full).size > 0) return '拒绝用空内容覆盖已有文件'; } catch {}
+  return '拒绝写入空文件';
+}
+
+// 自底向上清理空目录：只沿受影响的目录链（被删/被写文件所在目录 → 根目录）走，
+// 链上某一层还占有内容就停。根目录永不删；. 开头的目录（.trash / .obsidian 等）算占用不删。
+async function pruneUp(root, dir) {
+  let cur = path.resolve(dir);
+  const r = path.resolve(root) + path.sep;
+  while (cur.startsWith(r)) {
+    let entries;
+    try { entries = await fsp.readdir(cur, { withFileTypes: true }); } catch { break; }
+    // 隐藏文件（如 .DS_Store）不算占用：目录里只剩它们也视为空（rmdir 会自然失败兜底）
+    const occupied = entries.some(e => e.isDirectory() || !e.name.startsWith('.'));
+    if (occupied) break;
+    try { await fsp.rmdir(cur); } catch { break; }
+    cur = path.dirname(cur);
+  }
+}
+
 async function readMd(root) {
   const out = [];
   async function walk(dir) {
@@ -47,8 +82,11 @@ ipcMain.handle('vault:write', async (_e, { root, rel, body }) => {
   try {
     const full = path.join(root, rel);
     if (!inside(root, full)) return { ok: false, error: '路径越界' };
+    const blocked = rejectIncomplete(full, body);
+    if (blocked) return { ok: false, error: blocked };
     await fsp.mkdir(path.dirname(full), { recursive: true });
-    await fsp.writeFile(full, body, 'utf8');
+    await atomicWrite(full, body);
+    await pruneUp(root, path.dirname(full)).catch(() => {}); // 顺手清掉因改名/移动而空掉的目录
     return { ok: true };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
@@ -60,8 +98,10 @@ ipcMain.handle('vault:export', async (_e, { root, files }) => {
     for (const f of files) {
       const full = path.join(root, f.rel);
       if (!inside(root, full)) return { ok: false, error: '路径越界' };
+      const blocked = rejectIncomplete(full, f.body);
+      if (blocked) return { ok: false, error: `${f.rel}: ${blocked}` };
       await fsp.mkdir(path.dirname(full), { recursive: true });
-      await fsp.writeFile(full, f.body, 'utf8');
+      await atomicWrite(full, f.body);
     }
     return { ok: true };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
@@ -79,6 +119,7 @@ ipcMain.handle('vault:trash', async (_e, { root, rel }) => {
       if (err?.code === 'ENOENT') return; // 文件本就不存在，视为已删除
       throw err;
     });
+    await pruneUp(root, path.dirname(full)).catch(() => {}); // 文件移走后目录空了就删掉，不在库里留空文件夹
     return { ok: true };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });

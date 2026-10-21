@@ -175,11 +175,12 @@ const drafts = bucket.drafts.map((x, i) => {
   return {id: 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null};
 });
 
-// 阅读区：别人写好的内容（作者 / 来源可选，写在 frontmatter 里）。
+// 阅读区：别人写好的内容（作者 / 来源 / 分类可选，写在 frontmatter 里；folder 是应用内左侧分类）。
 const readings = bucket.readings.map((x, i) => ({
   id: 'reading-' + (i + 1), title: x.title,
   author: String(pick(x.fm, ['author', '作者', 'by']) || ''),
   source: String(pick(x.fm, ['source', '来源', '出处', 'url', '链接']) || ''),
+  folder: String(pick(x.fm, ['folder', '分类', '目录', 'group']) || '').trim(),
   date: dateOf(pick(x.fm, ['date', '收藏日期', '发布日期', 'published']), x.file).slice(0, 10),
   body: clean(x.body)
 })).sort((a, b) => b.date.localeCompare(a.date));

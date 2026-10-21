@@ -2,8 +2,8 @@ import React, {useCallback, useDeferredValue, useEffect, useMemo, useRef, useSta
 import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, seedReadings, seedArchives, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
 import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags} from './worksStore';
-import {pickVaultFolder, parseVault} from './importer';
-import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles} from './fileStore';
+import {pickVaultFolder, pickMdFiles, parseVault} from './importer';
+import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId} from './fileStore';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
@@ -325,9 +325,12 @@ function App() {
       const pmap = new Map(pv.map(x => [x.id, x]));
       const cmap = new Map(cv.map(x => [x.id, x]));
       const removed = pv.filter(x => !cmap.has(x.id));
-      const relMap = resolveRels(kind, [...cv, ...removed]); // 同名标题消歧，旧条目也参与算旧路径
-      for (const x of cv) queueSync(kind, x, pmap.get(x.id) || null, relMap);
-      for (const x of removed) queueSync(kind, null, x, relMap);
+      // 新路径按新数组、旧路径按旧数组分别消歧：同名标题的消歧短码跟内容绑定，
+      // 混用会算错旧文件位置——删除/重命名时错删同名文件、留下真孤儿
+      const relMap = resolveRels(kind, cv);
+      const oldRelMap = resolveRels(kind, pv);
+      for (const x of cv) queueSync(kind, x, pmap.get(x.id) || null, relMap, oldRelMap);
+      for (const x of removed) queueSync(kind, null, x, relMap, oldRelMap);
     }
   }, [works, notes, drafts, readings, archives]);
   // 写盘失败提示（权限不足 / 磁盘满等）；队列由 flush 触发，这里只负责把错误带给用户
@@ -436,6 +439,9 @@ function App() {
     const rest = notes.filter(x => x.id !== id);
     setNotes(rest);
     setMethSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
+    // 空分类自动清理：最后一条笔记离开，分类列表里的空分类一并移除
+    const folder = subOf(n);
+    if (folder && !rest.some(x => subOf(x) === folder) && folders.includes(folder)) setFolders(fs => fs.filter(f => f !== folder));
     setToast('方法笔记已删除 · Note deleted');
   }
   // —— 方法库二级分类：拖拽/下拉只改 path 第二段，id 不变，选中态与编辑器原地保持（无刷新） ——
@@ -452,7 +458,10 @@ function App() {
     if (!folder) return;
     const n = notes.find(x => x.id === id);
     if (!n || subOf(n) === folder) return; // 同分类重复投放：原地不动
+    const src = subOf(n);
     setNotes(ns => ns.map(x => x.id === id ? {...x, path: notePathIn(x, folder)} : x));
+    // 原分类因此空了就自动移除，不留空分类
+    if (!notes.some(x => x.id !== id && subOf(x) === src) && folders.includes(src)) setFolders(fs => fs.filter(f => f !== src));
     setToast(`已移入「${folder}」 · Moved to ${folder}`);
   }
   function createFolder(name) {
@@ -505,6 +514,9 @@ function App() {
     setReadings(rest);
     setReadSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
     setReadOpen(o => o === id ? null : o);
+    // 空分类自动清理：最后一条阅读离开，分类列表里的空分类一并移除
+    const folder = readFolderOf(r);
+    if (folder && !rest.some(x => readFolderOf(x) === folder) && readFolders.includes(folder)) setReadFolders(fs => fs.filter(f => f !== folder));
     setToast('阅读条目已删除 · Reading deleted');
   }
   // —— 阅读区左侧分类：拖拽/下拉只改 folder 字段，id 不变，选中态原地保持（无刷新） ——
@@ -514,7 +526,10 @@ function App() {
     if (!folder) return;
     const r = readings.find(x => x.id === id);
     if (!r || readFolderOf(r) === folder) return; // 同分类重复投放：原地不动
+    const src = readFolderOf(r);
     setReadings(rs => rs.map(x => x.id === id ? {...x, folder} : x));
+    // 原分类因此空了就自动移除，不留空分类
+    if (!readings.some(x => x.id !== id && readFolderOf(x) === src) && readFolders.includes(src)) setReadFolders(fs => fs.filter(f => f !== src));
     setToast(`已移入「${folder}」 · Moved to ${folder}`);
   }
   function createReadingFolder(name) {
@@ -575,7 +590,11 @@ function App() {
     } else if (fromKind === 'note') {
       const n = notes.find(x => x.id === id); if (!n) return;
       moved = {title: n.title, body: n.body || ''};
-      setNotes(ns => ns.filter(x => x.id !== id));
+      const src = subOf(n);
+      const rest = notes.filter(x => x.id !== id);
+      setNotes(rest);
+      // 移走后原分类空了就自动移除，不留空分类
+      if (!rest.some(x => subOf(x) === src) && folders.includes(src)) setFolders(fs => fs.filter(f => f !== src));
     } else if (fromKind === 'draft') {
       const d = drafts.find(x => x.id === id); if (!d) return;
       moved = {title: d.title, body: d.body || ''};
@@ -583,7 +602,11 @@ function App() {
     } else if (fromKind === 'reading') {
       const r = readings.find(x => x.id === id); if (!r) return;
       moved = {title: r.title, body: r.body || ''};
-      setReadings(rs => { const rest = rs.filter(x => x.id !== id); setReadOpen(o => o === id ? null : o); return rest; });
+      const src = readFolderOf(r);
+      const rest = readings.filter(x => x.id !== id);
+      setReadings(rest);
+      if (!rest.some(x => readFolderOf(x) === src) && readFolders.includes(src)) setReadFolders(fs => fs.filter(f => f !== src));
+      setReadOpen(o => o === id ? null : o);
     } else if (fromKind === 'archive') {
       const a = archives.find(x => x.id === id); if (!a) return;
       moved = {title: a.title, body: a.body || ''};
@@ -750,15 +773,41 @@ function App() {
   }); // 每次渲染同步最新数据引用，AI 工具永远读到当前状态
 
   // —— 知识库导入：软件内选文件夹解析 Markdown，替换当前数据（同样只存本浏览器） ——
-  function adoptData(data, msg) {
+  // 非破坏性增量：任何整体替换（导入 / 自动同步 / 切示例 / 恢复快照）之前，先把当前内容
+  // 完整存一份快照到 localStorage，⌘K「恢复数据快照」可随时回退；快照超限则跳过（尽力而为）。
+  const BACKUP_KEY = CONFIG.storagePrefix + '-data-backup-v1';
+  const FILES_KEY = CONFIG.storagePrefix + '-vault-files-v1'; // 上次同步/导入时的知识库文件数，用于拒绝不完整覆盖
+  const saveSnapshot = () => {
+    try {
+      // snap：当前知识库信息（账号 / 导入日期 / 来源）一并入快照，恢复后「关于」显示才不串库
+      localStorage.setItem(BACKUP_KEY, JSON.stringify({at: nowStamp(), snap, works, notes, ideas, drafts, readings, archives, concepts: kbConcepts}));
+    } catch {} // 快照太大超出 localStorage 配额时静默放弃，不影响主流程
+  };
+  function adoptData(data, msg, keepFolders = false) {
+    saveSnapshot();
     setWorks(data.works); setNotes(data.notes ?? SEED_NOTES); setIdeas(data.ideas); setDrafts(data.drafts);
     setReadings(data.readings ?? seedReadings);
     setArchives(data.archives ?? seedArchives);
-    setSnap(data.snapshot); setKbConcepts(data.concepts); setFolders([]); setReadFolders([]);
+    setSnap(data.snapshot); setKbConcepts(data.concepts);
+    // keepFolders：自动同步 / 恢复快照不是「换库」，应用内手动建的空分类原样保留；
+    // 全量导入 / 切回示例才是彻底替换，手动空分类随内容一起清掉
+    if (!keepFolders) { setFolders([]); setReadFolders([]); }
     setLibSel(data.works[0]?.id ?? null); setActive(data.drafts[0]?.id);
     setReadSel(null); setReadOpen(null); setArcSel(null); setArcOpen(null);
     setFocus({mod: null, sel: null}); setOpenArticle(null); setPage('home');
     setModal(null); setToast(msg);
+  }
+  function restoreSnapshot() {
+    setPalette(false); setModal(null);
+    let bak; // bak：备份内容；用 bak 而非 snap 命名，避免遮蔽外层的知识库信息 state
+    try { bak = JSON.parse(localStorage.getItem(BACKUP_KEY)); } catch {}
+    if (!bak || !Array.isArray(bak.works)) { setToast('没有可恢复的数据快照 · No snapshot'); return; }
+    if (!window.confirm(`恢复 ${bak.at} 的数据快照？当前内容会先另存一份新快照（可再恢复回来），桌面版会写回知识库文件夹。`)) return;
+    adoptData({
+      works: bak.works, notes: bak.notes ?? SEED_NOTES, ideas: bak.ideas ?? [], drafts: bak.drafts ?? [],
+      readings: bak.readings ?? [], archives: bak.archives ?? [],
+      snapshot: bak.snap ?? snapshot, concepts: Array.isArray(bak.concepts) ? bak.concepts : CONCEPTS,
+    }, `已恢复 ${bak.at} 的数据快照 · Snapshot restored`, true);
   }
   async function importVault(target = 'auto') {
     setModal(null);
@@ -794,6 +843,70 @@ function App() {
       else { await setRoot(null); setToast('无法创建知识库副本，本次导入只保存在浏览器 · Copy failed'); }
     }
     adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${copyDir ? ` · 已写入「${copyDir.replace(/\/+$/, '').split('/').pop()}」` : ''}`);
+    try { localStorage.setItem(FILES_KEY, String(data.counts.all)); } catch {} // 文件数基线：自动同步的「拒绝不完整覆盖」以此为参照
+  }
+
+  // —— 导入选定内容：挑一个或多个 .md 文件，合并进指定模块（同标题更新，其余追加），其他模块不动 ——
+  // 与整库导入不同：不换知识库、不清空现有内容，操作前照样先存快照，可从 ⌘K 恢复
+  const MERGE_ZH = {works: '作品库', methods: '方法库', ideas: '选题池', drafts: '创作台', readings: '阅读区', archives: '档案区'};
+  async function importFiles(target) {
+    setModal(null);
+    const files = await pickMdFiles();
+    if (!files) return;
+    let data;
+    try { data = await parseVault(files, target); } catch { setToast('解析失败，请确认选的是 Markdown 文件 · Parse failed'); return; }
+    const fresh = {works: data.works, methods: data.notes, ideas: data.ideas, drafts: data.drafts, readings: data.readings, archives: data.archives}[target] || [];
+    if (!data.counts.all || !fresh.length) { setToast('所选文件里没有可识别的 Markdown 内容 · Nothing to import'); return; }
+    saveSnapshot(); // 写前快照，⌘K「恢复数据快照」可回退本次合并
+    const canon = s => String(s || '').trim().toLowerCase();
+    let replaced = 0;
+    // 同标题视为同一条：保留原 id（选中态 / 反向链接不断）。replaceFields 列出的字段才被文件
+    // 覆盖，且空值不覆盖（空 body / 空 author 不会抹掉现有内容）——应用内手工维护的
+    // 数据（作品指标、阅读分类、笔记路径）不在列表里，合并永远不会清掉它们。
+    const hasVal = v => v !== '' && v != null && !(Array.isArray(v) && !v.length);
+    const mergeByTitle = (list, items, reid, replaceFields) => {
+      const out = [...list];
+      const idx = new Map();
+      out.forEach((x, i) => { const k = canon(x.title); if (k && !idx.has(k)) idx.set(k, i); });
+      const adds = [];
+      for (const f of items) {
+        const i = idx.get(canon(f.title));
+        if (i == null) adds.push(f);
+        else {
+          replaced++;
+          out[i] = replaceFields
+            ? {...out[i], ...Object.fromEntries(replaceFields.filter(k => hasVal(f[k])).map(k => [k, f[k]])), id: out[i].id}
+            : {...out[i], ...f, id: out[i].id};
+        }
+      }
+      return reid ? [...out, ...adds.map((x, i) => reid(x, i))] : [...out, ...adds];
+    };
+    if (target === 'works') {
+      const base = works.reduce((m, w) => Math.max(m, Number(String(w.id).match(/^w(\d+)$/)?.[1]) || 0), 0);
+      setWorks(mergeByTitle(works, fresh, (x, i) => ({...x, id: 'w' + (base + fresh.length + i + 1)}), ['title', 'date', 'direction', 'media', 'tags', 'body']));
+    } else if (target === 'methods') {
+      // 新笔记的 path 不能和现有笔记撞车（同 path 会互相覆盖一个文件）；撞了就在文件名后追加 id 短码。
+      // 替换同名条目不动 path：文件原地更新，不会在知识库里搬家。
+      const usedPaths = new Set(notes.map(x => x.path));
+      const rePath = f => {
+        let p = f.path, guard = 0;
+        while (usedPaths.has(p) && guard++ < 8) p = p.replace(/\.md$/, `--${shortId(f.id)}.md`);
+        usedPaths.add(p);
+        return {...f, path: p};
+      };
+      const base = notes.reduce((m, n) => Math.max(m, Number(String(n.id).match(/^n(?:ote-)?(\d+)$/)?.[1]) || 0), 0);
+      setNotes(mergeByTitle(notes, fresh.map(rePath), (x, i) => ({...x, id: 'n' + (base + fresh.length + i + 1)}), ['title', 'body']));
+    } else if (target === 'ideas') {
+      const base = ideas.reduce((m, x) => Math.max(m, Number(x.id) || 0), 0);
+      setIdeas(mergeByTitle(ideas, fresh, (x, i) => ({...x, id: base + fresh.length + i + 1}), ['title', 'platform', 'priority', 'status', 'note']));
+    } else if (target === 'drafts') {
+      setDrafts(mergeByTitle(drafts, fresh, (x, i) => ({...x, id: 'draft-' + Date.now() + '-' + i}), ['title', 'body']));
+    } else if (target === 'readings') {
+      setReadings(mergeByTitle(readings, fresh, (x, i) => ({...x, id: 'reading-' + Date.now() + '-' + i}), ['title', 'date', 'author', 'source', 'folder', 'body']));
+    } else if (target === 'archives') {
+      setArchives(mergeByTitle(archives, fresh, (x, i) => ({...x, id: 'archive-' + Date.now() + '-' + i}), ['title', 'date', 'body']));
+    }
+    setToast(`已导入 ${fresh.length} 条到「${MERGE_ZH[target]}」${replaced ? `（更新 ${replaced} 条同名）` : ''} · Imported`);
   }
   async function resetToSample() {
     if (!window.confirm('切回虚构示例数据？当前浏览器里的文章、选题和草稿会被清空替换。')) return;
@@ -856,6 +969,8 @@ function App() {
   // 桌面版打开软件自动同步：已连接知识库文件夹时重新读取文件夹内容（文件夹是唯一事实来源，
   // 应用内的编辑本来就会写回文件夹）。选题池不落盘，按标题合并——已有优先，文件夹里新增的补进来。
   // 比对只看会写进文件的字段（忽略 updatedAt / capturedAt 等应用内字段），完全一致时静默返回。
+  // 非破坏性增量保护：读到的文件数比上次骤减（磁盘休眠 / 网盘未下载完 / 库被临时移走）时
+  // 拒绝同步——否则这批「缺失」会被当成删除写回，整库内容会被清掉。
   useEffect(() => {
     if (!capable() || !getRoot()) return;
     let dead = false;
@@ -866,6 +981,11 @@ function App() {
       let data;
       try { data = await parseVault(files, getTarget()); } catch { return; }
       if (dead || !data.counts.all) return;
+      const lastCount = Math.max(Number(localStorage.getItem(FILES_KEY) || 0), works.length + notes.length + drafts.length + readings.length + archives.length);
+      if (data.counts.all < lastCount * 0.7) {
+        setToast(`知识库文件数量骤减（${lastCount} → ${data.counts.all}），已跳过自动同步以防误删；若确属有意删除，请重新导入一次该知识库 · Sync skipped`);
+        return;
+      }
       const fp = (x, keys) => JSON.stringify(keys.map(k => x?.[k] ?? null));
       const eq = (a, b, keys) => a.length === b.length && a.every((x, i) => fp(x, keys) === fp(b[i], keys));
       const seen = new Set(ideas.map(i => String(i.title || '').trim()));
@@ -874,13 +994,14 @@ function App() {
         eq(works, data.works || [], ['id', 'title', 'date', 'direction', 'tags', 'body', 'media', 'views', 'likes', 'comments', 'saves', 'follows', 'shares', 'impressions', 'ctr', 'duration']) &&
         eq(notes, data.notes || [], ['id', 'title', 'path', 'body']) &&
         eq(drafts, data.drafts || [], ['id', 'title', 'body', 'source']) &&
-        eq(readings, data.readings || [], ['id', 'title', 'author', 'source', 'date', 'body']) &&
+        eq(readings, data.readings || [], ['id', 'title', 'author', 'source', 'folder', 'date', 'body']) &&
         eq(archives, data.archives || [], ['id', 'title', 'date', 'body']) &&
         JSON.stringify(kbConcepts) === JSON.stringify(data.concepts || []) &&
         !freshIdeas.length;
       if (same) return; // 文件夹没有变化就不打扰
       const next = {works: data.works, notes: data.notes ?? SEED_NOTES, ideas: [...ideas, ...freshIdeas], drafts: data.drafts, readings: data.readings ?? seedReadings, archives: data.archives ?? seedArchives, snapshot: data.snapshot, concepts: data.concepts};
-      adoptData(next, `已同步知识库变更：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}`);
+      adoptData(next, `已同步知识库变更：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}`, true);
+      try { localStorage.setItem(FILES_KEY, String(data.counts.all)); } catch {}
     })();
     return () => { dead = true; };
   }, []);
@@ -911,7 +1032,9 @@ function App() {
     ...navs.map(([id, zh, en]) => ({group: '跳转 Go', icon: MODULE_ICON[id], zh: `打开${zh}`, en: `Go to ${en}`, run: () => setPage(id)})),
     {group: '跳转 Go', icon: 'concept', zh: '打开概念网络', en: 'Go to Concepts', run: () => setPage('concepts')},
     {group: '数据 Data', icon: 'file', zh: '导入知识库文件夹', en: 'Import vault folder', run: () => setModal('import')},
+    {group: '数据 Data', icon: 'outlink', zh: '导入选定内容', en: 'Import selected files', run: () => setModal('import-files')},
     {group: '数据 Data', icon: 'save', zh: '导出全部 Markdown', en: 'Export all Markdown', run: exportVault},
+    {group: '数据 Data', icon: 'replay', zh: '恢复数据快照', en: 'Restore data snapshot', run: restoreSnapshot},
     {group: '数据 Data', icon: 'replay', zh: '切回示例数据', en: 'Reset to sample', run: resetToSample},
   ];
   const s = stats(graph);
@@ -979,11 +1102,12 @@ function App() {
       <div className="about">
         <div className="form-actions">
           <button className="pill primary" onClick={() => setModal('import')}><Icon name="file" size={14}/>导入知识库文件夹 <em>Import vault</em></button>
+          <button className="pill" onClick={() => setModal('import-files')}><Icon name="outlink" size={14}/>导入选定内容 <em>Import files</em></button>
           <button className="pill" disabled={!curItem} title={curItem ? `导出《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentMd}><Icon name="save" size={14}/>导出当前 · Markdown <em>MD</em></button>
           <button className="pill" disabled={!curItem} title={curItem ? `打印 / 另存 PDF《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentPdf}><Icon name="outlink" size={14}/>导出当前 · PDF <em>Print</em></button>
           <button className="pill ghost" onClick={resetToSample}>切回示例数据 <em>Reset</em></button>
         </div>
-        <p className="quiet">随时按 <kbd>⌘K</kbd>（Windows 为 <kbd>Ctrl K</kbd>）呼出命令面板：全文搜索、新建、跳转、导出全部 Markdown 都在那里。「导出当前」是正在看的那篇（文章全文 / 草稿 / 方法笔记 / 阅读 / 档案），PDF 经系统打印对话框「另存为 PDF」。<em>Press ⌘K anywhere; the export buttons act on the piece you are viewing.</em></p>
+        <p className="quiet">随时按 <kbd>⌘K</kbd>（Windows 为 <kbd>Ctrl K</kbd>）呼出命令面板：全文搜索、新建、跳转、导出全部 Markdown、恢复数据快照都在那里。「导入选定内容」挑几个 .md 文件合并进某个模块（同标题更新、其余追加，不动其他内容），整体替换请用「导入知识库文件夹」；「导出当前」是正在看的那篇（文章全文 / 草稿 / 方法笔记 / 阅读 / 档案），PDF 经系统打印对话框「另存为 PDF」。任何整体替换之前都会自动存一份快照，可从 ⌘K 恢复。<em>Press ⌘K anywhere; imports are snapshotted first and reversible.</em></p>
         <p>知识库 <em>Vault</em>：<strong>{snap.account}</strong> · 导入日期 <em>Imported</em>：{snap.capturedAt}</p>
         <p>数据来源 <em>Source</em>：{snap.source}{snap.publishedFrom ? `；内容时间跨度 ${snap.publishedFrom} — ${snap.publishedTo}` : ''}。</p>
         {capable() && getRoot() && <p>文件夹知识库 <em>Vault folder</em>：<code>{getRoot()}</code><br/>编辑会实时写回此文件夹里的 .md 文件，被删除的内容移入 <code>.trash</code>；网页版则只保存在浏览器里。</p>}
@@ -1016,6 +1140,21 @@ function App() {
           <button className="pill" onClick={() => importVault('archives')}><Icon name="archive" size={14}/>全部到档案区 <em>As archives</em></button>
         </div>
         <p className="quiet">「按文件夹自动分类」会根据文件夹名识别（作品 / 草稿 / 选题 / 方法），识别不了的一律放进方法库。<em>Unrecognized folders go to Methods.</em></p>
+      </div>
+    </Modal>}
+    {/* 导入选定内容：挑几个 .md 文件合并进指定模块，同标题更新、其余追加，不动其他模块 */}
+    {modal === 'import-files' && <Modal title="导入选定内容" en="Import files" onClose={close}>
+      <div className="about import-pick">
+        <p>挑选一个或多个 Markdown 文件，合并进所选模块：同标题的条目按文件内容更新（空字段不覆盖现有内容），其余追加，其他模块不受影响。<em>Pick one or more .md files to merge into a module. Same-title items are updated in place, others appended.</em></p>
+        <div className="form-actions import-targets">
+          <button className="pill primary" onClick={() => importFiles('works')}><Icon name="works" size={14}/>到作品库 <em>As works</em></button>
+          <button className="pill" onClick={() => importFiles('methods')}><Icon name="methods" size={14}/>到方法库 <em>As notes</em></button>
+          <button className="pill" onClick={() => importFiles('ideas')}><Icon name="idea" size={14}/>到选题池 <em>As ideas</em></button>
+          <button className="pill" onClick={() => importFiles('drafts')}><Icon name="draft" size={14}/>到创作台 <em>As drafts</em></button>
+          <button className="pill" onClick={() => importFiles('readings')}><Icon name="book" size={14}/>到阅读区 <em>As readings</em></button>
+          <button className="pill" onClick={() => importFiles('archives')}><Icon name="archive" size={14}/>到档案区 <em>As archives</em></button>
+        </div>
+        <p className="quiet">frontmatter 里的 author / source / date / folder / tags 照常识别；阅读区条目带上 folder 字段会自动归入对应分类。合并前会自动存数据快照，可从 ⌘K 恢复。<em>Frontmatter is honored; a snapshot is saved first.</em></p>
       </div>
     </Modal>}
     {modal === 'goal' && <Modal title="本月写作目标" en="Monthly goal" onClose={close}>
