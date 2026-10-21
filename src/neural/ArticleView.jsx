@@ -13,7 +13,7 @@ import {serialize, exportFiles, safeName} from './fileStore';
 
 marked.setOptions({gfm: true, breaks: true});
 
-const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 // 源码层已把 < 转成 &lt;；注入点还原后走完整 esc()，避免二次转义把实体显示成文字（esc(原文本) 幂等）
 const unescLt = s => String(s).replace(/&lt;/g, '<');
 
@@ -52,10 +52,25 @@ export function hiCode(code, lang = '', base = null) {
   return out.join('');
 }
 // 安全：markdown 链接 / 图片走协议白名单（http/https/mailto、相对路径与页内锚点），
-// 屏蔽 javascript: 等危险协议；内联 HTML 已在 renderMarkdown 源码层转义，不在此处理。
+// 屏蔽 javascript: 等危险协议；原生 HTML 由「源码层全量转义 + html renderer 白名单」双层防护。
+// 净防护网（审计 H1）：正常路径下源码层已把所有类标签的 < 转义，能走到 html renderer 的
+// 原生 HTML 只剩 proc() 注入的受信标签；白名单只放行这几种固定形状，任何漏网的原生 HTML
+// （含未闭合围栏误开代码段等边界场景）一律转义成纯文本显示，绝不再原样输出。
+const TRUSTED_HTML = new RegExp('^<(?:'
+  + '/(?:mark|u|sup|a|span)>'
+  + '|mark>|u>'
+  + '|span style="color:#[0-9a-fA-F]{3,8}">'
+  + '|a class="md-wikilink" data-target="[^"]*">'
+  + '|a href="#fn-\\d+">'
+  + '|sup class="md-fn" id="fnref-\\d+">'
+  + '|img class="md-embed" data-asset="[^"]*" alt="[^"]*"(?: style="width:\\d+px")?\\s*/?>'
+  + ')\\s*$');
 marked.use({renderer: {
-  code({text, lang}) { return `<pre><code class="hl">${hiCode(text, lang)}</code></pre>`; },
-  codespan({text}) { return `<code class="hl">${hiCode(text, '')}</code>`; },
+  // 代码段在源码层也做了 < 转义（与正文同等防护），渲染前先还原再交给 hiCode 转义上色，
+  // 否则 hiCode 的 esc() 会把 &lt; 二次转义成 &amp;lt; 显示成实体文字
+  code({text, lang}) { return `<pre><code class="hl">${hiCode(unescLt(text), lang)}</code></pre>`; },
+  codespan({text}) { return `<code class="hl">${hiCode(unescLt(text), '')}</code>`; },
+  html({text}) { const t = String(text ?? ''); return TRUSTED_HTML.test(t) ? t : esc(t); },
   link({href, title, tokens}) {
     const h = String(href || '').trim();
     const inner = this.parser.parseInline(tokens);
@@ -141,16 +156,25 @@ export function renderMarkdown(md) {
       })
       // 格式栏插入的受信标签（文字颜色 / 下划线）成对还原为真标签，阅读视图才能显示效果。
       // 只还原固定格式（色值限定 #rgb–#rrggbb 十六进制，配不成对的原样转义显示），
+      // 中间内容不允许再出现 &lt;（审计 M5：防止跨标签错配把别处的内容圈进受信标签），
       // 用户手写的其他 HTML（<script>、<img onerror> 等）不受影响，仍是纯文本。
-      .replace(/&lt;(span style="color:#[0-9a-fA-F]{3,8}")>([\s\S]*?)&lt;\/span>/g, '<$1>$2</span>')
-      .replace(/&lt;(u)>([\s\S]*?)&lt;\/u>/g, '<$1>$2</$1>');
+      .replace(/&lt;(span style="color:#[0-9a-fA-F]{3,8}")>((?:(?!&lt;)[\s\S])*?)&lt;\/span>/g, '<$1>$2</span>')
+      .replace(/&lt;(u)>((?:(?!&lt;)[\s\S])*?)&lt;\/u>/g, '<$1>$2</$1>');
   };
-  // 用捕获组 split：奇数段是 ```围栏``` 或 `行内代码`，保持原样；偶数段才做替换
-  let src = String(md || '').split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g).map((seg, i) => i % 2 ? seg : proc(seg)).join('');
-  if (fnOrder.length) src += '\n\n<section class="md-footnotes">'
+  // 用捕获组 split：奇数段是 ```围栏``` 或 `行内代码`，偶数段才做双链等替换。
+  // 审计 H1：代码段也必须转义类标签的 <——行文里出现的 ```（不在行首 / 未闭合）会把
+  // 后续正文误判成代码段，若整体跳过转义，marked 又不认这个围栏，原生 HTML 就漏出去了。
+  // 代码段只转义、不做其他替换（双链 / 公式 / 高亮与 Obsidian 一致在代码里不生效），
+  // code / codespan renderer 渲染前会先还原这个转义，代码显示不受影响。
+  let src = String(md || '').split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g)
+    .map((seg, i) => i % 2 ? seg.replace(/<(?=[a-zA-Z!/?])/g, '&lt;') : proc(seg)).join('');
+  let out = marked.parse(src);
+  // 脚注区在 marked.parse 之后追加：不再作为整块 HTML 走 marked（html renderer 的
+  // 白名单只认单个受信标签，整块区块会被误转义）。追加顺序在公式占位符替换之前，
+  // 脚注定义里如果摘出过公式，占位符照样能被还原。
+  if (fnOrder.length) out += '\n\n<section class="md-footnotes">'
     + fnOrder.map((k, i) => `<p class="md-fn-item" id="fn-${i + 1}"><sup>${i + 1}</sup> ${marked.parseInline(footnotes.get(k))} <a class="md-fn-back" href="#fnref-${i + 1}" aria-label="返回出处 Back">↩</a></p>`).join('\n')
     + '</section>';
-  let out = marked.parse(src);
   if (maths.length) out = out.replace(/\u0000M(\d+)E\u0000/g, (_, i) => { const m = maths[+i]; return m ? renderKatex(m.tex, m.display) : ''; });
   return out;
 }

@@ -32,6 +32,54 @@ function isSymlink(p) {
   try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; }
 }
 
+// —— 授权根目录白名单（审计 M1）：只有经系统对话框由用户亲自选过的目录才能作为知识库 root。
+// 渲染层万一被注入，也无法指派磁盘上任意目录让主进程读写，爆炸半径收敛到用户授权过的库。
+// 白名单持久化在 userData，重启后已连接的库无需重新授权；升级老用户的存量根目录在首次
+// 访问时弹一次系统确认框，允许后永久登记（每目录每会话最多弹一次，拒绝则保持未授权）。
+const AUTH_FILE = () => path.join(app.getPath('userData'), 'authorized-roots.json');
+let authorizedRoots = null; // 惰性加载：同时登记「解析路径 + 真实路径」两种写法
+function authSet() {
+  if (!authorizedRoots) {
+    let list = [];
+    try { list = JSON.parse(fs.readFileSync(AUTH_FILE(), 'utf8')); } catch {}
+    authorizedRoots = new Set(Array.isArray(list) ? list : []);
+  }
+  return authorizedRoots;
+}
+function authorizeRoot(dir) {
+  const r = path.resolve(String(dir || ''));
+  if (!r) return;
+  const set = authSet();
+  set.add(r);
+  try { set.add(fs.realpathSync(r)); } catch {} // 符号链接路径按真实路径补记，两种写法都能命中
+  try { fs.writeFileSync(AUTH_FILE(), JSON.stringify([...set], null, 2)); } catch {}
+}
+function rootAuthorized(root) {
+  const r = path.resolve(String(root || ''));
+  if (!r || !authSet().has(r)) return false;
+  try { return authSet().has(fs.realpathSync(r)); } catch { return true; } // 目录暂时读不到（磁盘休眠等）：按登记路径放行
+}
+const askedRoots = new Set(); // 确认框每目录每会话最多弹一次
+async function ensureAuthorized(root) {
+  if (rootAuthorized(root)) return true;
+  const key = path.resolve(String(root || ''));
+  if (!key || askedRoots.has(key)) return false;
+  askedRoots.add(key);
+  try {
+    const { response } = await dialog.showMessageBox({
+      type: 'question',
+      message: `允许 Deep Notes 访问该文件夹？\n${key}`,
+      detail: '只有你亲自选择过的文件夹才会被授权为知识库根目录，允许后将永久记住这个选择。'
+        + '\nOnly folders you personally picked can be used as the vault root.',
+      buttons: ['允许 Allow', '拒绝 Deny'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (response === 0) { authorizeRoot(key); return true; }
+  } catch {}
+  return false;
+}
+
 const SKIP = new Set(['.obsidian', '.trash', '.git', '.DS_Store', 'node_modules']);
 
 // —— 原子写入：先写同目录隐藏临时文件，再 rename 到位 ——
@@ -118,16 +166,21 @@ async function readMd(root) {
 
 ipcMain.handle('vault:choose-dir', async () => {
   const res = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
-  return res.canceled || !res.filePaths[0] ? null : res.filePaths[0];
+  const picked = res.canceled || !res.filePaths[0] ? null : res.filePaths[0];
+  if (picked) authorizeRoot(picked); // 用户亲自选过的目录登记进授权白名单（M1）
+  return picked;
 });
 
 ipcMain.handle('vault:read', async (_e, root) => {
-  try { return { ok: true, ...await readMd(root) }; }
-  catch (err) { return { ok: false, error: String(err?.message || err) }; }
+  try {
+    if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
+    return { ok: true, ...await readMd(root) };
+  } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
 ipcMain.handle('vault:write', async (_e, { root, rel, body }) => {
   try {
+    if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
     const full = path.join(root, rel);
     if (!inside(root, full)) return { ok: false, error: '路径越界' };
     if (isSymlink(full)) return { ok: false, error: '目标是符号链接，拒绝写入' };
@@ -146,6 +199,7 @@ ipcMain.handle('vault:write', async (_e, { root, rel, body }) => {
 // 且改名不再往 .trash 塞副本（回收站里只剩用户主动删除的内容）。
 ipcMain.handle('vault:move', async (_e, { root, from, to }) => {
   try {
+    if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
     const a = path.join(root || '', String(from || ''));
     const b = path.join(root || '', String(to || ''));
     if (!root || !from || !to || !inside(root, a) || !inside(root, b)) return { ok: false, error: '路径越界' };
@@ -169,6 +223,7 @@ ipcMain.handle('vault:move', async (_e, { root, from, to }) => {
 // 导出：把渲染层给出的 [{rel, body}] 批量写入所选目录（同样限制在该目录内）。
 ipcMain.handle('vault:export', async (_e, { root, files }) => {
   try {
+    if (!(await ensureAuthorized(root))) return { ok: false, error: '目标文件夹未授权 · Folder not authorized' };
     if (!Array.isArray(files)) return { ok: false, error: '参数错误' };
     for (const f of files) {
       const full = path.join(root, f.rel);
@@ -206,6 +261,7 @@ async function pruneTrash(root) {
 
 ipcMain.handle('vault:trash', async (_e, { root, rel }) => {
   try {
+    if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
     const full = path.join(root, rel);
     if (!inside(root, full)) return { ok: false, error: '路径越界' };
     const trashDir = path.join(root, '.trash');
@@ -229,6 +285,8 @@ ipcMain.on('vault:flush-sync', (e, ops) => {
   const failed = [];
   for (const op of (Array.isArray(ops) ? ops : [])) {
     const rel = String(op?.rel || op?.from || '');
+    // 同步通道不能弹确认框：只做白名单校验（退出前此刻的 root 一定来自授权过的库）
+    if (!rootAuthorized(op?.root)) { failed.push(rel); continue; }
     try {
       if (op?.move) {
         // 与 vault:move 相同的原子移动：退出前一刻的重命名也不走「先 trash 再写」
@@ -306,14 +364,20 @@ async function copyAssets(src, dest) {
 
 ipcMain.handle('vault:prepare-copy', async (_e, srcRoot) => {
   try {
+    // 来源目录必须是授权过的（M1）：副本会从 srcRoot 复制资源文件，未授权目录不能当来源
+    if (!(await ensureAuthorized(srcRoot))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
     const resolved = path.resolve(srcRoot);
-    if (/ - Deep Notes$/i.test(path.basename(resolved))) return { ok: true, dir: resolved, reused: true };
+    if (/ - Deep Notes$/i.test(path.basename(resolved))) {
+      authorizeRoot(resolved); // 直接作工作库使用：同样登记白名单
+      return { ok: true, dir: resolved, reused: true };
+    }
     const parent = path.dirname(resolved);
     const base = path.basename(resolved) + ' - Deep Notes';
     let dir = path.join(parent, base);
     for (let i = 2; fs.existsSync(dir); i++) dir = path.join(parent, `${base} ${i}`);
     await fsp.mkdir(dir, { recursive: true });
     await copyAssets(resolved, dir);
+    authorizeRoot(dir); // 新副本登记进授权白名单，后续写盘才放行
     return { ok: true, dir };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
@@ -325,6 +389,7 @@ const MIME = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', 
 ipcMain.handle('vault:asset', async (_e, { root, ref }) => {
   try {
     if (!root || !ref) return { ok: false, error: '参数错误' };
+    if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
     const clean = String(ref).replace(/^\.?\//, '');
     let full = path.resolve(root, clean);
     if (!fs.existsSync(full) || !fs.statSync(full).isFile()) {
@@ -365,8 +430,9 @@ function closeVaultWatcher() {
 ipcMain.on('vault:watch', (_e, root) => {
   closeVaultWatcher();
   // linux 的 fs.watch 不支持 recursive（监不到子目录），与其给出「看起来能用实则漏报」的监听，
-  // 不如明确不监听：linux 上仍可用顶栏手动导入 / 重启时自动同步兜底
-  if (!root || process.platform === 'linux') return;
+  // 不如明确不监听：linux 上仍可用顶栏手动导入 / 重启时自动同步兜底。
+  // 未授权的目录不监听（M1）：白名单校验走同步检查，不弹确认框（弹窗留给首个读请求）
+  if (!root || !rootAuthorized(root) || process.platform === 'linux') return;
   try {
     vaultWatcher = fs.watch(root, {recursive: true}, () => {
       clearTimeout(vaultWatchTimer);

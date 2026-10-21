@@ -45,22 +45,23 @@ const canSecure = () => !!(window.electronAPI?.keyEncrypt && window.electronAPI?
 let encSeq = 0; // 密钥连续编辑时防止乱序的旧密文覆盖新密文
 let secureWarn = false; // safeStorage 加密失败：密钥本轮只留在内存、没有落盘，配置面板据此提示
 function persistAi(state) {
-  // 桌面版：密钥经主进程 safeStorage 加密后落盘（enc: 前缀 + base64），localStorage 不存明文。
-  // 加密是异步的：先落一份去掉密钥的配置占位，密文写好后整体覆盖；失败则保持无密钥，明文绝不入库
+  // 桌面版：密钥经主进程 safeStorage 加密后一次性落盘（enc: 前缀 + base64），localStorage 不存明文。
+  // 审计 M3：不再「先落空 key 占位、密文回来再覆盖」——两步之间崩溃会把密钥抹掉。
+  // 现在密文没回来之前不写盘，落盘只有一次原子写入；加密失败才落一份去密钥的配置并提示，
+  // 明文绝不入库的底线不变
   if (state.apiKey && canSecure() && !state.apiKey.startsWith(ENC_PREFIX)) {
-    const bare = {...state, apiKey: ''};
-    try { localStorage.setItem(AI_KEY, JSON.stringify(bare)); } catch (err) { console.warn('localStorage 写入失败 · Save failed:', err); }
     const seq = ++encSeq;
+    const saveBare = () => { try { localStorage.setItem(AI_KEY, JSON.stringify({...state, apiKey: ''})); } catch (err) { console.warn('localStorage 写入失败 · Save failed:', err); } };
     window.electronAPI.keyEncrypt(state.apiKey).then(res => {
       if (!res?.ok || seq !== encSeq) {
-        // 加密失败（系统安全存储不可用等）：明文绝不落盘是底线；面板给出提示，
+        // 加密失败（系统安全存储不可用等）：密钥本轮只留在内存，面板给出提示，
         // 用户至少知道为什么重启后密钥没了
-        if (res && !res.ok && seq === encSeq && !secureWarn) { secureWarn = true; for (const f of aiSubs) f(aiState); }
+        if (res && !res.ok && seq === encSeq) { secureWarn = true; saveBare(); for (const f of aiSubs) f(aiState); }
         return;
       }
       secureWarn = false;
       try { localStorage.setItem(AI_KEY, JSON.stringify({...state, apiKey: ENC_PREFIX + res.data})); } catch {}
-    }).catch(() => { if (seq === encSeq && !secureWarn) { secureWarn = true; for (const f of aiSubs) f(aiState); } });
+    }).catch(() => { if (seq === encSeq) { secureWarn = true; saveBare(); for (const f of aiSubs) f(aiState); } });
     return;
   }
   try { localStorage.setItem(AI_KEY, JSON.stringify(state)); }

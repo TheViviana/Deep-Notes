@@ -3,7 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, seedReadings, seedArchives, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
 import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags} from './worksStore';
 import {pickVaultFolder, pickMdFiles, parseVault} from './importer';
-import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, hasPendingWrites, retryPending, clearPendingWrites} from './fileStore';
+import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, hasPendingWrites, retryPending, clearPendingWrites, pendingReady} from './fileStore';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
@@ -28,11 +28,38 @@ import './neural.css';
 // 防抖窗口内的待写数据登记进 pendingSaves，写失败不再静默（全局提示条 + console 留痕可排查）。
 const pendingSaves = new Map(); // key -> 防抖窗口内尚未落盘的值
 const STORAGE_ERR = '本地存储写入失败（空间可能已满），近期修改也许没有保存 · localStorage write failed';
-function flushPendingSaves() {
-  for (const [key, v] of pendingSaves) {
-    try { localStorage.setItem(key, JSON.stringify(v)); }
-    catch (err) { console.warn('localStorage 写入失败 · Save failed:', key, err); showGlobalNotice(STORAGE_ERR); }
+// —— localStorage 水位检测与写满降级（审计 H2）——
+// 配额各浏览器不同（一般 5–10MB），按多数下限保守估成 5MB 字符数。全量快照（-data-backup-v1）
+// 是唯一可牺牲的写入：空间紧张时先停快照、清快照腾位保正文——正文键是数据本体，永远优先。
+const BACKUP_KEY = CONFIG.storagePrefix + '-data-backup-v1';
+const STORAGE_LIMIT = 5 * 1024 * 1024;
+let storageStrapped = false; // 降级标记：true = 已触发写满降级，本轮会话暂停快照写入
+let snapshotSkipped = false; // 水位预检跳过快照只提示一次，不反复打扰
+function storageUsage() {
+  let n = 0;
+  try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); n += k.length + (localStorage.getItem(k) || '').length; } } catch {}
+  return n;
+}
+// 带降级的统一写入：写满先清全量快照腾位重试一次（快照可由下次成功保存重建，正文不可丢）；
+// 再失败说明连正文都放不下了，提示用户尽快导出备份。返回是否成功。
+function trySaveLocal(key, val) {
+  try { localStorage.setItem(key, val); return true; }
+  catch (err) {
+    console.warn('localStorage 写入失败 · Save failed:', key, err);
+    try { localStorage.removeItem(BACKUP_KEY); } catch {}
+    try {
+      localStorage.setItem(key, val);
+      if (!storageStrapped) { storageStrapped = true; showGlobalNotice('本地存储空间已满：数据快照已暂停以保证正文保存，建议 ⌘K「导出全部 Markdown」尽快备份 · Storage full'); }
+      return true;
+    } catch (err2) {
+      storageStrapped = true;
+      showGlobalNotice(STORAGE_ERR + '，建议 ⌘K「导出全部 Markdown」尽快备份 · Export backup advised');
+      return false;
+    }
   }
+}
+function flushPendingSaves() {
+  for (const [key, v] of pendingSaves) trySaveLocal(key, JSON.stringify(v));
   pendingSaves.clear();
 }
 function useSaved(key, fallback) {
@@ -41,8 +68,7 @@ function useSaved(key, fallback) {
     pendingSaves.set(key, v);
     const t = setTimeout(() => {
       pendingSaves.delete(key);
-      try { localStorage.setItem(key, JSON.stringify(v)); }
-      catch (err) { console.warn('localStorage 写入失败 · Save failed:', key, err); showGlobalNotice(STORAGE_ERR); }
+      trySaveLocal(key, JSON.stringify(v));
     }, 300);
     return () => clearTimeout(t);
   }, [key, v]);
@@ -143,6 +169,9 @@ function Modal({title, en, onClose, children, wide}) {
 function printArticle({title, meta, html}) {
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
   const iframe = document.createElement('iframe');
+  // 审计 M4：禁脚本沙箱——iframe 只承担排版打印，不执行任何 JS；同源访问保留给
+  // doc.write 与 resolveAllInDoc（引用图解析），allow-modals 放行 win.print() 调系统打印
+  iframe.setAttribute('sandbox', 'allow-same-origin allow-modals');
   iframe.setAttribute('aria-hidden', 'true');
   iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
   document.body.appendChild(iframe);
@@ -416,7 +445,7 @@ function App() {
         queueSync(kind, null, x, relMap, oldRelMap);
       }
     }
-  }, [works, notes, drafts, readings, archives]);
+  }, [works, notes, drafts, readings, archives, ideas]);
   // 写盘失败提示（权限不足 / 磁盘满等）；队列由 flush 触发，这里只负责把错误带给用户
   useEffect(() => {
     setErrorHandler(failed => setToast(`知识库写盘失败（${failed.length} 个文件），内容仍保存在浏览器 · Disk write failed`));
@@ -433,6 +462,12 @@ function App() {
   // —— 挂起写：上次会话有重试后仍失败的写盘操作 ——
   // 此刻自动同步会用旧文件夹内容覆盖浏览器里更新的数据，必须先由用户裁决（重试 / 放弃）
   const [pendingWrites, setPendingWrites] = useState(() => capable() && !!getRoot() && hasPendingWrites());
+  // 挂起记录随写盘结果实时增减（本轮写盘失败留底 / 成功补写或重试成功清除），横幅状态跟随
+  useEffect(() => {
+    const sync = () => setPendingWrites(capable() && !!getRoot() && hasPendingWrites());
+    window.addEventListener('deepnotes-pending-changed', sync);
+    return () => window.removeEventListener('deepnotes-pending-changed', sync);
+  }, []);
   async function retryPendingWrites() {
     const n = await retryPending();
     if (!hasPendingWrites()) {
@@ -840,17 +875,23 @@ function App() {
   };
   const aiUpdate = (gid, {title, body}) => {
     const [kind, id] = String(gid).split(':');
+    // 审计 M2：与 delete_file 一致，AI 改写也要二次确认——不能静默覆盖用户正文且无版本历史
+    const cur = aiRead(gid);
+    if (!cur) return {error: '找不到文件'};
+    if (title !== undefined || body !== undefined) {
+      const what = [title !== undefined ? '标题' : null, body !== undefined ? '正文' : null].filter(Boolean).join('和');
+      const bodyInfo = body !== undefined ? `，正文 ${String(cur.body || '').length} → ${String(body).length} 字` : '';
+      if (!window.confirm(`AI 请求修改「${cur.title || gid}」的${what}${bodyInfo}，确认？`)) return {ok: false, title: cur.title, cancelled: true};
+    }
     const patch = {};
     if (title !== undefined) patch.title = String(title);
     if (body !== undefined) patch.body = String(body);
-    if (kind === 'post') { if (!works.some(x => x.id === id)) return {error: '找不到文件'}; updateWork(id, patch); return {ok: true, title: patch.title}; }
+    if (kind === 'post') { updateWork(id, patch); return {ok: true, title: patch.title}; }
     if (kind === 'draft') {
-      if (!drafts.some(x => x.id === id)) return {error: '找不到文件'};
       setDrafts(ds => ds.map(x => x.id === id ? {...x, ...patch} : x));
       return {ok: true, title: patch.title};
     }
     if (kind === 'note') {
-      const n = notes.find(x => x.id === id); if (!n) return {error: '找不到文件'};
       const safeTitle = patch.title ? patch.title.trim().replace(/[/\\]/g, '·') : patch.title; // 文件名安全化
       setNotes(ns => ns.map(x => x.id === id ? {...x, ...patch, ...(safeTitle ? {path: x.path.replace(/[^/]+$/, safeTitle + '.md')} : {})} : x));
       return {ok: true, title: patch.title};
@@ -880,13 +921,24 @@ function App() {
   // —— 知识库导入：软件内选文件夹解析 Markdown，替换当前数据（同样只存本浏览器） ——
   // 非破坏性增量：任何整体替换（导入 / 自动同步 / 切示例 / 恢复快照）之前，先把当前内容
   // 完整存一份快照到 localStorage，⌘K「恢复数据快照」可随时回退；快照超限则跳过（尽力而为）。
-  const BACKUP_KEY = CONFIG.storagePrefix + '-data-backup-v1';
   const FILES_KEY = CONFIG.storagePrefix + '-vault-files-v1'; // 上次同步/导入时的知识库文件数，用于拒绝不完整覆盖
   const saveSnapshot = () => {
+    // 审计 H2：写满降级——空间紧张（storageStrapped）时暂停快照，正文键永远优先；
+    // 快照只是回滚手段，空间缓解（重启后自动重试）即恢复
+    if (storageStrapped) return;
     try {
+      // 水位预检：现有占用（扣除将被替换的旧快照）+ 新快照超过保守水位线（约 5MB 字符）
+      // 就放弃本次快照并提示一次——正文保存不受影响，⌘K「恢复数据快照」本轮缺位
+      const payload = JSON.stringify({at: nowStamp(), snap, works, notes, ideas, drafts, readings, archives, concepts: kbConcepts});
+      let old = ''; try { old = localStorage.getItem(BACKUP_KEY) || ''; } catch {}
+      if (storageUsage() - old.length + payload.length > STORAGE_LIMIT) {
+        if (!snapshotSkipped) { snapshotSkipped = true; showGlobalNotice('本地存储空间紧张，本次跳过数据快照（正文保存不受影响），建议 ⌘K「导出全部 Markdown」备份 · Snapshot skipped'); }
+        return;
+      }
       // snap：当前知识库信息（账号 / 导入日期 / 来源）一并入快照，恢复后「关于」显示才不串库
-      localStorage.setItem(BACKUP_KEY, JSON.stringify({at: nowStamp(), snap, works, notes, ideas, drafts, readings, archives, concepts: kbConcepts}));
+      localStorage.setItem(BACKUP_KEY, payload);
     } catch {
+      storageStrapped = true;
       // 快照太大超出 localStorage 配额时放弃主流程不受影响，但必须让用户知道「恢复快照」会缺位
       showGlobalNotice('数据快照保存失败（本地存储空间不足），⌘K「恢复数据快照」将不可用 · Snapshot save failed');
     }
@@ -1103,6 +1155,7 @@ function App() {
   const syncSeq = useRef(0);
   const syncFromVault = useCallback(async () => {
     if (!capable() || !getRoot()) return;
+    await pendingReady; // IndexedDB 兜底的挂起写先灌回内存，再判定是否跳过同步（防覆盖）
     if (hasPendingWrites()) { setToast('上次有未写盘的修改，已跳过自动同步以防覆盖 · Sync skipped'); return; }
     const seq = ++syncSeq.current;
     const root = getRoot();

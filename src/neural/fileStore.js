@@ -159,31 +159,77 @@ function enqueue(op) {
 // 下次启动的自动同步会「以文件夹为准」把浏览器状态覆盖掉，用户无感知地丢编辑。
 // 所以最终失败的操作要记进 localStorage：启动时检测到挂起记录就跳过自动同步并提示，
 // 重试成功后清除。记录只在本机，含原文 body（与业务数据同级）。
+// 审计 H3：localStorage 自身写满（与 H2 叠加：磁盘满 + 存储满双失败）时记录转存 IndexedDB
+// （配额大得多、与 localStorage 独立），留底不再丢；启动时异步读回合并，确认完再谈自动同步。
 const PENDING_KEY = CONFIG.storagePrefix + '-pending-writes-v1';
 let pendingRecorded = false; // 内存标记：避免每次成功 flush 都空写一次 localStorage
-function loadPending() {
+let pendingList = (() => { // 内存为唯一事实源：模块加载时从 localStorage 读一次
   try { const v = JSON.parse(localStorage.getItem(PENDING_KEY)); return Array.isArray(v) ? v : []; } catch { return []; }
+})();
+function loadPending() { return pendingList; }
+const IDB_NAME = 'deepnotes-pending', IDB_STORE = 'kv';
+function idbRun(mode, fn) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const ok = v => { if (!settled) { settled = true; resolve(v); } };
+    const fail = e => { if (!settled) { settled = true; reject(e || new Error('IndexedDB 不可用')); } };
+    try {
+      const open = indexedDB.open(IDB_NAME, 1);
+      open.onupgradeneeded = () => { try { open.result.createObjectStore(IDB_STORE); } catch {} };
+      open.onerror = () => fail(open.error);
+      open.onsuccess = () => {
+        const db = open.result;
+        try {
+          const tx = db.transaction(IDB_STORE, mode);
+          const req = fn(tx.objectStore(IDB_STORE));
+          tx.oncomplete = () => { db.close(); ok(req && 'result' in req ? req.result : undefined); };
+          tx.onerror = () => { db.close(); fail(tx.error); };
+          tx.onabort = () => { db.close(); fail(tx.error); };
+        } catch (e) { try { db.close(); } catch {} fail(e); }
+      };
+    } catch (e) { fail(e); }
+  });
 }
+const idbGet = () => idbRun('readonly', st => st.get('pending')).then(r => Array.isArray(r) ? r : []).catch(() => []);
+const idbPut = list => idbRun('readwrite', st => st.put(list, 'pending'));
+const idbClear = () => idbRun('readwrite', st => st.delete('pending'));
+// 启动补灌：localStorage 没有留底而 IndexedDB 有（上次会话的兜底），读回内存并让横幅出现。
+// syncFromVault 会 await pendingReady 之后再判定「是否跳过自动同步」，补灌不与同步抢跑。
+let pendingReadyResolve;
+export const pendingReady = new Promise(r => { pendingReadyResolve = r; });
+idbGet().then(list => {
+  if (!pendingList.length && list.length) {
+    pendingList = list;
+    pendingRecorded = true;
+    try { window.dispatchEvent(new Event('deepnotes-pending-changed')); } catch {}
+  }
+  pendingReadyResolve();
+}).catch(() => pendingReadyResolve());
 function savePending(list) {
-  pendingRecorded = !!list.length;
+  pendingList = Array.isArray(list) ? list.slice() : [];
+  pendingRecorded = !!pendingList.length;
+  let saved = true;
   try {
-    if (list.length) localStorage.setItem(PENDING_KEY, JSON.stringify(list));
+    if (pendingList.length) localStorage.setItem(PENDING_KEY, JSON.stringify(pendingList));
     else localStorage.removeItem(PENDING_KEY);
-  } catch { /* 记录本身写不进去时无能为力：写盘失败的 toast 仍会提示用户 */ }
+  } catch { saved = false; }
+  if (!saved && pendingList.length) idbPut(pendingList).catch(() => {}); // localStorage 写满：IndexedDB 兜底
+  else if (saved) idbClear().catch(() => {}); // localStorage 写成功后清掉 IndexedDB 旧兜底，避免复活
+  try { window.dispatchEvent(new Event('deepnotes-pending-changed')); } catch {} // 横幅状态跟随（出现 / 自动隐藏）
 }
 export function hasPendingWrites() {
-  if (pendingRecorded) return true;
-  try { return !!localStorage.getItem(PENDING_KEY); } catch { return false; }
+  return pendingRecorded || pendingList.length > 0;
 }
 export function clearPendingWrites() { savePending([]); }
-// 把挂起操作重新排队并立即 flush：成功则记录自动清除，仍失败会再次留底
-export function retryPending() {
+// 把挂起操作重新排队并 flush：成功则记录自动清除，仍失败会再次留底。
+// await 本轮写完才返回——调用方（横幅「重试写盘」）据此判断最终结果，而不是过早报成功。
+export async function retryPending() {
   const list = loadPending();
   savePending([]);
   const v = api();
   if (!v || !list.length) return 0;
   for (const op of list) queue.set(opKey(op), {...op, _retry: true});
-  flush(); // 异步：结果由挂起记录与 errorHandler 呈现
+  await flush();
   return list.length;
 }
 function recordPending(ops) {
@@ -227,7 +273,9 @@ export async function flush() {
     recordPending(failedOps);
     if (errorHandler) errorHandler(failedOps.map(op => op.rel || op.from));
   } else if (pendingRecorded) {
-    clearPendingWrites(); // 这轮全部写成功：清掉历史挂起记录
+    // 有历史留底：先补写留底的操作再谈「清除」。直接清掉会让留底内容静默丢失
+    //（下次启动按文件夹覆盖），补写失败会重新留底并再次提示。
+    retryPending();
   }
 }
 
@@ -235,9 +283,17 @@ export async function flush() {
 // 改走 sendSync 阻塞通道，主进程用同步 fs 写完才放行关闭。只应在 beforeunload 里调用。
 export function flushSyncNow() {
   const v = api();
-  if (!v?.flushSync || !queue.size) return;
+  if (!v?.flushSync) return;
   clearTimeout(timer);
   timer = null;
+  // 挂起写也搭上退出前的同步通道（最后一次机会）：写成功记录随之清除，仍失败原样留底。
+  // 若只写新操作就清记录，留底内容会被静默丢掉（下次启动按文件夹覆盖）。
+  const pend = loadPending();
+  if (pend.length) {
+    savePending([]);
+    for (const op of pend) queue.set(opKey(op), {...op, _retry: true});
+  }
+  if (!queue.size) return;
   const ops = [...queue.values()].map(op => ({...op, root: op.root || getRoot()}));
   queue.clear();
   try {
