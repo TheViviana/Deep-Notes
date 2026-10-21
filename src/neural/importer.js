@@ -32,6 +32,29 @@ function parse(text) {
   return {fm, body: m ? text.slice(m[0].length) : text};
 }
 const pick = (fm, keys) => { for (const k of keys) for (const f of Object.keys(fm)) if (f.toLowerCase() === k.toLowerCase() && fm[f] !== '') return fm[f]; return undefined; };
+
+// —— keep：frontmatter 里软件未消费的自定义键原样保留，写回时展开（如「主题: 类时纠缠」不再丢） ——
+// 各模块解析时实际消费的键（含中英别名，大小写不敏感）；没列进来的键进 keep 随内容走
+const CONSUMED = {
+  works: ['title', '标题', 'name', 'date', '发布时间', '发布日期', 'published', 'publishedAt', 'created', '创建时间', 'direction', '研究方向', '方向', 'tags', 'tag', '标签', '话题', 'media', '类型', 'type', '形式', 'views', '观看', '浏览', '阅读', '播放', 'likes', '点赞', 'comments', '评论', 'saves', '收藏'],
+  notes: ['title', '标题', 'name', 'tags', 'tag', '标签', '话题'],
+  ideas: ['title', '标题', 'name', 'status', '状态', 'platform', '平台', 'priority', '优先级', 'note', '备注', 'description', '简介'],
+  drafts: ['title', '标题', 'name', 'source', '来源选题', '选题'],
+  readings: ['title', '标题', 'name', 'author', '作者', 'by', 'source', '来源', '出处', 'url', '链接', 'folder', '分类', '目录', 'group', 'date', '收藏日期', '发布日期', 'published'],
+  archives: ['title', '标题', 'name', 'date', '收档日期', '创建日期', 'published'],
+};
+// 所有模块序列化都会写回的通用键：不算自定义
+const COMMON_FM = ['deepnotes-id', 'updated'];
+function keepOf(fm, kind) {
+  const used = new Set([...(CONSUMED[kind] || []), ...COMMON_FM].map(k => k.toLowerCase()));
+  const keep = {};
+  for (const [k, v] of Object.entries(fm)) {
+    if (v === '' || v == null) continue;
+    if (used.has(k.toLowerCase())) continue;
+    keep[k] = v;
+  }
+  return Object.keys(keep).length ? keep : undefined;
+}
 function num(v) {
   if (v == null || v === '') return null;
   const s = String(v).replace(/[,，\s%秒s]/gi, '');
@@ -129,28 +152,29 @@ export async function parseVault(fileList, target = 'auto') {
       likes: num(pick(x.fm, ['likes', '点赞'])) ?? 0,
       comments: num(pick(x.fm, ['comments', '评论'])) ?? 0,
       saves: num(pick(x.fm, ['saves', '收藏'])) ?? 0,
-      body: clean(x.body), tags: tagsOf(x.fm, x.body), media
+      body: clean(x.body), tags: tagsOf(x.fm, x.body), media, keep: keepOf(x.fm, 'works')
     };
   }).sort(byDate)
     .map((w, i) => normalizeWork({id: 'w' + (i + 1), ...w}));
 
   const noteTags = [];
   const notes = bucket.methods.map((x, i) => {
-    const sub = x.dirs.length > 1 ? x.dirs[1] : (x.dirs[0] || '笔记');
+    // 子目录全链保留（05-方法库/A/B/xx.md）：三层以上不再压平，不同子目录里的同名文件也不再互相覆盖
+    const sub = x.dirs.length > 1 ? x.dirs.slice(1).join('/') : (x.dirs[0] || '笔记');
     noteTags.push(...tagsOf(x.fm, x.body));
-    return {id: 'n' + (i + 1), title: x.title, path: `05-方法库 methods/${sub}/${x.file.name}`, body: clean(x.body)};
+    return {id: 'n' + (i + 1), title: x.title, path: `05-方法库 methods/${sub}/${x.file.name}`, body: clean(x.body), keep: keepOf(x.fm, 'notes')};
   });
 
   const ideas = bucket.ideas.map((x, i) => {
     const status = String(pick(x.fm, ['status', '状态']) || '待写');
     return {id: i + 1, title: x.title, platform: String(pick(x.fm, ['platform', '平台']) || '本地'), priority: ['高', '中', '低'].includes(String(pick(x.fm, ['priority', '优先级']))) ? String(pick(x.fm, ['priority', '优先级'])) : '中',
-      status: ['待写', '待扩展', '已转草稿'].includes(status) ? status : '待写', note: String(pick(x.fm, ['note', '备注', 'description', '简介']) || clean(x.body).replace(/^#.*\n/, '').trim().slice(0, 120))};
+      status: ['待写', '待扩展', '已转草稿'].includes(status) ? status : '待写', note: String(pick(x.fm, ['note', '备注', 'description', '简介']) || clean(x.body).replace(/^#.*\n/, '').trim().slice(0, 120)), keep: keepOf(x.fm, 'ideas')};
   });
 
   const drafts = bucket.drafts.map((x, i) => {
     const src = String(pick(x.fm, ['source', '来源选题', '选题']) || '');
     const idea = ideas.find(d => d.title === src);
-    return {id: 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null};
+    return {id: 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null, keep: keepOf(x.fm, 'drafts')};
   });
 
   // 阅读区：别人写好的内容（作者 / 来源 / 分类可选，写在 frontmatter 里）。
@@ -161,14 +185,14 @@ export async function parseVault(fileList, target = 'auto') {
     source: String(pick(x.fm, ['source', '来源', '出处', 'url', '链接']) || ''),
     folder: String(pick(x.fm, ['folder', '分类', '目录', 'group']) || '').trim(),
     date: dateOf(pick(x.fm, ['date', '收藏日期', '发布日期', 'published']), x.file.lastModified).slice(0, 10),
-    body: clean(x.body)
+    body: clean(x.body), keep: keepOf(x.fm, 'readings')
   })).sort((a, b) => b.date.localeCompare(a.date));
 
   // 档案区：创作者自己的个人档案（简介、回顾、清单等），同样参与双链与图谱。
   const archives = bucket.archives.map((x, i) => ({
     id: 'archive-' + (i + 1), title: x.title,
     date: dateOf(pick(x.fm, ['date', '收档日期', '创建日期', 'published']), x.file.lastModified).slice(0, 10),
-    body: clean(x.body)
+    body: clean(x.body), keep: keepOf(x.fm, 'archives')
   })).sort((a, b) => b.date.localeCompare(a.date));
 
   // 概念词：内容里出现的全部话题标签（不设数量上限），出现越多在概念网络里越靠前。

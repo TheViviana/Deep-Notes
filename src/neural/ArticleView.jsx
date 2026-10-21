@@ -14,6 +14,8 @@ import {serialize, exportFiles, safeName} from './fileStore';
 marked.setOptions({gfm: true, breaks: true});
 
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// 源码层已把 < 转成 &lt;；注入点还原后走完整 esc()，避免二次转义把实体显示成文字（esc(原文本) 幂等）
+const unescLt = s => String(s).replace(/&lt;/g, '<');
 
 // —— 极简语法高亮（零依赖）：颜色值 / 字符串 / 注释 / 关键字 / 数字 / 属性 / HTML 标签 ——
 // 单遍 tokenize：命中区间染色、未命中区间转义，避免「先转义再匹配」的实体污染。
@@ -49,9 +51,23 @@ export function hiCode(code, lang = '', base = null) {
   put(String(code).slice(last), last);
   return out.join('');
 }
+// 安全：markdown 链接 / 图片走协议白名单（http/https/mailto、相对路径与页内锚点），
+// 屏蔽 javascript: 等危险协议；内联 HTML 已在 renderMarkdown 源码层转义，不在此处理。
 marked.use({renderer: {
   code({text, lang}) { return `<pre><code class="hl">${hiCode(text, lang)}</code></pre>`; },
   codespan({text}) { return `<code class="hl">${hiCode(text, '')}</code>`; },
+  link({href, title, tokens}) {
+    const h = String(href || '').trim();
+    const inner = this.parser.parseInline(tokens);
+    const tt = title ? ` title="${esc(title)}"` : '';
+    return /^(https?:|mailto:|\/|#|\.\/|\.\.\/)/i.test(h) ? `<a href="${esc(h)}"${tt}>${inner}</a>` : `<a${tt}>${inner}</a>`;
+  },
+  image({href, title, text}) {
+    const h = String(href || '').trim();
+    if (!/^(https?:|data:image\/|\/|\.\/|\.\.\/)/i.test(h)) return esc(text || '');
+    const tt = title ? ` title="${esc(title)}"` : '';
+    return `<img src="${esc(h)}" alt="${esc(text || '')}"${tt} loading="lazy"/>`;
+  },
 }});
 
 // 镜像层行内片段（dataURL 图片 / 彩色 span / 双链 / 高亮 / 加粗 / 斜体 / 删除线 / 行内代码）。
@@ -79,11 +95,16 @@ export function renderMarkdown(md) {
   const fnOrder = [];             // 保持出现顺序编号
   const proc = seg => {
     let s = seg
-      // 公式先摘出：避免 _ ^ \\ 等被 marked 当作 Markdown 语法吃掉
+      // 公式先摘出（在 HTML 转义之前：$a < b$ 里的 < 属于公式内容，不能被转义破坏），
+      // 避免 _ ^ \\ 等被 marked 当作 Markdown 语法吃掉
       .replace(/\$\$([\s\S]+?)\$\$/g, (_, t) => stashMath(t, true))
       .replace(/\\\[([\s\S]+?)\\\]/g, (_, t) => stashMath(t, true))
       .replace(/\\\(([\s\S]+?)\\\)/g, (_, t) => stashMath(t, false))
-      .replace(/(?<![\\$\w])\$((?:[^\s$]|[^\n$]*?[^\s$]))\$(?!\d)/g, (_, t) => stashMath(t, false));
+      .replace(/(?<![\\$\w])\$((?:[^\s$]|[^\n$]*?[^\s$]))\$(?!\d)/g, (_, t) => stashMath(t, false))
+      // XSS 防护：转义类 HTML 标签（第三方 md 里的 <script>/<img onerror> 一律按纯文本显示）。
+      // 只吃 <字母/!/? 开头的标签形结构，「a < b」这类普通文本不受影响；
+      // 之后注入的受信 HTML（双链 <a>、嵌入图 <img> 等）在转义之后拼接，不会被转回去
+      .replace(/<(?=[a-zA-Z!/?])/g, '&lt;');
     // 脚注定义（行首 [^key]: 文本）；引用（未定义的 [^x] 原样保留）
     s = s.replace(/^[ \t]*\[\^([^\]\s]+)\]:[ \t]*(.+?)[ \t]*$/gm, (_, k, v) => {
       if (!footnotes.has(k)) fnOrder.push(k);
@@ -98,24 +119,25 @@ export function renderMarkdown(md) {
     s = s.replace(/^>[ \t]*\[!(note|tip|warning|info|important|caution)\][ \t]*([^\n]*)$/gim,
       (_, t, title) => title.trim() ? `> **${title.trim()}**` : '>');
     return s
+      // ==高亮==：内容先还原 / 转义再包 <mark>（必须在双链 / 嵌入图之前替换，转义才不会破坏它们注入的标签）
+      .replace(/==([^=\n]+)==/g, (_, t) => '<mark>' + esc(unescLt(t)) + '</mark>')
       // ![[图片.png]] / ![[图.png|300]] 嵌入图（Obsidian 语法）→ <img data-asset>；
-      // 桌面版经 vault:asset 从知识库读文件回填，网页版显示占位。必须在 [[双链]] 之前替换。
+      // 桌面版经 vault:asset 从知识库读文件回填，网页版显示占位。
       .replace(/!\[\[([^\]\n]+)\]\]/g, (_, t) => {
         const [name, size] = t.split('|');
-        const n = (name || '').trim();
+        const n = unescLt((name || '').trim());
         const w = parseInt(size, 10);
         return `<img class="md-embed" data-asset="${esc(n)}" alt="${esc(n)}"${w > 0 ? ` style="width:${w}px"` : ''}/>`;
       })
       .replace(/\[\[([^\]\n]+)\]\]/g, (_, t) => {
         const [target, alias] = t.split('|');
-        const raw = (target || '').trim();
+        const raw = unescLt((target || '').trim());
         const [name, anchor] = raw.split('#');
         // 块引用 [[笔记#小节]] 显示为「笔记 › 小节」；别名优先
-        const label = (alias || '').trim()
+        const label = unescLt((alias || '').trim())
           || (anchor ? `${(name || '').trim()} › ${anchor.trim()}` : raw);
         return `<a class="md-wikilink" data-target="${esc(raw)}">${esc(label)}</a>`;
-      })
-      .replace(/==([^=\n]+)==/g, '<mark>$1</mark>');
+      });
   };
   // 用捕获组 split：奇数段是 ```围栏``` 或 `行内代码`，保持原样；偶数段才做替换
   let src = String(md || '').split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g).map((seg, i) => i % 2 ? seg : proc(seg)).join('');

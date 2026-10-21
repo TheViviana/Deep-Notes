@@ -36,12 +36,50 @@ const providerOf = cfg => AI_PROVIDERS.find(x => x.id === cfg.provider) || AI_PR
 
 // —— 配置单例：模块级 state + 订阅（chip、面板、发送逻辑共享同一份） ——
 const AI_KEY = CONFIG.storagePrefix + '-ai-v1';
-function loadAi() { try { return JSON.parse(localStorage.getItem(AI_KEY)) || {}; } catch { return {}; } }
+const ENC_PREFIX = 'enc:'; // 桌面版 safeStorage 密文（base64）前缀；无前缀为旧版明文，读取时自动升级
+const canSecure = () => !!(window.electronAPI?.keyEncrypt && window.electronAPI?.keyDecrypt);
+function persistAi(state) {
+  // 桌面版：密钥经主进程 safeStorage 加密后落盘（enc: 前缀 + base64），localStorage 不存明文。
+  // 加密是异步的：先落一份去掉密钥的配置占位，密文写好后整体覆盖；失败则保持无密钥，明文绝不入库
+  if (state.apiKey && canSecure() && !state.apiKey.startsWith(ENC_PREFIX)) {
+    const bare = {...state, apiKey: ''};
+    try { localStorage.setItem(AI_KEY, JSON.stringify(bare)); } catch (err) { console.warn('localStorage 写入失败 · Save failed:', err); }
+    const seq = ++encSeq;
+    window.electronAPI.keyEncrypt(state.apiKey).then(res => {
+      if (!res?.ok || seq !== encSeq) return;
+      try { localStorage.setItem(AI_KEY, JSON.stringify({...state, apiKey: ENC_PREFIX + res.data})); } catch {}
+    }).catch(() => {});
+    return;
+  }
+  try { localStorage.setItem(AI_KEY, JSON.stringify(state)); }
+  catch (err) { console.warn('localStorage 写入失败 · Save failed:', err); }
+}
+let encSeq = 0; // 密钥连续编辑时防止乱序的旧密文覆盖新密文
+function loadAi() {
+  let cfg;
+  try { cfg = JSON.parse(localStorage.getItem(AI_KEY)) || {}; } catch { cfg = {}; }
+  if (cfg.apiKey?.startsWith(ENC_PREFIX)) {
+    // 密文：异步解密回填内存，localStorage 里的密文保持不动
+    const b64 = cfg.apiKey.slice(ENC_PREFIX.length);
+    cfg.apiKey = '';
+    window.electronAPI?.keyDecrypt(b64).then(res => {
+      if (res?.ok && res.data) { aiState = {...aiState, apiKey: res.data}; for (const f of aiSubs) f(aiState); }
+    }).catch(() => {});
+  } else if (cfg.apiKey && canSecure()) {
+    // 旧版明文密钥：读进内存后立即升级为密文落盘
+    const plain = cfg.apiKey;
+    cfg.apiKey = '';
+    window.electronAPI.keyEncrypt(plain).then(res => {
+      if (res?.ok) persistAi({...aiState, apiKey: ENC_PREFIX + res.data});
+    }).catch(() => {});
+  }
+  return cfg;
+}
 let aiState = {provider: 'deepseek', baseUrl: '', apiKey: '', model: '', gear: 'off', ...loadAi()};
 const aiSubs = new Set();
 function writeAi(patch) {
   aiState = {...aiState, ...patch};
-  try { localStorage.setItem(AI_KEY, JSON.stringify(aiState)); } catch {}
+  persistAi(aiState);
   for (const f of aiSubs) f(aiState);
 }
 export function useAiConfig() {

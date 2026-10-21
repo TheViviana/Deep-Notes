@@ -105,9 +105,11 @@ function frontmatter(pairs) {
   return '---\n' + pairs.filter(([, v]) => v != null && v !== '').map(([k, v]) => `${k}: ${String(v).replace(/\n/g, ' ')}`).join('\n') + '\n---\n';
 }
 export function serialize(kind, item) {
-  let fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['updated', item.updatedAt || null]]);
+  // keep：导入时未消费的自定义 frontmatter 键（如「主题」）原样展开在最前——写回不丢用户手写元数据
+  const keep = Object.entries(item.keep || {});
+  let fm = frontmatter([...keep, ['deepnotes-id', item.id], ['title', item.title], ['updated', item.updatedAt || null]]);
   if (kind === 'works') {
-    fm = frontmatter([
+    fm = frontmatter([...keep,
       ['deepnotes-id', item.id], ['title', item.title], ['date', item.date], ['updated', item.updatedAt || null],
       ['direction', item.direction || null], ['tags', (item.tags || []).map(t => '#' + t).join(' ')],
       ['media', item.media === 'video' ? '视频' : item.media === 'images' ? '图文' : null],
@@ -117,11 +119,11 @@ export function serialize(kind, item) {
     ]);
   } else if (kind === 'readings') {
     // folder 一并落盘：阅读区分类随 .md 文件走，重新导入 / 自动同步都不会再丢分类
-    fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['author', item.author || null], ['source', item.source || null], ['folder', item.folder || null], ['date', item.date || null], ['updated', item.updatedAt || null]]);
+    fm = frontmatter([...keep, ['deepnotes-id', item.id], ['title', item.title], ['author', item.author || null], ['source', item.source || null], ['folder', item.folder || null], ['date', item.date || null], ['updated', item.updatedAt || null]]);
   } else if (kind === 'archives') {
-    fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['date', item.date || null], ['updated', item.updatedAt || null]]);
+    fm = frontmatter([...keep, ['deepnotes-id', item.id], ['title', item.title], ['date', item.date || null], ['updated', item.updatedAt || null]]);
   } else if (kind === 'drafts') {
-    fm = frontmatter([['deepnotes-id', item.id], ['title', item.title], ['updated', item.updatedAt || null]]);
+    fm = frontmatter([...keep, ['deepnotes-id', item.id], ['title', item.title], ['updated', item.updatedAt || null]]);
   }
   return fm + '\n' + (item.body || '');
 }
@@ -165,6 +167,18 @@ export async function flush() {
   if (failed.length && errorHandler) errorHandler(failed);
 }
 
+// 退出前的同步落盘：beforeunload 里异步 IPC（flush）可能页面先卸载、操作根本发不出去，
+// 改走 sendSync 阻塞通道，主进程用同步 fs 写完才放行关闭。只应在 beforeunload 里调用。
+export function flushSyncNow() {
+  const v = api();
+  if (!v?.flushSync || !queue.size) return;
+  clearTimeout(timer);
+  timer = null;
+  const ops = [...queue.values()].map(op => ({...op, root: op.root || getRoot()}));
+  queue.clear();
+  try { v.flushSync(ops); } catch (err) { console.warn('退出落盘失败 · Flush on quit failed:', err); }
+}
+
 // 同步一条内容到磁盘。item 为 null 表示删除；old 为变更前的旧记录（路径变了会先移走旧文件）。
 // old 与 item 同引用（其他 kind 变化引发的全量 diff）时无需重写。
 // relMap 按「新数组」算出的消歧路径；oldRelMap 按「旧数组」算——旧路径必须用旧的消歧结果：
@@ -191,15 +205,18 @@ export async function chooseDir() {
 }
 
 // 把主进程读到的 {relPath, body} 列表转成 importer.parseVault 可用的 File 桩。
+// 返回 {files, unreadable}：unreadable 是「存在但读不出内容」的文件（iCloud 未下载等），
+// 调用方必须据此中止导入 / 同步——把读不到当删除写回会把云盘文件真删掉。
 export function readVaultFiles(dir, res) {
   if (!res?.ok) throw new Error(res?.error || '读取失败');
   const base = (dir || '').split('/').pop() || 'vault';
-  return res.files.map(f => ({
+  const files = res.files.map(f => ({
     name: f.relPath.split('/').pop(),
     webkitRelativePath: base + '/' + f.relPath,
     lastModified: 0,
     text: async () => f.body,
   }));
+  return {files, unreadable: res.unreadable || []};
 }
 
 export async function prepareCopy(srcRoot) {

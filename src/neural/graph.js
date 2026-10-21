@@ -147,20 +147,31 @@ export function buildGraph({works = [], notes = notesRaw, ideas = [], drafts = [
   }
 
   // 概念提及 + 双向共振（概念词表：软件内导入的优先，否则用数据文件里的词表）。
+  // 性能：每篇正文只 toLowerCase 一次缓存复用（原先 概念数×篇数×全文 反复降大写）；
+  // mentions 用 Set 存，共振交集只遍历较小的一侧。
   const conceptTable = concepts || CONCEPTS;
   const content = [...nodes.values()].filter(n => CONTENT.has(n.kind));
-  const mentions = new Map();
+  const lows = new Map(content.map(n => [n.id, n.text.toLowerCase()]));
+  const mentions = new Map(); // 内容 id -> Set<概念名>
   for (const [name, terms] of conceptTable) {
-    const hits = content.filter(n => terms.some(t => n.text.toLowerCase().includes(t)));
+    const lowTerms = terms.map(t => String(t).toLowerCase());
+    const hits = content.filter(n => lowTerms.some(t => lows.get(n.id).includes(t)));
     if (hits.length < 2) continue;
     const id = 'concept:' + name;
     add({id, kind: 'concept', title: name, short: name, text: '', terms});
-    for (const h of hits) { link(h.id, id, 'mention'); mentions.set(h.id, [...(mentions.get(h.id) || []), name]); }
+    for (const h of hits) {
+      link(h.id, id, 'mention');
+      if (!mentions.has(h.id)) mentions.set(h.id, new Set());
+      mentions.get(h.id).add(name);
+    }
   }
   for (let i = 0; i < content.length; i++) for (let j = i + 1; j < content.length; j++) {
-    const A = mentions.get(content[i].id) || [], B = mentions.get(content[j].id) || [];
-    const shared = A.filter(x => B.includes(x));
-    if (shared.length >= 2) { link(content[i].id, content[j].id, 'resonance', shared.length); link(content[j].id, content[i].id, 'resonance', shared.length); }
+    const A = mentions.get(content[i].id), B = mentions.get(content[j].id);
+    if (!A || !B || A.size < 2 || B.size < 2) continue; // 共振要求双方 ≥2 个共同概念，任一侧不足直接跳过
+    const [small, big] = A.size <= B.size ? [A, B] : [B, A];
+    let shared = 0;
+    for (const x of small) if (big.has(x)) shared++;
+    if (shared >= 2) { link(content[i].id, content[j].id, 'resonance', shared); link(content[j].id, content[i].id, 'resonance', shared); }
   }
 
   const list = [...nodes.values()];
@@ -174,7 +185,7 @@ export function buildGraph({works = [], notes = notesRaw, ideas = [], drafts = [
     if (l.both) { A.mutual++; B.mutual++; A.out++; B.out++; A.in++; B.in++; }
     else { idx.get(l.s).out++; idx.get(l.t).in++; }
   }
-  for (const n of list) n.shared = mentions.get(n.id) || [];
+  for (const n of list) n.shared = [...(mentions.get(n.id) || [])];
   return {nodes: list, links, index: idx};
 }
 

@@ -47,7 +47,11 @@ function gradeIn(store, key, grade) {
   const now = Date.now();
   let next;
   if (grade === 0) next = {due: now + DAY, ivl: 1, ef: Math.max(1.3, cur.ef - 0.2), reps: cur.reps + 1};
-  else if (grade === 1) next = {due: now + Math.max(1, cur.ivl) * DAY, ivl: Math.max(1, cur.ivl), ef: cur.ef, reps: cur.reps + 1};
+  else if (grade === 1) {
+    // 「模糊」：间隔温和增长（×1.2 向上取整，上限 120 天）——原实现间隔永不增长，会一直卡在同一天
+    const ivl = Math.min(120, Math.ceil(Math.max(1, cur.ivl || 1) * 1.2));
+    next = {due: now + ivl * DAY, ivl, ef: cur.ef, reps: cur.reps + 1};
+  }
   else {
     const ivl = Math.min(120, Math.max(1, cur.ivl || 1) * cur.ef);
     next = {due: now + ivl * DAY, ivl, ef: Math.min(3, cur.ef + 0.05), reps: cur.reps + 1};

@@ -3,7 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, seedReadings, seedArchives, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
 import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags} from './worksStore';
 import {pickVaultFolder, pickMdFiles, parseVault} from './importer';
-import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId} from './fileStore';
+import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId} from './fileStore';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
@@ -24,15 +24,33 @@ import './neural.css';
 
 // 选题、草稿与目标保存在当前浏览器（localStorage）。
 // 写入防抖：打字等高频变更若每次都同步序列化全量数据（大库 + 粘贴图后可达数 MB）会卡顿，
-// 静默 300ms 后再写，UI 保持跟手；窗口关闭前的最后一次输入最多延迟 300ms 落盘。
+// 静默 300ms 后再写，UI 保持跟手；窗口关闭前的最后一次输入由 flushPendingSaves 同步补写。
+// 防抖窗口内的待写数据登记进 pendingSaves，写失败不再静默（console 留痕可排查）。
+const pendingSaves = new Map(); // key -> 防抖窗口内尚未落盘的值
+function flushPendingSaves() {
+  for (const [key, v] of pendingSaves) {
+    try { localStorage.setItem(key, JSON.stringify(v)); }
+    catch (err) { console.warn('localStorage 写入失败 · Save failed:', key, err); }
+  }
+  pendingSaves.clear();
+}
 function useSaved(key, fallback) {
   const [v, set] = useState(() => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } });
   useEffect(() => {
-    const t = setTimeout(() => { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }, 300);
+    pendingSaves.set(key, v);
+    const t = setTimeout(() => {
+      pendingSaves.delete(key);
+      try { localStorage.setItem(key, JSON.stringify(v)); }
+      catch (err) { console.warn('localStorage 写入失败 · Save failed:', key, err); }
+    }, 300);
     return () => clearTimeout(t);
   }, [key, v]);
   return [v, set];
 }
+// 删除确认的落地说明：桌面版连着知识库时删除会写盘（移入 .trash，30 天后自动清掉），网页版只动浏览器数据
+const deleteScopeNote = () => capable() && getRoot()
+  ? '桌面版会同步把该文件移入知识库的 .trash（30 天后自动清理）。'
+  : '此操作只影响当前浏览器。';
 
 function Modal({title, en, onClose, children, wide}) {
   const ref = useRef(null), closeRef = useRef(onClose);
@@ -329,8 +347,14 @@ function App() {
       // 混用会算错旧文件位置——删除/重命名时错删同名文件、留下真孤儿
       const relMap = resolveRels(kind, cv);
       const oldRelMap = resolveRels(kind, pv);
+      const newRelSet = new Set(relMap.values());
       for (const x of cv) queueSync(kind, x, pmap.get(x.id) || null, relMap, oldRelMap);
-      for (const x of removed) queueSync(kind, null, x, relMap, oldRelMap);
+      for (const x of removed) {
+        // 路径被新内容接管（重导入后下标式 id 整体移位、同位置换了主人）时不进 .trash，
+        // 由接管者直接覆写——否则每次重导入都整库「先 trash 再重写」，是之前丢笔记的根因
+        if (newRelSet.has(oldRelMap.get(x.id))) continue;
+        queueSync(kind, null, x, relMap, oldRelMap);
+      }
     }
   }, [works, notes, drafts, readings, archives]);
   // 写盘失败提示（权限不足 / 磁盘满等）；队列由 flush 触发，这里只负责把错误带给用户
@@ -338,10 +362,10 @@ function App() {
     setErrorHandler(failed => setToast(`知识库写盘失败（${failed.length} 个文件），内容仍保存在浏览器 · Disk write failed`));
     return () => setErrorHandler(null);
   }, []);
-  // 退出前尽力把防抖队列写完（800ms 内关闭窗口的场景）
+  // 退出前尽力把防抖队列写完（800ms 内关闭窗口的场景）：localStorage 与知识库写盘都走同步通道——
+  // beforeunload 里异步 IPC 可能页面先卸载根本发不出去，同步 sendSync / setItem 才可靠
   useEffect(() => {
-    if (!capable()) return;
-    const bye = () => { flush(); };
+    const bye = () => { flushPendingSaves(); if (capable()) flushSyncNow(); };
     window.addEventListener('beforeunload', bye);
     return () => window.removeEventListener('beforeunload', bye);
   }, []);
@@ -361,7 +385,7 @@ function App() {
   }
   function deleteIdea(id) {
     const it = ideas.find(x => x.id === id);
-    if (!window.confirm(`删除选题「${it?.title || '未命名选题'}」？此操作只影响当前浏览器。`)) return;
+    if (!window.confirm(`删除选题「${it?.title || '未命名选题'}」？${deleteScopeNote()}`)) return;
     setIdeas(ideas.filter(x => x.id !== id));
     setModal(null); setToast('选题已删除 · Idea deleted');
   }
@@ -375,7 +399,7 @@ function App() {
   }
   function deleteDraft(id) {
     const d = drafts.find(x => x.id === id);
-    if (!window.confirm(`删除草稿「${d?.title || '未命名草稿'}」？此操作只影响当前浏览器。`)) return;
+    if (!window.confirm(`删除草稿「${d?.title || '未命名草稿'}」？${deleteScopeNote()}`)) return;
     const rest = drafts.filter(x => x.id !== id);
     setDrafts(rest); setActive(rest[0]?.id); setToast('草稿已删除 · Draft deleted');
   }
@@ -435,7 +459,7 @@ function App() {
   }
   function deleteNote(id) {
     const n = notes.find(x => x.id === id);
-    if (!window.confirm(`删除方法笔记「${n?.title || '未命名'}」？此操作只影响当前浏览器。`)) return;
+    if (!window.confirm(`删除方法笔记「${n?.title || '未命名'}」？${deleteScopeNote()}`)) return;
     const rest = notes.filter(x => x.id !== id);
     setNotes(rest);
     setMethSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
@@ -509,7 +533,7 @@ function App() {
   }
   function deleteReading(id) {
     const r = readings.find(x => x.id === id);
-    if (!window.confirm(`删除阅读「${r?.title || '未命名阅读'}」？正文与批注会一起删除，此操作只影响当前浏览器。`)) return;
+    if (!window.confirm(`删除阅读「${r?.title || '未命名阅读'}」？正文与批注会一起删除，${deleteScopeNote()}`)) return;
     const rest = readings.filter(x => x.id !== id);
     setReadings(rest);
     setReadSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
@@ -568,7 +592,7 @@ function App() {
   }
   function deleteArchive(id) {
     const a = archives.find(x => x.id === id);
-    if (!window.confirm(`删除档案「${a?.title || '未命名档案'}」？正文会一起删除，此操作只影响当前浏览器。`)) return;
+    if (!window.confirm(`删除档案「${a?.title || '未命名档案'}」？正文会一起删除，${deleteScopeNote()}`)) return;
     const rest = archives.filter(x => x.id !== id);
     setArchives(rest);
     setArcSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
@@ -644,7 +668,7 @@ function App() {
   }
   function deleteWork(id) {
     const w = works.find(x => x.id === id);
-    if (!window.confirm(`删除文章「${w?.title || '未命名文章'}」？正文与主信息会一起删除，此操作只影响当前浏览器。`)) return;
+    if (!window.confirm(`删除文章「${w?.title || '未命名文章'}」？正文与主信息会一起删除，${deleteScopeNote()}`)) return;
     const rest = works.filter(x => x.id !== id);
     setWorks(rest);
     setLibSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
@@ -755,7 +779,7 @@ function App() {
   const aiRemove = gid => {
     const [kind, id] = String(gid).split(':');
     const t = aiRead(gid)?.title || gid;
-    if (!window.confirm(`AI 请求删除「${t}」，确认删除？此操作只影响当前浏览器。`)) return {ok: false, title: t, cancelled: true};
+    if (!window.confirm(`AI 请求删除「${t}」，确认删除？${deleteScopeNote()}`)) return {ok: false, title: t, cancelled: true};
     if (kind === 'post') { deleteWork(id); return {ok: true, title: t}; }
     if (kind === 'draft') { const rest = drafts.filter(x => x.id !== id); setDrafts(rest); setActive(a => a === id ? rest[0]?.id : a); return {ok: true, title: t}; }
     if (kind === 'note') { setNotes(ns => ns.filter(x => x.id !== id)); return {ok: true, title: t}; }
@@ -812,15 +836,22 @@ function App() {
   async function importVault(target = 'auto') {
     setModal(null);
     // 桌面版经主进程选目录读文件；网页版走浏览器目录选择器。两种来源都转成同一套 File 列表解析。
-    let files, srcDir = null;
+    let files, srcDir = null, unreadable = [];
     if (capable()) {
       srcDir = await chooseDir();
       if (!srcDir) return;
-      try { files = readVaultFiles(srcDir, await window.deepnotes.vault.read(srcDir)); }
-      catch { setToast('读取文件夹失败 · Failed to read folder'); return; }
+      try {
+        const res = readVaultFiles(srcDir, await window.deepnotes.vault.read(srcDir));
+        files = res.files; unreadable = res.unreadable;
+      } catch { setToast('读取文件夹失败 · Failed to read folder'); return; }
     } else {
       files = await pickVaultFolder();
       if (!files) return;
+    }
+    // iCloud / 网盘未下载的文件读不出内容：继续导入会把它们当「已删除」写回（移进 .trash），必须先中止
+    if (unreadable.length) {
+      setToast(`有 ${unreadable.length} 个文件暂时读不到（可能未从 iCloud 下载），已取消导入以防误删；请先在访达里把文件下载完整再试 · Import aborted`);
+      return;
     }
     let data;
     try { data = await parseVault(files, target); } catch { setToast('解析失败，请确认选择的是 Markdown 文件夹 · Parse failed'); return; }
@@ -976,8 +1007,16 @@ function App() {
     let dead = false;
     (async () => {
       const root = getRoot();
-      let files;
-      try { files = readVaultFiles(root, await window.deepnotes.vault.read(root)); } catch { return; }
+      let files, unreadable = [];
+      try {
+        const res = readVaultFiles(root, await window.deepnotes.vault.read(root));
+        files = res.files; unreadable = res.unreadable;
+      } catch { return; }
+      // 云盘（iCloud 等）文件未下载时读不出内容：此刻同步会把「读不到」当成「已删除」写回，直接跳过
+      if (unreadable.length) {
+        setToast(`知识库有 ${unreadable.length} 个文件暂时读不到（可能未从 iCloud 下载），已跳过本次自动同步 · Sync skipped`);
+        return;
+      }
       let data;
       try { data = await parseVault(files, getTarget()); } catch { return; }
       if (dead || !data.counts.all) return;

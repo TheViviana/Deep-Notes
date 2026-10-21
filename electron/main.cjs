@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, ipcMain, net, dialog } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, net, dialog, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
@@ -50,6 +50,8 @@ async function pruneUp(root, dir) {
 
 async function readMd(root) {
   const out = [];
+  const unreadable = []; // 存在但读不出内容（iCloud / 网盘未下载、权限不足等）
+  // 上层必须把 unreadable 与「文件不存在」区分开：把读不到当删除写回，会把云盘文件真删掉
   async function walk(dir) {
     let entries;
     try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
@@ -58,14 +60,15 @@ async function readMd(root) {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) await walk(full);
       else if (e.isFile() && /\.md$/i.test(e.name)) {
+        const relPath = path.relative(root, full).split(path.sep).join('/');
         try {
-          out.push({ relPath: path.relative(root, full).split(path.sep).join('/'), body: await fsp.readFile(full, 'utf8') });
-        } catch {}
+          out.push({ relPath, body: await fsp.readFile(full, 'utf8') });
+        } catch { unreadable.push(relPath); }
       }
     }
   }
   await walk(root);
-  return out;
+  return { files: out, unreadable };
 }
 
 ipcMain.handle('vault:choose-dir', async () => {
@@ -74,7 +77,7 @@ ipcMain.handle('vault:choose-dir', async () => {
 });
 
 ipcMain.handle('vault:read', async (_e, root) => {
-  try { return { ok: true, files: await readMd(root) }; }
+  try { return { ok: true, ...await readMd(root) }; }
   catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
@@ -107,6 +110,22 @@ ipcMain.handle('vault:export', async (_e, { root, files }) => {
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
+// .trash 超期清理：回收站里超过 30 天的文件自动删除，防止只增不减。失败静默（下次触发再清）。
+const TRASH_TTL = 30 * 24 * 60 * 60 * 1000;
+async function pruneTrash(root) {
+  const trashDir = path.join(root, '.trash');
+  let entries;
+  try { entries = await fsp.readdir(trashDir, { withFileTypes: true }); } catch { return; }
+  const now = Date.now();
+  for (const e of entries) {
+    const p = path.join(trashDir, e.name);
+    try {
+      const st = await fsp.stat(p);
+      if (now - (st.mtimeMs || st.ctimeMs) > TRASH_TTL) await fsp.rm(p, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
 ipcMain.handle('vault:trash', async (_e, { root, rel }) => {
   try {
     const full = path.join(root, rel);
@@ -120,8 +139,53 @@ ipcMain.handle('vault:trash', async (_e, { root, rel }) => {
       throw err;
     });
     await pruneUp(root, path.dirname(full)).catch(() => {}); // 文件移走后目录空了就删掉，不在库里留空文件夹
+    pruneTrash(root).catch(() => {}); // 顺手清掉超期的回收站文件
     return { ok: true };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
+
+// 退出前同步落盘：beforeunload 里异步 invoke 不可靠（页面可能先卸载、回调永远不来），
+// 渲染层用 sendSync 调这里，主进程用同步 fs 一次写完才放行关闭。
+// 与 vault:write / vault:trash 同一套越界与拒绝空写规则；队列结构见渲染层 fileStore.js。
+ipcMain.on('vault:flush-sync', (e, ops) => {
+  const failed = [];
+  for (const op of (Array.isArray(ops) ? ops : [])) {
+    const rel = String(op?.rel || '');
+    try {
+      const full = path.join(op?.root || '', rel);
+      if (!op?.root || !rel || !inside(op.root, full)) { failed.push(rel); continue; }
+      if (op.trash) {
+        const trashDir = path.join(op.root, '.trash');
+        fs.mkdirSync(trashDir, { recursive: true });
+        const dest = path.join(trashDir, Date.now() + '-' + Math.random().toString(36).slice(2, 6) + '-' + path.basename(full));
+        try { fs.renameSync(full, dest); } catch (err) { if (err?.code !== 'ENOENT') throw err; }
+        pruneUp(op.root, path.dirname(full)).catch(() => {});
+      } else {
+        const blocked = rejectIncomplete(full, op.body);
+        if (blocked) { failed.push(rel); continue; }
+        fs.mkdirSync(path.dirname(full), { recursive: true });
+        const tmp = path.join(path.dirname(full), '.' + path.basename(full) + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8));
+        fs.writeFileSync(tmp, String(op.body ?? ''), 'utf8');
+        fs.renameSync(tmp, full);
+      }
+    } catch { failed.push(rel); }
+  }
+  e.returnValue = { ok: failed.length === 0, failed };
+});
+
+// API Key 本机加密存储（safeStorage：macOS Keychain / Windows DPAPI / Linux libsecret）。
+// 明文只在 IPC 里走一趟，localStorage 落盘的是 base64 密文；加密不可用时返回 ok:false，渲染层自行回退。
+ipcMain.handle('key-encrypt', (_e, plain) => {
+  try {
+    if (!plain || !safeStorage?.isEncryptionAvailable()) return { ok: false };
+    return { ok: true, data: safeStorage.encryptString(String(plain)).toString('base64') };
+  } catch { return { ok: false }; }
+});
+ipcMain.handle('key-decrypt', (_e, b64) => {
+  try {
+    if (!b64 || !safeStorage?.isEncryptionAvailable()) return { ok: false };
+    return { ok: true, data: safeStorage.decryptString(Buffer.from(String(b64), 'base64')) };
+  } catch { return { ok: false }; }
 });
 
 // 在原知识库旁新建「<原名> - Deep Notes」副本目录，原库内容不动；重名自动加序号。
@@ -134,7 +198,7 @@ async function copyAssets(src, dest) {
   for (const e of entries) {
     if (e.name.startsWith('.') || SKIP.has(e.name)) continue;
     const s = path.join(src, e.name), d = path.join(dest, e.name);
-    if (e.isDirectory()) await copyAssets(s, d);
+    if (e.isDirectory()) { await fsp.mkdir(d, { recursive: true }); await copyAssets(s, d); }
     else if (e.isFile() && ASSET_RE.test(e.name)) await fsp.copyFile(s, d).catch(() => {});
   }
 }

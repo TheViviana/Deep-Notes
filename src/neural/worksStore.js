@@ -18,6 +18,7 @@ export function parseTags(v) {
 }
 
 // 归一化：补齐字段默认值，保证 graph 与页面上用到的一定存在。
+// keep（导入时未消费的自定义 frontmatter 键）原样透传：写回知识库时展开，用户手写元数据不丢。
 export function normalizeWork(w = {}) {
   return {
     id: w.id || 'work-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
@@ -29,7 +30,8 @@ export function normalizeWork(w = {}) {
     body: String(w.body || ''),
     media: w.media || null,
     cover: w.cover || null,
-    ...Object.fromEntries(METRIC_KEYS.map(k => [k, w[k] ?? (k === 'views' ? 0 : null)]))
+    ...Object.fromEntries(METRIC_KEYS.map(k => [k, w[k] ?? (k === 'views' ? 0 : null)])),
+    ...(w.keep && Object.keys(w.keep).length ? {keep: w.keep} : {})
   };
 }
 
@@ -50,14 +52,25 @@ export function loadWorks() {
 }
 
 // 文章列表状态：localStorage 持久化（写入防抖 300ms：大库 + 粘贴图后全量序列化很重，逐键同步写会卡顿）。
+// 防抖窗口内的待写数据登记进 pendingWorks，退出前同步补写；写失败 console 留痕不再静默。
+let pendingWorks = null;
 export function useWorks() {
   const [works, setWorks] = useState(loadWorks);
   useEffect(() => {
-    const t = setTimeout(() => { try { localStorage.setItem(WORKS_KEY, JSON.stringify({seeded: true, items: works})); } catch {} }, 300);
+    pendingWorks = works;
+    const t = setTimeout(() => {
+      pendingWorks = null;
+      try { localStorage.setItem(WORKS_KEY, JSON.stringify({seeded: true, items: works})); }
+      catch (err) { console.warn('localStorage 写入失败 · Save failed:', err); }
+    }, 300);
     return () => clearTimeout(t);
   }, [works]);
   return [works, setWorks];
 }
+if (typeof window !== 'undefined') window.addEventListener('beforeunload', () => {
+  if (pendingWorks == null) return;
+  try { localStorage.setItem(WORKS_KEY, JSON.stringify({seeded: true, items: pendingWorks})); } catch {}
+});
 
 // 「本月」以最新一篇文章所在月份为准。
 export const monthWorks = ws => {
