@@ -108,7 +108,55 @@ test('阅读区分类往返：folder 落盘进 frontmatter，再导入不丢分�
   assert.equal(rd.folder, '技术长文'); // 再导入 / 自动同步后分类还在
   assert.equal(rd.title, '阅读一');
   assert.equal(rd.body, '阅读正文');
+  assert.equal(rd.id, 'reading-1'); // deepnotes-id 随 frontmatter 往返
   // 没有分类的阅读不受影响：folder 为空字符串，落盘时不写 folder 行
   const plain = serialize('readings', {id: 'reading-2', title: '无分类', folder: '', date: '2026-02-11', body: 'x'});
   assert.ok(!plain.includes('folder:'));
+});
+
+test('稳定 id：deepnotes-id 往返，文件顺序变化 / 新增文件后已有 id 不变（防交叉误删回归）', async () => {
+  const a = serialize('notes', {id: 'n4', title: '甲笔记', path: '05-方法库 methods/甲笔记.md', body: '内容甲'});
+  const b = serialize('notes', {id: 'n9', title: '乙笔记', path: '05-方法库 methods/乙笔记.md', body: '内容乙'});
+  const r1 = await parseVault([
+    f('vault/05-方法库 methods/甲笔记.md', a),
+    f('vault/05-方法库 methods/乙笔记.md', b),
+  ]);
+  assert.deepEqual(r1.notes.map(x => x.id), ['n4', 'n9']);
+  assert.ok(!r1.notes[0].keep); // deepnotes-id 是通用键，不算自定义 frontmatter
+
+  // 顺序颠倒 + 新增一个无 id 文件：已有 id 一动不动，新文件补号跳过被占用的 n4 / n9
+  const r2 = await parseVault([
+    f('vault/05-方法库 methods/乙笔记.md', b),
+    f('vault/05-方法库 methods/甲笔记.md', a),
+    f('vault/05-方法库 methods/丙笔记.md', '---\ntitle: 丙笔记\n---\n内容丙'),
+  ]);
+  const byTitle = Object.fromEntries(r2.notes.map(x => [x.title, x.id]));
+  assert.equal(byTitle['甲笔记'], 'n4');
+  assert.equal(byTitle['乙笔记'], 'n9');
+  assert.equal(byTitle['丙笔记'], 'n1');
+});
+
+test('稳定 id：重复 deepnotes-id 只承认第一个，后来者与无 id 文件按序补号', async () => {
+  const r = await parseVault([
+    f('vault/05-方法库 methods/甲.md', '---\ntitle: 甲\ndeepnotes-id: n1\n---\n内容'),
+    f('vault/05-方法库 methods/乙.md', '---\ntitle: 乙\ndeepnotes-id: n1\n---\n内容'),
+    f('vault/05-方法库 methods/丙.md', '---\ntitle: 丙\n---\n内容'),
+  ]);
+  const ids = r.notes.map(x => x.id);
+  assert.equal(new Set(ids).size, 3);
+  assert.equal(ids[0], 'n1');
+  assert.notEqual(ids[1], 'n1');
+});
+
+test('稳定 id：作品 / 草稿 / 阅读 / 档案同样按 deepnotes-id 往返', async () => {
+  const r = await parseVault([
+    f('vault/01-作品库 works/文章.md', serialize('works', {id: 'w2', title: '文章', date: '2026-03-01', body: 'x', tags: []})),
+    f('vault/03-创作台 drafts/草稿.md', serialize('drafts', {id: 'draft-5', title: '草稿', body: 'x'})),
+    f('vault/06-阅读区 readings/阅读.md', serialize('readings', {id: 'reading-3', title: '阅读', date: '2026-03-02', body: 'x'})),
+    f('vault/07-档案区 archives/档案.md', serialize('archives', {id: 'archive-7', title: '档案', date: '2026-03-03', body: 'x'})),
+  ]);
+  assert.equal(r.works.find(x => x.title === '文章').id, 'w2');
+  assert.equal(r.drafts[0].id, 'draft-5');
+  assert.equal(r.readings[0].id, 'reading-3');
+  assert.equal(r.archives[0].id, 'archive-7');
 });

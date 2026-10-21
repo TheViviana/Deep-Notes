@@ -138,8 +138,30 @@ for (const file of files) {
   bucket[c.kind].push({file, rel, root: c.root, fm, body, title});
 }
 
+// —— 稳定 id：优先用 frontmatter 的 deepnotes-id（与软件内导入同一套规则）；
+// 没有的文件按下标补号且跳过已占用号——否则两次导入的「n4」指向不同文件，再导入时按 id 配对
+// 会把对方路径的文件误移进 .trash。 ——
+const ID_OK = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+function settleIds(items, prefix) {
+  const used = new Set();
+  for (const it of items) {
+    const stable = String(pick(it.fm || {}, ['deepnotes-id']) || '');
+    if (ID_OK.test(stable) && !used.has(stable)) { it.id = stable; used.add(stable); }
+  }
+  let i = 0;
+  for (const it of items) {
+    if (it.id) continue;
+    let cand;
+    do { cand = prefix + (++i); } while (used.has(cand));
+    it.id = cand;
+    used.add(cand);
+  }
+  for (const it of items) delete it.fm;
+  return items;
+}
+
 // —— 生成数据 ——
-const works = bucket.works.map(x => {
+const worksRaw = bucket.works.map(x => {
   const media = /视频|video/i.test(String(pick(x.fm, ['media', '类型', 'type', '形式']) || '')) ? 'video' : 'images';
   const p = {
     title: x.title, date: dateOf(pick(x.fm, ['date', '发布时间', '发布日期', 'published', 'publishedAt', 'created', '创建时间']), x.file),
@@ -153,15 +175,18 @@ const works = bucket.works.map(x => {
     ctr: num(pick(x.fm, ['ctr', '点击率', '封面点击率'])),
     duration: num(pick(x.fm, ['duration', '平均观看', '平均观看时长', '时长']))
   };
-  return {post: p, content: {title: x.title, body: clean(x.body), tags: tagsOf(x.fm, x.body), media}};
-}).sort((a, b) => b.post.date.localeCompare(a.post.date)).slice(0, maxWorks)
-  .map((w, i) => ({...w, post: {id: 'w' + (i + 1), ...w.post}}));
+  return {fm: x.fm, post: p, content: {title: x.title, body: clean(x.body), tags: tagsOf(x.fm, x.body), media}};
+}).sort((a, b) => b.post.date.localeCompare(a.post.date));
+settleIds(worksRaw, 'w');
+const works = worksRaw.slice(0, maxWorks)
+  .map(w => ({...w, post: {id: w.id, ...w.post}}));
 
-const notes = bucket.methods.slice(0, maxNotes).map((x, i) => {
+const notes = bucket.methods.slice(0, maxNotes).map(x => {
   const parts = x.rel.split(sep);
   const sub = parts[x.root] && x.root < parts.length - 1 ? parts[x.root] : (parts[x.root - 1] || '笔记');
-  return {id: 'n' + (i + 1), title: x.title, path: `05-方法库 methods/${sub}/${parts[parts.length - 1]}`, body: clean(x.body), tags: tagsOf(x.fm, x.body)};
+  return {fm: x.fm, title: x.title, path: `05-方法库 methods/${sub}/${parts[parts.length - 1]}`, body: clean(x.body), tags: tagsOf(x.fm, x.body)};
 });
+settleIds(notes, 'n');
 
 const ideas = bucket.ideas.map((x, i) => {
   const status = String(pick(x.fm, ['status', '状态']) || '待写');
@@ -169,28 +194,33 @@ const ideas = bucket.ideas.map((x, i) => {
     status: ['待写', '待扩展', '已转草稿'].includes(status) ? status : '待写', note: String(pick(x.fm, ['note', '备注', 'description', '简介']) || clean(x.body).replace(/^#.*\n/, '').trim().slice(0, 120))};
 });
 
-const drafts = bucket.drafts.map((x, i) => {
+const drafts = bucket.drafts.map(x => {
   const src = String(pick(x.fm, ['source', '来源选题', '选题']) || '');
   const idea = ideas.find(d => d.title === src);
-  return {id: 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null};
+  return {fm: x.fm, title: x.title, body: clean(x.body), source: idea ? idea.id : null};
 });
+settleIds(drafts, 'draft-');
 
 // 阅读区：别人写好的内容（作者 / 来源 / 分类可选，写在 frontmatter 里；folder 是应用内左侧分类）。
-const readings = bucket.readings.map((x, i) => ({
-  id: 'reading-' + (i + 1), title: x.title,
+const readings = bucket.readings.map(x => ({
+  fm: x.fm, title: x.title,
   author: String(pick(x.fm, ['author', '作者', 'by']) || ''),
   source: String(pick(x.fm, ['source', '来源', '出处', 'url', '链接']) || ''),
   folder: String(pick(x.fm, ['folder', '分类', '目录', 'group']) || '').trim(),
   date: dateOf(pick(x.fm, ['date', '收藏日期', '发布日期', 'published']), x.file).slice(0, 10),
   body: clean(x.body)
-})).sort((a, b) => b.date.localeCompare(a.date));
+}));
+settleIds(readings, 'reading-');
+readings.sort((a, b) => b.date.localeCompare(a.date));
 
 // 档案区：创作者自己的个人档案（简介、回顾、清单等），同样参与双链与图谱。
-const archives = bucket.archives.map((x, i) => ({
-  id: 'archive-' + (i + 1), title: x.title,
+const archives = bucket.archives.map(x => ({
+  fm: x.fm, title: x.title,
   date: dateOf(pick(x.fm, ['date', '收档日期', '创建日期', 'published']), x.file).slice(0, 10),
   body: clean(x.body)
-})).sort((a, b) => b.date.localeCompare(a.date));
+}));
+settleIds(archives, 'archive-');
+archives.sort((a, b) => b.date.localeCompare(a.date));
 
 // 概念词：内容里出现的全部话题标签（不设数量上限），出现越多在概念网络里越靠前。
 const count = new Map();

@@ -69,6 +69,29 @@ const dateOf = (v, ms) => {
   const t = d && !isNaN(d) ? d : new Date(ms || Date.now());
   return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())} ${pad(t.getHours())}:${pad(t.getMinutes())}`;
 };
+
+// —— 稳定 id：优先用 frontmatter 的 deepnotes-id（上次写盘留下的），重导入 / 自动同步不再按
+// 下标重新编号——否则两次解析的「n4」会指向不同文件，diff 按 id 配对就把对方路径的文件
+// 误移进 .trash（丢笔记的根因）。没有 deepnotes-id 的（Obsidian 里新加的文件）才按下标补号，
+// 且跳过已占用的号，避免与稳定 id 撞出「同 id 不同文件」。 ——
+const ID_OK = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+function settleIds(items, prefix) {
+  const used = new Set();
+  for (const it of items) {
+    const stable = String(pick(it.fm || {}, ['deepnotes-id']) || '');
+    if (ID_OK.test(stable) && !used.has(stable)) { it.id = stable; used.add(stable); }
+  }
+  let i = 0;
+  for (const it of items) {
+    if (it.id) continue;
+    let cand;
+    do { cand = prefix + (++i); } while (used.has(cand));
+    it.id = cand;
+    used.add(cand);
+  }
+  for (const it of items) delete it.fm;
+  return items;
+}
 function tagsOf(fm, body) {
   const raw = pick(fm, ['tags', 'tag', '标签', '话题']);
   const list = Array.isArray(raw) ? raw : raw ? String(raw).split(/[,，\s]+/) : [];
@@ -142,10 +165,12 @@ export async function parseVault(fileList, target = 'auto') {
   }
   const byDate = (a, b) => b.date.localeCompare(a.date);
 
-  const works = bucket.works.map(x => {
+  // 带 fm 构建 → 排序 → settleIds 定 id → 归一化；顺序保证 id 只依赖 deepnotes-id，不依赖文件顺序
+  const worksRaw = bucket.works.map(x => {
     const media = /视频|video/i.test(String(pick(x.fm, ['media', '类型', 'type', '形式']) || '')) ? 'video' : 'images';
     const date = dateOf(pick(x.fm, ['date', '发布时间', '发布日期', 'published', 'publishedAt', 'created', '创建时间']), x.file.lastModified);
     return {
+      fm: x.fm,
       title: x.title, date,
       direction: String(pick(x.fm, ['direction', '研究方向', '方向']) || '').trim(),
       views: num(pick(x.fm, ['views', '观看', '浏览', '阅读', '播放'])) ?? 0,
@@ -154,16 +179,18 @@ export async function parseVault(fileList, target = 'auto') {
       saves: num(pick(x.fm, ['saves', '收藏'])) ?? 0,
       body: clean(x.body), tags: tagsOf(x.fm, x.body), media, keep: keepOf(x.fm, 'works')
     };
-  }).sort(byDate)
-    .map((w, i) => normalizeWork({id: 'w' + (i + 1), ...w}));
+  }).sort(byDate);
+  settleIds(worksRaw, 'w');
+  const works = worksRaw.map(w => normalizeWork(w));
 
   const noteTags = [];
-  const notes = bucket.methods.map((x, i) => {
+  const notes = bucket.methods.map(x => {
     // 子目录全链保留（05-方法库/A/B/xx.md）：三层以上不再压平，不同子目录里的同名文件也不再互相覆盖
     const sub = x.dirs.length > 1 ? x.dirs.slice(1).join('/') : (x.dirs[0] || '笔记');
     noteTags.push(...tagsOf(x.fm, x.body));
-    return {id: 'n' + (i + 1), title: x.title, path: `05-方法库 methods/${sub}/${x.file.name}`, body: clean(x.body), keep: keepOf(x.fm, 'notes')};
+    return {fm: x.fm, title: x.title, path: `05-方法库 methods/${sub}/${x.file.name}`, body: clean(x.body), keep: keepOf(x.fm, 'notes')};
   });
+  settleIds(notes, 'n');
 
   const ideas = bucket.ideas.map((x, i) => {
     const status = String(pick(x.fm, ['status', '状态']) || '待写');
@@ -171,29 +198,34 @@ export async function parseVault(fileList, target = 'auto') {
       status: ['待写', '待扩展', '已转草稿'].includes(status) ? status : '待写', note: String(pick(x.fm, ['note', '备注', 'description', '简介']) || clean(x.body).replace(/^#.*\n/, '').trim().slice(0, 120)), keep: keepOf(x.fm, 'ideas')};
   });
 
-  const drafts = bucket.drafts.map((x, i) => {
+  const drafts = bucket.drafts.map(x => {
     const src = String(pick(x.fm, ['source', '来源选题', '选题']) || '');
     const idea = ideas.find(d => d.title === src);
-    return {id: 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null, keep: keepOf(x.fm, 'drafts')};
+    return {fm: x.fm, title: x.title, body: clean(x.body), source: idea ? idea.id : null, keep: keepOf(x.fm, 'drafts')};
   });
+  settleIds(drafts, 'draft-');
 
   // 阅读区：别人写好的内容（作者 / 来源 / 分类可选，写在 frontmatter 里）。
   // folder 是应用内的左侧分类：落盘在每篇 .md 的 frontmatter 里，导入 / 自动同步都不会丢。
-  const readings = bucket.readings.map((x, i) => ({
-    id: 'reading-' + (i + 1), title: x.title,
+  const readings = bucket.readings.map(x => ({
+    fm: x.fm, title: x.title,
     author: String(pick(x.fm, ['author', '作者', 'by']) || ''),
     source: String(pick(x.fm, ['source', '来源', '出处', 'url', '链接']) || ''),
     folder: String(pick(x.fm, ['folder', '分类', '目录', 'group']) || '').trim(),
     date: dateOf(pick(x.fm, ['date', '收藏日期', '发布日期', 'published']), x.file.lastModified).slice(0, 10),
     body: clean(x.body), keep: keepOf(x.fm, 'readings')
-  })).sort((a, b) => b.date.localeCompare(a.date));
+  }));
+  settleIds(readings, 'reading-');
+  readings.sort((a, b) => b.date.localeCompare(a.date));
 
   // 档案区：创作者自己的个人档案（简介、回顾、清单等），同样参与双链与图谱。
-  const archives = bucket.archives.map((x, i) => ({
-    id: 'archive-' + (i + 1), title: x.title,
+  const archives = bucket.archives.map(x => ({
+    fm: x.fm, title: x.title,
     date: dateOf(pick(x.fm, ['date', '收档日期', '创建日期', 'published']), x.file.lastModified).slice(0, 10),
     body: clean(x.body), keep: keepOf(x.fm, 'archives')
-  })).sort((a, b) => b.date.localeCompare(a.date));
+  }));
+  settleIds(archives, 'archive-');
+  archives.sort((a, b) => b.date.localeCompare(a.date));
 
   // 概念词：内容里出现的全部话题标签（不设数量上限），出现越多在概念网络里越靠前。
   const count = new Map();
