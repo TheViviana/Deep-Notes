@@ -162,11 +162,13 @@ const TPL_KEY = CONFIG.storagePrefix + '-templates-v1';
 function loadTpls() { try { const v = JSON.parse(localStorage.getItem(TPL_KEY)); return Array.isArray(v) ? v : []; } catch { return []; } }
 let userTpls = loadTpls();
 const tplSubs = new Set();
-const notifyTpls = () => { try { localStorage.setItem(TPL_KEY, JSON.stringify(userTpls)); } catch {} for (const f of tplSubs) f(userTpls); };
+// 写盘成功与否要告诉调用方：失败仍照常通知 UI 就是「看似已保存、重启全丢」的假象。
+// 返回 true = 已写入本机；调用方对离散操作（存模板 / 删除 / 新增）据此给出明确提示。
+const notifyTpls = () => { let ok = false; try { localStorage.setItem(TPL_KEY, JSON.stringify(userTpls)); ok = true; } catch (err) { console.warn('模板写入本机失败 · Template save failed:', err); } for (const f of tplSubs) f(userTpls); return ok; };
 export function useUserTemplates() {
   const [list, setList] = useState(userTpls);
   useEffect(() => { const f = v => setList(v); tplSubs.add(f); return () => { tplSubs.delete(f); }; }, []);
-  return [list, next => { userTpls = Array.isArray(next) ? next : []; notifyTpls(); }];
+  return [list, next => { userTpls = Array.isArray(next) ? next : []; return notifyTpls(); }];
 }
 const newTpl = (label, body) => ({id: 'u-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), label, en: 'Custom', body});
 
@@ -631,7 +633,7 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
         <button role="menuitem" className="tpl-save" disabled={!String(value || '').trim()}
           onMouseDown={e => e.preventDefault()}
           title="把编辑器当前正文保存为自定义模板，之后可在这里或「插件管理」里修改"
-          onClick={() => { setUserTpls([...userTpls, newTpl(`自定义模板 ${userTpls.length + 1}`, value)]); setTplOpen(false); }}>
+          onClick={() => { const ok = setUserTpls([...userTpls, newTpl(`自定义模板 ${userTpls.length + 1}`, value)]); if (ok) setTplOpen(false); else window.alert('模板没能保存到本机（存储不可用或已满），本次会话内仍可使用，重启后会丢失 · Template not saved'); }}>
           <b>⊕ 存正文为模板</b><small>Save body as template</small>
         </button>
       </div>}
@@ -683,9 +685,9 @@ export function PluginList() {
         <textarea value={t.body} rows={4} aria-label="模板内容 Template body" placeholder="模板内容，支持 [[双链]] 与变量"
           onChange={e => setTpls(tpls.map(x => x.id === t.id ? {...x, body: e.target.value} : x))}/>
         <button className="icon-btn" aria-label={`删除模板 ${t.label}`} title="删除模板 Delete"
-          onClick={() => setTpls(tpls.filter(x => x.id !== t.id))}><Icon name="trash" size={13}/></button>
+          onClick={() => { if (!setTpls(tpls.filter(x => x.id !== t.id))) window.alert('模板没能从本机删除（存储不可用），重启后会出现 · Template delete failed'); }}><Icon name="trash" size={13}/></button>
       </div>)}
-      <button className="pill ghost" onClick={() => setTpls([...tpls, newTpl(`自定义模板 ${tpls.length + 1}`, '# <%= title %>\n\n')])}>
+      <button className="pill ghost" onClick={() => { if (!setTpls([...tpls, newTpl(`自定义模板 ${tpls.length + 1}`, '# <%= title %>\n\n')])) window.alert('模板没能保存到本机（存储不可用或已满），本次会话内仍可使用 · Template not saved'); }}>
         <Icon name="plus" size={14}/>新建模板 <em>New template</em>
       </button>
     </div>

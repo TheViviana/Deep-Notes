@@ -19,7 +19,7 @@ try {
     format: 'esm',
     platform: 'node',
     jsx: 'transform',
-    define: {'import.meta.env': '{"BASE_URL":"/"}'},
+    define: {'import.meta.env': '{"BASE_URL":"/"}', '__TEST_ROOT__': JSON.stringify(ROOT)},
     // KaTeX 的 CSS 引用 woff/woff2/ttf 字体，node 测试环境不需要真字体
     loader: {'.css': 'empty', '.woff': 'empty', '.woff2': 'empty', '.ttf': 'empty'},
     logLevel: 'warning'

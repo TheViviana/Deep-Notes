@@ -23,12 +23,12 @@ test('posts：字段类型与日期格式（缺失指标写 0 / null）', () => 
   }
 });
 
-test('postContent：与 posts 按标题对应，正文与媒体类型合法', () => {
-  // postContent 是数组，每项带 title，消费侧按标题对齐
-  const cm = new Map((postContent || []).map(c => [c.title, c]));
+test('postContent：与 posts 按 id 对应（无 id 回退 title），正文与媒体类型合法', () => {
+  // postContent 是数组，每项带 id（与 posts 关联，同名作品不串正文）；老数据允许按 title 回退
+  const cm = new Map((postContent || []).map(c => [c.id || c.title, c]));
   assert.ok(cm.size > 0);
   for (const p of posts) {
-    const c = cm.get(p.title);
+    const c = cm.get(p.id) || cm.get(p.title);
     assert.ok(c, `postContent 缺「${p.title}」`);
     assert.equal(typeof c.body, 'string');
     assert.ok(['images', 'video'].includes(c.media), `「${p.title}」media 应为 images / video`);

@@ -35,11 +35,12 @@ export function normalizeWork(w = {}) {
   };
 }
 
-// 种子数据：示例 posts 与 postContent 按 title 合并成完整文章记录。
+// 种子数据：示例 posts 与 postContent 按 id 合并成完整文章记录（id 优先，老数据回退按 title 对齐——
+// 仅按 title 会让两篇同名作品共享第一篇的正文，一条内容丢失）。
 export function seedWorks() {
   return (samplePosts || []).map(p => {
-    const c = (postContent || []).find(x => x.title === p.title) || {};
-    return normalizeWork({...p, body: c.body || '', tags: c.tags || [], media: c.media || null, cover: c.cover || null});
+    const c = (postContent || []).find(x => (p.id && x.id === p.id) || (!p.id && x.title === p.title)) || {};
+    return normalizeWork({...p, body: c.body || '', tags: c.tags || [], media: c.media || null, cover: c.cover || null, keep: c.keep});
   });
 }
 

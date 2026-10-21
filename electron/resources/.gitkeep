@@ -1,0 +1,2 @@
+# electron-builder 的 buildResources 目录（electron-builder.json directories.buildResources）。
+# 放应用图标 icon.icns / icon.ico 等打包资源；空目录也要存在，否则打包时走默认资源并报警告。

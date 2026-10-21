@@ -56,7 +56,8 @@ function check(m, label) {
     if (!m.postContent.some(c => c.title === p.title)) errs.push(`postContent 里找不到作品：${p.title}`);
   }
   if (new Set(m.posts.map(p => p.id)).size !== m.posts.length) errs.push('作品 id 有重复');
-  for (const n of m.notes) if (!/^05-方法库 methods\/[^/]+\/.+/.test(n.path || '')) errs.push(`笔记 path 格式不对：${n.title}`);
+  // path 收紧：必须是「05-方法库 methods/<子目录…>/<非空文件名>.md」，至少一级子目录、以 .md 结尾
+  for (const n of m.notes) if (!/^05-方法库 methods\/[^/]+(\/[^/]+)+\.md$/.test(n.path || '')) errs.push(`笔记 path 格式不对：${n.title}`);
   for (const i of m.seedIdeas) if (typeof i.id !== 'number' || !['待写', '待扩展', '已转草稿'].includes(i.status)) errs.push(`选题 id 须为数字、status 须为 待写/待扩展/已转草稿：${i.title}`);
   for (const d of m.seedDrafts) if (d.source != null && !m.seedIdeas.some(i => i.id === d.source)) errs.push(`草稿的来源选题不存在：${d.title}`);
   for (const c of m.concepts) if (!Array.isArray(c) || typeof c[0] !== 'string' || !Array.isArray(c[1])) errs.push('concepts 格式应为 [概念名, [关键词…]]');

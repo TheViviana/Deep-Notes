@@ -14,7 +14,7 @@ const f = (path, text, lastModified = 0) => ({
 
 const files = [
   f('vault/01-作品库 works/甲.md',
-    '---\ntitle: 甲\n观看: 1.2万\nlikes: 100\ndate: 2026-01-02\n类型: 视频\ntags: [t1, t2]\n---\n正文甲'),
+    '---\ntitle: 甲\n观看: 1.2万\nlikes: 100\n涨粉: 12\n分享: 30\n曝光: 5.1万\nctr: 0.062\nduration: 75\ndate: 2026-01-02\n类型: 视频\ntags: [t1, t2]\n---\n正文甲'),
   f('vault/01-作品库 works/乙.md',
     '---\ntitle: 乙\ndate: 2026-01-01\ntags: [t1]\n---\n正文乙 #t3'),
   f('vault/05-方法库 methods/写作/方法一.md',
@@ -51,6 +51,13 @@ test('frontmatter 中英文字段与数值简写：1.2万 → 12000，类型视�
   assert.equal(w.views, 12000);
   assert.equal(w.likes, 100);
   assert.equal(w.media, 'video');
+  // 指标字段与 CLI 同一套别名：涨粉 / 分享 / 曝光 / ctr / 时长都要读出来（缺侧分析面板丢数据）
+  assert.equal(w.follows, 12);
+  assert.equal(w.shares, 30);
+  assert.equal(w.impressions, 51000);
+  assert.equal(w.ctr, 0.062);
+  assert.equal(w.duration, 75);
+  assert.ok(!w.keep, '已消费的指标键不应进 keep（否则写回 frontmatter 出现重复行）');
   assert.ok(w.date.startsWith('2026-01-02'));
   assert.ok(w.tags.includes('t1') && w.tags.includes('t2'));
 });

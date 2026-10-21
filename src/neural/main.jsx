@@ -523,13 +523,16 @@ function App() {
     setReadings(rs => rs.map(r => r.id === id ? {...r, ...patch, updatedAt: nowStamp()} : r));
   }
   // —— 本地文件导入阅读区：PDF / HTML / Markdown / TXT 已由 docImport.js 离线解析成条目 ——
-  function importReadingItems(items, failed = 0) {
-    if (!items.length) { setToast(`导入失败 ${failed} 个文件 · Import failed`); return; }
+  function importReadingItems(items, failed = []) {
+    // failed 兼容两种形态：旧的失败个数（number）与新的失败原因列表（string[]，含文件名与报错）
+    const errs = Array.isArray(failed) ? failed : [];
+    const n = errs.length || (Number(failed) || 0);
+    if (!items.length) { setToast(errs.length ? `导入失败：${errs[0]}` : '导入失败 · Import failed'); return; }
     const made = items.map((it, i) => ({id: 'reading-' + Date.now() + '-' + i, title: it.title || '未命名阅读', author: '', source: it.source || '本地文件', date: dayOf(Date.now()), body: it.body || ''}));
     setReadings(rs => [...made, ...rs]);
     setReadSel(made[0].id);
     setPage('readings');
-    setToast(`已导入 ${made.length} 个文件到阅读区${failed ? `，${failed} 个失败` : ''} · Imported`);
+    setToast(`已导入 ${made.length} 个文件到阅读区${n ? `，${n} 个失败${errs[0] ? `：${errs[0]}` : ''}` : ''} · Imported`);
   }
   function deleteReading(id) {
     const r = readings.find(x => x.id === id);
@@ -808,11 +811,19 @@ function App() {
     } catch {} // 快照太大超出 localStorage 配额时静默放弃，不影响主流程
   };
   function adoptData(data, msg, keepFolders = false) {
+    // 概念词表合并而非覆盖：应用内改过的关键词与手动增删的概念（current）优先，
+    // 词表里没有的（导入 / 同步带回的新词）补进来。直接覆盖会抹掉用户在概念内页的全部修改。
+    // 代价（v1 接受）：应用内删除 / 改名的概念会在下次同步时被词表带回。
+    const mergeConcepts = (incoming, current) => {
+      const map = new Map((Array.isArray(current) ? current : []).map(([n, t]) => [n, t]));
+      for (const [n, t] of (Array.isArray(incoming) ? incoming : [])) if (!map.has(n)) map.set(n, t);
+      return [...map];
+    };
     saveSnapshot();
     setWorks(data.works); setNotes(data.notes ?? SEED_NOTES); setIdeas(data.ideas); setDrafts(data.drafts);
     setReadings(data.readings ?? seedReadings);
     setArchives(data.archives ?? seedArchives);
-    setSnap(data.snapshot); setKbConcepts(data.concepts);
+    setSnap(data.snapshot); setKbConcepts(mergeConcepts(data.concepts, kbConcepts));
     // keepFolders：自动同步 / 恢复快照不是「换库」，应用内手动建的空分类原样保留；
     // 全量导入 / 切回示例才是彻底替换，手动空分类随内容一起清掉
     if (!keepFolders) { setFolders([]); setReadFolders([]); }
@@ -1035,7 +1046,9 @@ function App() {
         eq(drafts, data.drafts || [], ['id', 'title', 'body', 'source']) &&
         eq(readings, data.readings || [], ['id', 'title', 'author', 'source', 'folder', 'date', 'body']) &&
         eq(archives, data.archives || [], ['id', 'title', 'date', 'body']) &&
-        JSON.stringify(kbConcepts) === JSON.stringify(data.concepts || []) &&
+        // 概念按名字判等：关键词 / 顺序差异不算库变更（概念由笔记推导且应用内可编辑，不落盘，
+        // 若按整词表比较，每次启动都会判「有变化」触发一次全库重写）
+        (data.concepts || []).every(([n]) => kbConcepts.some(([k]) => k === n)) &&
         !freshIdeas.length;
       if (same) return; // 文件夹没有变化就不打扰
       const next = {works: data.works, notes: data.notes ?? SEED_NOTES, ideas: [...ideas, ...freshIdeas], drafts: data.drafts, readings: data.readings ?? seedReadings, archives: data.archives ?? seedArchives, snapshot: data.snapshot, concepts: data.concepts};

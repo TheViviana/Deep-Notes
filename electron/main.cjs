@@ -2,6 +2,7 @@ const { app, BrowserWindow, shell, ipcMain, net, dialog, safeStorage } = require
 const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
+const dns = require('dns');
 
 // —— 文件夹知识库（桌面版）：渲染层经 preload 暴露的 window.deepnotes.vault 调用 ——
 // 所有写操作都限制在所选根目录（root）内，路径越界一律拒绝。
@@ -38,7 +39,15 @@ const SKIP = new Set(['.obsidian', '.trash', '.git', '.DS_Store', 'node_modules'
 // 临时文件以 . 开头：readMd 与 vault:asset 都会跳过，永远不会被当成笔记读出来。
 async function atomicWrite(full, body) {
   const tmp = path.join(path.dirname(full), '.' + path.basename(full) + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8));
-  await fsp.writeFile(tmp, body, 'utf8');
+  // open + sync + close：数据落盘后才 rename（断电也不会出现「rename 完成但内容还在页缓存」的空文件）；
+  // close 放 finally——写失败也不能漏关句柄，fd 泄漏积多了进程再也打不开文件
+  const fh = await fsp.open(tmp, 'w');
+  try {
+    await fh.writeFile(String(body ?? ''), 'utf8');
+    await fh.sync();
+  } finally {
+    await fh.close().catch(() => {});
+  }
   try { await fsp.rename(tmp, full); }
   catch (err) { await fsp.unlink(tmp).catch(() => {}); throw err; }
 }
@@ -78,7 +87,21 @@ async function readMd(root) {
     let entries;
     try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
-      if (e.name.startsWith('.') || SKIP.has(e.name)) continue;
+      // iCloud 未下载的文件在盘上是「.原名.icloud」占位（带前导点）：不能当成不存在——
+      // 上层靠 unreadable 区分「读不到」与「已删除」，漏报会把云盘文件当成删除写回、真删掉
+      const cloud = e.name.match(/^\.+(.+)\.icloud$/i);
+      if (cloud && /\.md$/i.test(cloud[1])) {
+        unreadable.push(path.relative(root, path.join(dir, cloud[1])).split(path.sep).join('/'));
+        continue;
+      }
+      if (e.name.startsWith('.') || SKIP.has(e.name)) {
+        // 顺手清掉上次崩溃残留的写入临时文件：正在写的临时文件很新，超过 1 小时的一定是残留
+        if (e.isFile() && /^\..+\.tmp-/.test(e.name)) {
+          const p = path.join(dir, e.name);
+          try { const st = await fsp.stat(p); if (Date.now() - st.mtimeMs > 60 * 60 * 1000) await fsp.rm(p, { force: true }); } catch {}
+        }
+        continue;
+      }
       const full = path.join(dir, e.name);
       if (e.isDirectory()) await walk(full);
       else if (e.isFile() && /\.md$/i.test(e.name)) {
@@ -127,6 +150,15 @@ ipcMain.handle('vault:move', async (_e, { root, from, to }) => {
     const b = path.join(root || '', String(to || ''));
     if (!root || !from || !to || !inside(root, a) || !inside(root, b)) return { ok: false, error: '路径越界' };
     if (isSymlink(a) || isSymlink(b)) return { ok: false, error: '目标是符号链接，拒绝移动' };
+    // rename 会静默覆盖已存在的目标：源还在时，先把「改到已有文件名上」拦下来，否则另一篇内容会被顶掉；
+    // 源已不在（ENOENT）按「已移走」放行——重试时目标自然已在，同样视为成功，不误报失败
+    let srcExists = true;
+    try { srcExists = !!(await fsp.stat(a)); } catch { srcExists = false; }
+    if (srcExists) {
+      let targetExists = false;
+      try { targetExists = !!(await fsp.stat(b)); } catch {}
+      if (targetExists) return { ok: false, error: '目标已存在，拒绝覆盖' };
+    }
     await fsp.mkdir(path.dirname(b), { recursive: true });
     await fsp.rename(a, b).catch(err => { if (err?.code === 'ENOENT') return; throw err; }); // 源本就不存在视为已移走
     await pruneUp(root, path.dirname(a)).catch(() => {}); // 源目录空了就删掉，不留空文件夹
@@ -203,6 +235,15 @@ ipcMain.on('vault:flush-sync', (e, ops) => {
         const a = path.join(op?.root || '', String(op.from || ''));
         const b = path.join(op?.root || '', String(op.to || ''));
         if (!op?.root || !op.from || !op.to || !inside(op.root, a) || !inside(op.root, b) || isSymlink(a) || isSymlink(b)) { failed.push(rel); continue; }
+        // 与 vault:move 相同的目标存在检查（源还在时才拦）：退出前的 rename 也不能静默顶掉已有文件；
+        // 源已不在按「已移走」放行，重试不误报
+        let srcExists = true;
+        try { srcExists = fs.existsSync(a); } catch { srcExists = false; }
+        if (srcExists) {
+          let exists = false;
+          try { exists = fs.existsSync(b); } catch {}
+          if (exists) { failed.push(rel); continue; }
+        }
         fs.mkdirSync(path.dirname(b), { recursive: true });
         try { fs.renameSync(a, b); } catch (err) { if (err?.code !== 'ENOENT') throw err; }
         pruneUp(op.root, path.dirname(a)).catch(() => {});
@@ -222,7 +263,10 @@ ipcMain.on('vault:flush-sync', (e, ops) => {
         if (blocked) { failed.push(rel); continue; }
         fs.mkdirSync(path.dirname(full), { recursive: true });
         const tmp = path.join(path.dirname(full), '.' + path.basename(full) + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8));
-        fs.writeFileSync(tmp, String(op.body ?? ''), 'utf8');
+        // 与 atomicWrite 同一套落盘纪律：fsync 后 rename，句柄 finally 关闭
+        const fd = fs.openSync(tmp, 'w');
+        try { fs.writeSync(fd, String(op.body ?? ''), null, 'utf8'); fs.fsyncSync(fd); }
+        finally { try { fs.closeSync(fd); } catch {} }
         fs.renameSync(tmp, full);
       }
     } catch { failed.push(rel); }
@@ -338,14 +382,39 @@ function aiUrlAllowed(raw) {
   )) return '禁止访问内网 / 保留段地址';
   return null;
 }
+
+// 内网 / 保留段 IP 判断（含 IPv4 映射的 IPv6 地址）。
+function privateIp(ip) {
+  const s = String(ip || '');
+  if (/^::ffff:/i.test(s)) return privateIp(s.slice(7));
+  if (/^(10\.|192\.168\.|169\.254\.|0\.|127\.)/.test(s) || /^172\.(1[6-9]|2\d|3[01])\./.test(s)) return true;
+  return /^(::1$|::|f[cd][0-9a-f]{2}:|fe80:)/i.test(s);
+}
+
+// 域名先解析成 IP 再查内网段：公网域名也可能被解析到内网地址（DNS rebinding 常规手法）。
+// 尽力而为而非根治——解析与真正发请求之间仍有 TOCTOU 窗口；IP 字面量与 loopback 不必再查。
+async function aiHostAllowed(raw) {
+  let host;
+  try { host = new URL(String(raw || '')).hostname.toLowerCase().replace(/^\[|\]$/g, ''); } catch { return null; }
+  if (host === 'localhost' || host === '::1' || /^127\./.test(host)) return null;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(':')) return null; // 已是 IP 字面量，aiUrlAllowed 查过段位
+  const addrs = await dns.promises.lookup(host, { all: true }).catch(() => null);
+  if (!addrs) return null; // 解析失败留给 fetch 自己报错
+  for (const { address } of addrs) if (privateIp(address)) return `域名 ${host} 解析到内网地址，已拦截`;
+  return null;
+}
 ipcMain.handle('ai-fetch', async (_event, { url, headers, body }) => {
   try {
     const blocked = aiUrlAllowed(url);
     if (blocked) return { ok: false, status: 0, error: `请求被拒绝：${blocked}` };
+    const hostBlocked = await aiHostAllowed(url);
+    if (hostBlocked) return { ok: false, status: 0, error: `请求被拒绝：${hostBlocked}` };
     const res = await net.fetch(String(url), {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      // 90 秒超时：服务商挂死 / 断流时请求自动中止，不再永远占着一次对话
+      signal: AbortSignal.timeout(90_000),
       // 不跟随重定向：白名单只校验了初始 URL，跟随 302 可能把请求引到内网（SSRF 绕过）；
       // 正规 AI 接口不会重定向 POST 请求，遇到重定向直接报错即可
       redirect: 'error',
@@ -363,6 +432,7 @@ ipcMain.handle('ai-fetch', async (_event, { url, headers, body }) => {
 });
 
 let mainWindow;
+let ownDir = null; // 生产模式本应用 dist 目录（loadFile 的实际路径推导），will-navigate 据此放行自有导航
 const isDev = !app.isPackaged;
 
 function createWindow() {
@@ -380,9 +450,29 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
+  // 外链白名单：只放行网页与邮件链接交给系统打开，其余自定义协议（file:、smb: 等）一律不交给系统
+  const EXTERNAL_OK = /^(https?:|mailto:)/i;
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (EXTERNAL_OK.test(url)) shell.openExternal(url);
     return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    // 应用是单页应用，页面内容切换全走 React state，不该发生任何页面级导航；
+    // 开发模式只放行 Vite 地址，生产模式只放行本应用 dist 目录内的 file:// URL（重载 / 锚点跳转），
+    // 其余一律拦下，外链转交系统浏览器——避免整窗被导航到任意外部页面或任意本地文件（应用被替换 / 钓鱼）
+    let own = false;
+    try {
+      const u = new URL(url);
+      if (isDev) own = u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1') && u.port === '5173';
+      else if (u.protocol === 'file:' && ownDir) {
+        let p = decodeURIComponent(u.pathname);
+        if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+        own = p === ownDir || p.startsWith(ownDir + path.sep);
+      }
+    } catch { /* URL 解析失败按外处理 */ }
+    if (own) return;
+    e.preventDefault();
+    if (EXTERNAL_OK.test(url)) shell.openExternal(url);
   });
 
   if (isDev) {
@@ -396,6 +486,7 @@ function createWindow() {
     // In production, use app.getAppPath() for correct asar paths
     const appPath = app.getAppPath();
     const indexPath = path.join(appPath, 'dist', 'index.html');
+    ownDir = path.dirname(indexPath); // will-navigate 白名单：只放行本应用 dist 目录内的 file:// 导航
     mainWindow.loadFile(indexPath);
   }
 }

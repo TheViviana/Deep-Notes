@@ -1,16 +1,16 @@
 // 桌面版文件夹知识库：编辑内容实时写回本地 .md 文件（与 Obsidian 相同的存放方式）。
 // 仅在 Electron（window.deepnotes 存在）且已选择库根目录时启用；网页版保持 localStorage 不变。
 // 每次导入都在原库旁新建「<原名> - Deep Notes」副本，原知识库文件夹内容不动。
-import {CONFIG} from '../config';
+import {CONFIG, VAULT_ROOT_KEY, readVaultRoot} from '../config';
 import {clearAssetCache} from './images';
 
-const ROOT_KEY = CONFIG.storagePrefix + '-vault-root-v1';
 const TARGET_KEY = CONFIG.storagePrefix + '-vault-target-v1';
 const api = () => window.deepnotes?.vault || null;
 export const capable = () => !!api();
 
+// 根目录路径存固定键（config.js 的 readVaultRoot 负责旧前缀键的迁移），换品牌不丢连接
 export function getRoot() {
-  try { return localStorage.getItem(ROOT_KEY) || null; } catch { return null; }
+  return readVaultRoot();
 }
 
 // 导入时的归类方式（'auto' 或指定模块）：打开软件自动同步知识库时按同一方式重新解析。
@@ -30,8 +30,8 @@ export function setErrorHandler(fn) { errorHandler = fn; }
 export async function setRoot(dir) {
   await flush();
   try {
-    if (dir) localStorage.setItem(ROOT_KEY, dir);
-    else localStorage.removeItem(ROOT_KEY);
+    if (dir) localStorage.setItem(VAULT_ROOT_KEY, dir);
+    else localStorage.removeItem(VAULT_ROOT_KEY);
   } catch {}
   clearAssetCache(); // 换库后旧图片缓存全部作废
   clearTimeout(timer);
@@ -101,8 +101,13 @@ export function resolveRels(kind, items) {
 }
 
 // 序列化成带 frontmatter 的 Markdown；deepnotes-id 保证再次导入时不产生重复节点。
+// 数组值（keep 里的列表）展开成「- 项」多行而不是压成逗号串——否则往返一次后列表会变形；
+// 空数组直接丢弃。多行展开仍在同一 frontmatter 块内，后续键不受影响。
 function frontmatter(pairs) {
-  return '---\n' + pairs.filter(([, v]) => v != null && v !== '').map(([k, v]) => `${k}: ${String(v).replace(/\n/g, ' ')}`).join('\n') + '\n---\n';
+  const render = ([k, v]) => Array.isArray(v)
+    ? (v.length ? `${k}:\n` + v.map(x => `  - ${String(x).replace(/\n/g, ' ')}`).join('\n') : null)
+    : `${k}: ${String(v).replace(/\n/g, ' ')}`;
+  return '---\n' + pairs.filter(([, v]) => v != null && v !== '').map(render).filter(Boolean).join('\n') + '\n---\n';
 }
 export function serialize(kind, item) {
   // keep：导入时未消费的自定义 frontmatter 键（如「主题」）原样展开在最前——写回不丢用户手写元数据

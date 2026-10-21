@@ -5,11 +5,13 @@
 export function htmlToMarkdown(html) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
   doc.querySelectorAll('script,style,noscript,svg,iframe,nav,footer,form,button,input,select').forEach(n => n.remove());
-  const walk = node => [...node.childNodes].map(ch => {
+  const walk = (node, depth = 0) => [...node.childNodes].map(ch => {
     if (ch.nodeType === 3) return ch.textContent.replace(/\s+/g, ' ');
     if (ch.nodeType !== 1) return '';
+    // 深度上限：恶意构造的超深嵌套 HTML 不再递归展开（防打爆调用栈），该子树退化为纯文本
+    if (depth > 200) return ch.textContent.replace(/\s+/g, ' ');
     const tag = ch.tagName.toLowerCase();
-    const inner = () => walk(ch).join('');
+    const inner = () => walk(ch, depth + 1);
     if (/^h[1-6]$/.test(tag)) return '\n\n' + '#'.repeat(+tag[1]) + ' ' + inner().trim() + '\n\n';
     if (tag === 'p') return '\n\n' + inner().trim() + '\n\n';
     if (tag === 'br') return '\n';
@@ -18,7 +20,7 @@ export function htmlToMarkdown(html) {
     if (tag === 'pre') return '\n\n```\n' + ch.textContent.replace(/\n$/, '') + '\n```\n\n';
     if (tag === 'ul' || tag === 'ol') {
       const items = [...ch.children].filter(li => li.tagName.toLowerCase() === 'li');
-      return '\n\n' + items.map((li, i) => (tag === 'ol' ? `${i + 1}. ` : '- ') + walk(li).join('').trim().replace(/\n+/g, ' ')).join('\n') + '\n\n';
+      return '\n\n' + items.map((li, i) => (tag === 'ol' ? `${i + 1}. ` : '- ') + walk(li, depth + 1).join('').trim().replace(/\n+/g, ' ')).join('\n') + '\n\n';
     }
     if (tag === 'img') { const alt = ch.getAttribute('alt') || '图片'; const src = ch.getAttribute('src') || ''; return src ? `![${alt}](${src})` : `（图片：${alt}）`; }
     if (tag === 'a') { const href = ch.getAttribute('href') || ''; const t = inner().trim(); return href && !href.startsWith('#') ? `[${t}](${href})` : t; }

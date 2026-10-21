@@ -38,6 +38,8 @@ const providerOf = cfg => AI_PROVIDERS.find(x => x.id === cfg.provider) || AI_PR
 const AI_KEY = CONFIG.storagePrefix + '-ai-v1';
 const ENC_PREFIX = 'enc:'; // 桌面版 safeStorage 密文（base64）前缀；无前缀为旧版明文，读取时自动升级
 const canSecure = () => !!(window.electronAPI?.keyEncrypt && window.electronAPI?.keyDecrypt);
+let encSeq = 0; // 密钥连续编辑时防止乱序的旧密文覆盖新密文
+let secureWarn = false; // safeStorage 加密失败：密钥本轮只留在内存、没有落盘，配置面板据此提示
 function persistAi(state) {
   // 桌面版：密钥经主进程 safeStorage 加密后落盘（enc: 前缀 + base64），localStorage 不存明文。
   // 加密是异步的：先落一份去掉密钥的配置占位，密文写好后整体覆盖；失败则保持无密钥，明文绝不入库
@@ -46,15 +48,20 @@ function persistAi(state) {
     try { localStorage.setItem(AI_KEY, JSON.stringify(bare)); } catch (err) { console.warn('localStorage 写入失败 · Save failed:', err); }
     const seq = ++encSeq;
     window.electronAPI.keyEncrypt(state.apiKey).then(res => {
-      if (!res?.ok || seq !== encSeq) return;
+      if (!res?.ok || seq !== encSeq) {
+        // 加密失败（系统安全存储不可用等）：明文绝不落盘是底线；面板给出提示，
+        // 用户至少知道为什么重启后密钥没了
+        if (res && !res.ok && seq === encSeq && !secureWarn) { secureWarn = true; for (const f of aiSubs) f(aiState); }
+        return;
+      }
+      secureWarn = false;
       try { localStorage.setItem(AI_KEY, JSON.stringify({...state, apiKey: ENC_PREFIX + res.data})); } catch {}
-    }).catch(() => {});
+    }).catch(() => { if (seq === encSeq && !secureWarn) { secureWarn = true; for (const f of aiSubs) f(aiState); } });
     return;
   }
   try { localStorage.setItem(AI_KEY, JSON.stringify(state)); }
   catch (err) { console.warn('localStorage 写入失败 · Save failed:', err); }
 }
-let encSeq = 0; // 密钥连续编辑时防止乱序的旧密文覆盖新密文
 function loadAi() {
   let cfg;
   try { cfg = JSON.parse(localStorage.getItem(AI_KEY)) || {}; } catch { cfg = {}; }
@@ -130,7 +137,16 @@ export async function aiChat(messages) {
     if (!res.ok) throw new Error(res.error || res.data?.error?.message || `HTTP ${res.status}`);
     return res.data;
   }
-  const res = await fetch(baseUrl + '/chat/completions', {method: 'POST', headers, body: JSON.stringify(body)});
+  // 网页版直连：与桌面主进程同一套地址规则——https 公网放行，明文 http 仅本机回环（本地 Ollama 场景），
+  // 其余协议拒绝，防止 Base URL 被填成奇怪地址后带着密钥发出去
+  let u;
+  try { u = new URL(baseUrl + '/chat/completions'); } catch { throw new Error('Base URL 无效 · Invalid Base URL'); }
+  const host = u.hostname.toLowerCase();
+  if (u.protocol === 'https:') { /* 任意 https 放行 */ }
+  else if (u.protocol === 'http:' && (host === 'localhost' || host === '::1' || /^127\./.test(host))) { /* 本机回环放行 */ }
+  else if (u.protocol === 'http:') throw new Error('明文 http 仅允许本机地址（localhost / 127.0.0.1 / ::1）· Plain http only for local addresses');
+  else throw new Error('仅允许 http(s) 地址 · Only http(s) URLs are allowed');
+  const res = await fetch(u, {method: 'POST', headers, body: JSON.stringify(body)});
   const data = await res.json().catch(() => null);
   if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
   return data;
@@ -328,6 +344,7 @@ export function AiChip() {
           onChange={e => setCfg({baseUrl: e.target.value})}/></div>}
       <p className="ai-note" role="status">
         {!net ? '顶栏联网开关未打开，AI 不会发起任何请求 · Network switch is off'
+          : secureWarn ? '本机安全存储不可用，密钥本次只留在内存、没有保存，重启后需重填 · Secure storage unavailable'
           : p.needKey !== false && !cfg.apiKey ? '还没有填 API Key · API key missing'
           : p.note || 'OpenAI 兼容协议 · OpenAI-compatible API'}
       </p>

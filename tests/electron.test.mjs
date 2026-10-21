@@ -1,0 +1,44 @@
+// 主进程行为守护测试：electron/main.cjs 依赖 electron 运行时无法在 node 里执行，
+// 但这些安全 / 健壮性修复必须钉死——用源码断言防止回归被悄悄删掉（与 verify.mjs 的核心动效检查同一思路）。
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {join} from 'node:path';
+
+// __TEST_ROOT__ 由 scripts/run-tests.mjs 在打包时注入仓库根目录
+// （打包后 import.meta.url 指向临时 bundle，不能用它定位仓库文件）
+const src = readFileSync(join(__TEST_ROOT__, 'electron/main.cjs'), 'utf8');
+
+test('readMd：iCloud 未下载占位（.原名.icloud）计入 unreadable，绝不静默跳过', () => {
+  assert.match(src, /\\\.icloud\$\/i/);
+  assert.match(src, /unreadable\.push/);
+});
+
+test('atomicWrite：fsync 落盘后才 rename，句柄 finally 关闭（含退出同步通道）', () => {
+  assert.match(src, /await fh\.sync\(\)/);
+  assert.match(src, /finally \{\s*await fh\.close\(\)/);
+  assert.match(src, /fs\.fsyncSync\(fd\)/); // vault:flush-sync 的同步版
+});
+
+test('vault:move：目标已存在时拒绝覆盖（rename 不许静默顶掉别的文件），ENOENT 仍放行', () => {
+  assert.match(src, /目标已存在，拒绝覆盖/);
+  assert.match(src, /err\?\.code === 'ENOENT'/);
+  // 幂等：源已移走（重试）时目标已在也视为成功，不再误报「目标已存在」
+  assert.match(src, /srcExists/);
+});
+
+test('readMd：超过 1 小时的写入临时文件顺手清理', () => {
+  assert.match(src, /\\\.tmp-/);
+  assert.match(src, /60 \* 60 \* 1000/);
+});
+
+test('ai-fetch：域名先解析成 IP 查内网段（DNS rebinding），90 秒超时', () => {
+  assert.match(src, /dns\.promises\.lookup/);
+  assert.match(src, /AbortSignal\.timeout\(90_000\)/);
+});
+
+test('窗口：will-navigate 拦截 + openExternal 只放行 http(s)/mailto', () => {
+  assert.match(src, /will-navigate/);
+  assert.match(src, /\^\(https\?:\|mailto:\)/i);
+  assert.match(src, /e\.preventDefault\(\)/);
+});

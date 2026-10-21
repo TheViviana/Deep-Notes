@@ -7,6 +7,9 @@ const path = require('path');
 
 exports.default = async function afterPack(context) {
   if (context.electronPlatformName !== 'darwin') return;
+  // 已配置正式证书（CSC_NAME / CSC_LINK 环境变量或 mac.identity）时 electron-builder 会自己完成
+  // 正式签名：这里直接跳过，避免 ad-hoc 强签把正式签名覆盖掉
+  if (process.env.CSC_NAME || process.env.CSC_LINK || context.packager.config.mac?.identity) return;
   const appPath = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`);
   try {
     execSync(`codesign --force --deep --sign - "${appPath}"`, { stdio: 'inherit' });

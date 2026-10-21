@@ -3,3 +3,6 @@ import './graph.test.mjs';
 import './importer.test.mjs';
 import './markdown.test.mjs';
 import './data.test.mjs';
+import './fileStore.test.mjs';
+import './contract.test.mjs';
+import './electron.test.mjs';

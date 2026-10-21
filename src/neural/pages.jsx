@@ -513,10 +513,10 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
     e.target.value = '';
     if (!files.length || typeof onImportFiles !== 'function') return;
     setImporting(true);
-    const ok = []; let failed = 0;
-    for (const f of files) { try { ok.push(await parseDocFile(f)); } catch { failed++; } }
+    const ok = []; const errors = []; // 失败原因透传给调用方提示，不让用户只看到「失败了」却不知道为什么
+    for (const f of files) { try { ok.push(await parseDocFile(f)); } catch (err) { errors.push(`${f.name}: ${err?.message || err}`); } }
     setImporting(false);
-    onImportFiles(ok, failed);
+    onImportFiles(ok, errors);
   };
   // 分类目录：阅读条目的 folder 字段推导 ∪ 手动新建的空分类（-read-folders-v1）
   const allFolders = useMemo(() => {

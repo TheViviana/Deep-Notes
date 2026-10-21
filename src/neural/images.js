@@ -1,7 +1,7 @@
 // 图片支持：正文里的图一律存 dataURL（离线、自包含，网页版也能用）；
 // 知识库里的引用图（![[名字]] 或相对路径）渲染时经 vault:asset IPC 读原文件（仅桌面版，读取限制在库根目录内）。
 import {useEffect} from 'react';
-import {CONFIG} from '../config';
+import {readVaultRoot} from '../config';
 
 // 文件 → dataURL：小图原样保留；大图 canvas 压缩（最长边 1280，png 保透明，其余 jpeg 0.85）。
 export function fileToDataUrl(file) {
@@ -27,12 +27,27 @@ export function fileToDataUrl(file) {
   }));
 }
 
-const ROOT_KEY = CONFIG.storagePrefix + '-vault-root-v1';
-const readRoot = () => { try { return localStorage.getItem(ROOT_KEY) || null; } catch { return null; } };
+// 库根目录经 config.js 的 readVaultRoot 读取（固定键 + 旧键迁移），与 fileStore 保持同一份
+const readRoot = readVaultRoot;
 
-// dataURL 缓存：同一张库内图（根目录+引用名）只读一次盘
+// dataURL 缓存（LRU，上限约 128MB + 500 条）：同一张库内图（根目录+引用名）只读一次盘。
+// 图片来自用户知识库、无大小保证，无上限的缓存会把内存吃满；Map 按插入序淘汰最旧条目，
+// 命中时重新插入刷新新鲜度。null 是「找不到」的负缓存，同样受条目数上限约束。
+const CACHE_MAX_BYTES = 128 * 1024 * 1024;
+const CACHE_MAX_ITEMS = 500;
 let cache = new Map();
-export const clearAssetCache = () => { cache = new Map(); };
+let cacheBytes = 0;
+function touchCache(key, url) {
+  if (cache.has(key)) { cacheBytes -= cache.get(key)?.length || 0; cache.delete(key); }
+  cache.set(key, url);
+  cacheBytes += url?.length || 0; // base64 dataURL 是 ASCII 串，字符数近似字节数
+  while ((cacheBytes > CACHE_MAX_BYTES || cache.size > CACHE_MAX_ITEMS) && cache.size > 1) {
+    const oldest = cache.keys().next().value;
+    cacheBytes -= cache.get(oldest)?.length || 0;
+    cache.delete(oldest);
+  }
+}
+export const clearAssetCache = () => { cache = new Map(); cacheBytes = 0; };
 
 const isLocalRef = s => !!s && !/^(data:|https?:|blob:|\/|#)/i.test(s);
 
@@ -45,13 +60,13 @@ export function resolveVaultImg(img) {
   img.dataset.vaultDone = '1';
   const root = readRoot();
   const key = (root || '') + '|' + ref;
-  if (cache.has(key)) { const url = cache.get(key); if (url) img.src = url; return Promise.resolve(); }
+  if (cache.has(key)) { const url = cache.get(key); touchCache(key, url); if (url) img.src = url; return Promise.resolve(); }
   return v.asset(root, ref).then(r => {
     if (r?.ok && r.data) {
       const url = `data:${r.mime};base64,${r.data}`;
-      cache.set(key, url);
+      touchCache(key, url);
       img.src = url;
-    } else cache.set(key, null);
+    } else touchCache(key, null);
   }).catch(() => {});
 }
 

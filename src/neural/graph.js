@@ -254,8 +254,11 @@ export function forceLayout(graph) {
   }
   const rest = {contain: 120, wiki: 95, source: 90, tag: 52, mention: 135, resonance: 170};
   const strength = {contain: .05, wiki: .06, source: .08, tag: .09, mention: .018, resonance: .006};
-  for (let it = 0; it < 520; it++) {
-    const alpha = 1 - it / 520;
+  // 斥力循环是 O(迭代 × 节点数²)：固定 520 轮在千节点级知识库会把主线程卡死数秒。
+  // 迭代次数随规模收缩（小图仍 520 轮保精致），alpha 曲线随 ITER 归一，收敛行为不变
+  const ITER = N.length > 800 ? 160 : N.length > 400 ? 260 : 520;
+  for (let it = 0; it < ITER; it++) {
+    const alpha = 1 - it / ITER;
     for (let i = 0; i < N.length; i++) for (let j = i + 1; j < N.length; j++) {
       const A = N[i], B = N[j];
       let dx = B.x - A.x, dy = B.y - A.y, d2 = dx * dx + dy * dy || .01;
