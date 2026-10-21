@@ -40,7 +40,7 @@ export async function setRoot(dir) {
 }
 
 // 各模块内容落盘的默认目录；方法笔记直接使用自身 path（形如 05-方法库 methods/<子目录>/<文件名>.md）。
-const DIRS = {works: '02-作品库', drafts: '03-创作台/正在写', readings: '06-阅读区', archives: '07-档案区'};
+const DIRS = {works: '02-作品库', drafts: '03-创作台/正在写', readings: '06-阅读区', archives: '07-档案区', ideas: '04-选题池'};
 
 // 文件名安全化：路径分隔符换成 ·，去首尾空白，限长 60。
 const safe = t => String(t || '未命名').trim().replace(/[/\\]/g, '·').replace(/\s+/g, ' ').slice(0, 60) || '未命名';
@@ -129,6 +129,11 @@ export function serialize(kind, item) {
     fm = frontmatter([...keep, ['deepnotes-id', item.id], ['title', item.title], ['date', item.date || null], ['updated', item.updatedAt || null]]);
   } else if (kind === 'drafts') {
     fm = frontmatter([...keep, ['deepnotes-id', item.id], ['title', item.title], ['updated', item.updatedAt || null]]);
+  } else if (kind === 'ideas') {
+    // 选题没有正文：平台 / 优先级 / 状态 / 备注全部入 frontmatter（导入端优先读 fm.note，往返无损）
+    fm = frontmatter([...keep, ['deepnotes-id', item.id], ['title', item.title],
+      ['platform', item.platform || null], ['priority', item.priority || null],
+      ['status', item.status || null], ['note', item.note || null]]);
   }
   return fm + '\n' + (item.body || '');
 }
@@ -149,6 +154,46 @@ function enqueue(op) {
   timer = setTimeout(flush, 800);
 }
 
+// —— 挂起写记录：写盘重试仍失败的操作持久留底 ——
+// 连续两次失败（磁盘满 / 权限 / 文件被占用等）意味着这次修改没有落盘；只弹 toast 的话，
+// 下次启动的自动同步会「以文件夹为准」把浏览器状态覆盖掉，用户无感知地丢编辑。
+// 所以最终失败的操作要记进 localStorage：启动时检测到挂起记录就跳过自动同步并提示，
+// 重试成功后清除。记录只在本机，含原文 body（与业务数据同级）。
+const PENDING_KEY = CONFIG.storagePrefix + '-pending-writes-v1';
+let pendingRecorded = false; // 内存标记：避免每次成功 flush 都空写一次 localStorage
+function loadPending() {
+  try { const v = JSON.parse(localStorage.getItem(PENDING_KEY)); return Array.isArray(v) ? v : []; } catch { return []; }
+}
+function savePending(list) {
+  pendingRecorded = !!list.length;
+  try {
+    if (list.length) localStorage.setItem(PENDING_KEY, JSON.stringify(list));
+    else localStorage.removeItem(PENDING_KEY);
+  } catch { /* 记录本身写不进去时无能为力：写盘失败的 toast 仍会提示用户 */ }
+}
+export function hasPendingWrites() {
+  if (pendingRecorded) return true;
+  try { return !!localStorage.getItem(PENDING_KEY); } catch { return false; }
+}
+export function clearPendingWrites() { savePending([]); }
+// 把挂起操作重新排队并立即 flush：成功则记录自动清除，仍失败会再次留底
+export function retryPending() {
+  const list = loadPending();
+  savePending([]);
+  const v = api();
+  if (!v || !list.length) return 0;
+  for (const op of list) queue.set(opKey(op), {...op, _retry: true});
+  flush(); // 异步：结果由挂起记录与 errorHandler 呈现
+  return list.length;
+}
+function recordPending(ops) {
+  const at = new Date().toISOString();
+  // 以「类型 + 路径」去重合并：同一条反复失败只留最新一份（body 取本次的，更新鲜）
+  const map = new Map(loadPending().map(op => [opKey(op), op]));
+  for (const op of ops) map.set(opKey(op), {...op, at});
+  savePending([...map.values()]);
+}
+
 export async function flush() {
   clearTimeout(timer);
   timer = null;
@@ -156,7 +201,7 @@ export async function flush() {
   if (!v || !queue.size) return;
   const ops = [...queue.values()];
   queue.clear();
-  const failed = [];
+  const failedOps = [];
   let requeued = false;
   for (const op of ops) {
     try {
@@ -171,13 +216,19 @@ export async function flush() {
       if (res && res.ok === false) throw new Error(res.error || '写盘失败');
     } catch (err) {
       // 非破坏性增量：瞬时故障（磁盘休眠 / 占用等）不丢操作，稍后自动重试一次；
-      // 重试仍失败才报给用户，内容始终还留在浏览器里
+      // 重试仍失败则持久留底为「挂起写」（启动时跳过同步防覆盖 + 提示重试），
+      // 内容始终还留在浏览器里
       if (!op._retry) { queue.set(opKey(op), {...op, _retry: true}); requeued = true; }
-      else failed.push(op.rel || op.from);
+      else failedOps.push(op);
     }
   }
   if (requeued) { clearTimeout(timer); timer = setTimeout(flush, 2500); }
-  if (failed.length && errorHandler) errorHandler(failed);
+  if (failedOps.length) {
+    recordPending(failedOps);
+    if (errorHandler) errorHandler(failedOps.map(op => op.rel || op.from));
+  } else if (pendingRecorded) {
+    clearPendingWrites(); // 这轮全部写成功：清掉历史挂起记录
+  }
 }
 
 // 退出前的同步落盘：beforeunload 里异步 IPC（flush）可能页面先卸载、操作根本发不出去，
@@ -189,7 +240,19 @@ export function flushSyncNow() {
   timer = null;
   const ops = [...queue.values()].map(op => ({...op, root: op.root || getRoot()}));
   queue.clear();
-  try { v.flushSync(ops); } catch (err) { console.warn('退出落盘失败 · Flush on quit failed:', err); }
+  try {
+    const res = v.flushSync(ops);
+    const bad = Array.isArray(res?.failed) ? res.failed : null;
+    if (bad && bad.length) {
+      // 退出前也没写成：记为挂起写，下次启动跳过同步并提示
+      recordPending(ops.filter(op => bad.includes(op.rel || op.from || '')));
+    } else if (pendingRecorded) {
+      clearPendingWrites(); // 退出前全部写成功：挂起记录清掉
+    }
+  } catch (err) {
+    recordPending(ops); // 同步通道整体异常：宁可全部留底（下次重试成功即可清除）
+    console.warn('退出落盘失败 · Flush on quit failed:', err);
+  }
 }
 
 // 同步一条内容到磁盘。item 为 null 表示删除；old 为变更前的旧记录（路径变了走 move 原子移动）。
@@ -198,7 +261,7 @@ export function flushSyncNow() {
 // 若按新数组算，同名消歧短码会挪给别的条目，删除/重命名时错删同名文件、留下真孤儿。
 export function queueSync(kind, item, old, relMap, oldRelMap) {
   const root = getRoot();
-  if (!root || !api() || kind === 'ideas') return;
+  if (!root || !api()) return;
   const relOf = (x, map) => (map && x && map.get(x.id)) || pathOf(kind, x);
   const newRel = item ? relOf(item, relMap) : null;
   const oldRel = old ? relOf(old, oldRelMap || relMap) : null;

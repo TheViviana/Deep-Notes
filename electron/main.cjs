@@ -354,15 +354,50 @@ ipcMain.handle('vault:asset', async (_e, { root, ref }) => {
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
-try {
-  if (require('electron-squirrel-startup')) app.quit();
-} catch (e) {}
+// —— 知识库文件监听：外部改动（Obsidian / 网盘回捞等）2s 防抖后通知渲染层跑一次同步比对
+// （渲染层比对无变化时静默，应用自己写盘引发的回环只是多一次便宜的全量比对，无害）。
+let vaultWatcher = null, vaultWatchTimer = null;
+function closeVaultWatcher() {
+  if (vaultWatcher) { try { vaultWatcher.close(); } catch {} vaultWatcher = null; }
+  clearTimeout(vaultWatchTimer);
+  vaultWatchTimer = null;
+}
+ipcMain.on('vault:watch', (_e, root) => {
+  closeVaultWatcher();
+  // linux 的 fs.watch 不支持 recursive（监不到子目录），与其给出「看起来能用实则漏报」的监听，
+  // 不如明确不监听：linux 上仍可用顶栏手动导入 / 重启时自动同步兜底
+  if (!root || process.platform === 'linux') return;
+  try {
+    vaultWatcher = fs.watch(root, {recursive: true}, () => {
+      clearTimeout(vaultWatchTimer);
+      vaultWatchTimer = setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('vault:changed');
+      }, 2000);
+    });
+    vaultWatcher.on('error', closeVaultWatcher); // 目录被移走 / 权限变化：静默停用，不反复报错
+  } catch { closeVaultWatcher(); }
+});
+app.on('will-quit', closeVaultWatcher);
+
+// —— 单实例锁：同时开两个窗口会对同一知识库做全量覆盖写、互相覆盖（数据丢失）——
+// 第二实例拿不到锁直接退出；已运行的实例把主窗口拉到前台。
+if (!app.requestSingleInstanceLock()) app.quit();
+app.on('second-instance', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
 
 // AI 助手插件：主进程转发 OpenAI 兼容请求。
 // 部分服务商不允许浏览器直连（CORS），桌面版经主进程 net 转发；调用仍受渲染层「联网开关 + 插件开关」双闸控制。
 // 转发不是代理跳板：只放行 https 公网与 http 本机回环（本地 Ollama 场景），
 // 内网段 / 云 metadata 端点一律拒绝，防止渲染层被注入后借主进程探测内网（SSRF）。
 const MAX_AI_BODY = 10 * 1024 * 1024; // 响应体上限 10MB，防超大响应打爆内存
+// 本机回环端口白名单：回环地址只放行常见本地模型 / 推理服务端口，防止被注入的渲染层
+// 借主进程 POST 打任意本机端口（探测或利用本机其他服务）。与 src/neural/ai.jsx 的 LOCAL_PORTS 保持一致。
+const LOCAL_PORTS = new Set([11434, 11435, 1234, 1337, 3000, 5000, 5001, 7860, 8000, 8080, 8081, 8888]);
 function aiUrlAllowed(raw) {
   let u;
   try { u = new URL(String(raw || '')); } catch { return 'URL 无效'; }
@@ -370,6 +405,10 @@ function aiUrlAllowed(raw) {
   if (u.protocol === 'http:') {
     const loopback = host === 'localhost' || host === '::1' || /^127\./.test(host);
     if (!loopback) return '明文 http 仅允许本机地址（localhost / 127.0.0.1 / ::1）';
+    // 回环地址也限制端口：省略端口（默认 80）同样拒绝——本地推理服务都带显式端口
+    if (!LOCAL_PORTS.has(Number(u.port) || 0)) {
+      return `本机 http 仅允许常见本地服务端口（${[...LOCAL_PORTS].sort((a, b) => a - b).join(' / ')}）`;
+    }
   } else if (u.protocol !== 'https:') {
     return '仅允许 http(s) 地址';
   }

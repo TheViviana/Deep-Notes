@@ -534,10 +534,26 @@ export function LineMirror({text, taRef}) {
   </div>;
 }
 
+// 镜像层逐行渲染缓存：打字只改动光标附近一两行，其余行直接复用上次的 HTML 串，
+// 长文逐键成本从「全篇词法 + 字符串拼接」降到「一两行的词法」。键含源码偏移（上方内容一变，
+// 下方行偏移整体后移、键自然失配，不会串位）；选区相交中的行（至多一两行）不缓存。
+const LM_CACHE = new Map();
+const LM_CACHE_MAX = 12000;
+
 // 镜像层 HTML 生成（纯函数，便于离线校验）：sel = [光标行号, 选区起点, 选区终点]。
 // 隐藏符号不进 DOM（零宽锚点占位，宽度真正回收）；每个可见段带 data-s、行盒带 data-s0/data-ln 供坐标映射。
 export function buildMirrorHtml(text, sel) {
   const [cur, ss, se] = sel || [0, 0, 0];
+  const src = String(text || '');
+  // 超长正文降级：跳过词法（每次按键全篇正则扫描是数千行长文掉帧的根因），
+  // 只保留逐行映射锚点——光标 / 点击 / 拖选仍可用，只是没有语法高亮与行内富显示
+  if (src.length > 200_000) {
+    let off = 0;
+    return src.split('\n').map(l => {
+      const lineStart = off; off += l.length + 1;
+      return `<div class="lm-line" data-s0="${lineStart}" data-ln="${l.length}">${esc(l) || '&#8203;'}</div>`;
+    }).join('');
+  }
   const inRegion = (s, e) => ss <= e && se >= s; // 光标/选区与片段相交（含边缘）→ 片段的语法符号显形
   const T = (raw, at) => raw ? `<span data-s="${at}">${esc(raw)}</span>` : '';
   const Z = at => `<i class="lm-z" data-s="${at}"></i>`; // 隐藏符号处的零宽锚点
@@ -552,9 +568,9 @@ export function buildMirrorHtml(text, sel) {
       const t = m[0], at = base + m.index, end = at + t.length, on = inRegion(at, end);
       if (t.startsWith('![')) { // dataURL 图片：镜像层直接渲染成缩略图（base64 太长，源码模式会毁排版；
         // 整行选中/删除仍可用，光标经零宽锚点落在图片前后）
-        const src = /\((data:[^)\s]+)\)/.exec(t)?.[1] || '';
+        const src2 = /\((data:[^)\s]+)\)/.exec(t)?.[1] || '';
         const alt = /^!\[([^\]\n]*)\]/.exec(t)?.[1] || '';
-        out.push(`<i class="lm-z" data-s="${at}"></i><img class="lm-img" src="${esc(src)}" alt="${esc(alt || '图片')}" data-s="${at}" data-e="${end}"/>`);
+        out.push(`<i class="lm-z" data-s="${at}"></i><img class="lm-img" src="${esc(src2)}" alt="${esc(alt || '图片')}" data-s="${at}" data-e="${end}"/>`);
       } else if (t.startsWith('<span')) { // 彩色文字：首尾标签是语法符号，内容继续 token 化
         const openLen = t.indexOf('>') + 1;
         out.push(mk(t.slice(0, openLen), at, on) + `<span style="color:${m[1]}">`
@@ -580,10 +596,8 @@ export function buildMirrorHtml(text, sel) {
     if (last < s.length) out.push(T(s.slice(last), base + last));
     return out.join('');
   };
-  let fence = false, lang = '', off = 0; // 是否处于 ``` 围栏内（跨行状态）与围栏声明的语言
-  return String(text || '').split('\n').map((l, i) => {
-    const lineStart = off; off += l.length + 1;
-    const lineOn = i === cur; // 行首标记随光标所在行显形
+  // 单行渲染：fence/lang 是「进入该行前」的围栏状态（围栏内整行走阅读式高亮）
+  const renderLine = (l, lineStart, fence, lang, lineOn) => {
     const fenceM = /^\s*```/.exec(l);
     let inner;
     if (fence && !fenceM) {
@@ -598,16 +612,55 @@ export function buildMirrorHtml(text, sel) {
       }
       inner = head + walk(rest, at);
     }
-    if (fenceM) {
-      if (!fence) { fence = true; lang = (l.match(/^\s*```([^\s`]*)/) || ['', ''])[1]; }
+    return inner;
+  };
+  const lines = src.split('\n');
+  // 第一遍只算各行的围栏进入状态（便宜的正则），第二遍按缓存渲染
+  const fenceState = new Array(lines.length);
+  let fence = false, lang = '';
+  for (let i = 0; i < lines.length; i++) {
+    fenceState[i] = {fence, lang};
+    const fm = /^\s*```/.exec(lines[i]);
+    if (fm) {
+      if (!fence) { fence = true; lang = (lines[i].match(/^\s*```([^\s`]*)/) || ['', ''])[1]; }
       else { fence = false; lang = ''; }
     }
-    const hm = !fenceM && !fence ? /^(#{1,6})\s/.exec(l) : null; // 标题分级：镜像层自由排版（不再迁就 textarea 等宽）
+  }
+  const out = [];
+  let off = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i], lineStart = off; off += l.length + 1;
+    const st = fenceState[i];
+    const lineOn = i === cur; // 行首标记随光标所在行显形
+    // 本行结束后的围栏状态（决定本行样式：lm-code / 引用 / 标题分级）
+    let pf = st.fence, pl = st.lang;
+    const fenceM = /^\s*```/.exec(l);
+    if (fenceM) {
+      if (!pf) { pf = true; pl = (l.match(/^\s*```([^\s`]*)/) || ['', ''])[1]; }
+      else { pf = false; pl = ''; }
+    }
+    // 选区与整行的相交态：全外 '0' / 全内 '1' 可缓存，相交中的行每次现算
+    const lineEnd = lineStart + l.length;
+    const inter = (se < lineStart || ss > lineEnd) ? '0' : (ss <= lineStart && se >= lineEnd) ? '1' : '';
+    let inner;
+    if (inter) {
+      const key = `${lineStart}|${st.fence ? 1 : 0}|${st.lang}|${lineOn ? 1 : 0}|${inter}|${l}`;
+      inner = LM_CACHE.get(key);
+      if (inner === undefined) {
+        inner = renderLine(l, lineStart, st.fence, st.lang, lineOn);
+        if (LM_CACHE.size >= LM_CACHE_MAX) LM_CACHE.clear();
+        LM_CACHE.set(key, inner);
+      }
+    } else {
+      inner = renderLine(l, lineStart, st.fence, st.lang, lineOn);
+    }
+    const hm = !fenceM && !pf ? /^(#{1,6})\s/.exec(l) : null; // 标题分级：镜像层自由排版（不再迁就 textarea 等宽）
     const cls = ['lm-line', hm ? `lm-h lm-h${hm[1].length}` : '',
-      !fenceM && !fence && /^\s*>/.test(l) ? 'lm-quote' : '',
-      (fenceM || fence) ? 'lm-code' : ''].filter(Boolean).join(' ');
-    return `<div class="${cls}" data-s0="${lineStart}" data-ln="${l.length}">${inner || '&#8203;'}</div>`;
-  }).join('');
+      !fenceM && !pf && /^\s*>/.test(l) ? 'lm-quote' : '',
+      (fenceM || pf) ? 'lm-code' : ''].filter(Boolean).join(' ');
+    out.push(`<div class="${cls}" data-s0="${lineStart}" data-ln="${l.length}">${inner || '&#8203;'}</div>`);
+  }
+  return out.join('');
 }
 
 export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo, eyebrow = ['ARTICLE', '文章全文'], exportKind = 'works'}) {
@@ -653,16 +706,19 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo, e
     if (!queue.length) { setHint('没有需要翻译的外语段落 · Nothing foreign to translate'); return; }
     setTrans({phase: 'running', done: 0, total: queue.length});
     const out = [];
-    let done = 0;
+    let done = 0, failed = 0;
+    // 两路并发 + 每次请求间隔 120ms：免费翻译接口没有明确配额，打太快只会大面积限流失败
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
     const worker = async () => {
       while (queue.length) {
         const el = queue.shift();
-        try { out.push([el, await translateText(el.textContent)]); } catch { out.push([el, null]); }
+        try { out.push([el, await translateText(el.textContent)]); } catch { out.push([el, null]); failed += 1; }
         done += 1;
         setTrans(t => ({...t, done}));
+        if (queue.length) await sleep(120);
       }
     };
-    await Promise.all([worker(), worker(), worker()]);
+    await Promise.all([worker(), worker()]);
     for (const [el, text] of out) {
       if (!text || !el.isConnected || el.querySelector('.md-trans')) continue;
       const span = document.createElement('span');
@@ -671,6 +727,7 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo, e
       el.appendChild(span);
     }
     setTrans(t => ({...t, phase: 'done'}));
+    if (failed) setHint(`完成，${failed} 段翻译失败（服务不可用或限流），可稍后重试 · ${failed} failed`);
   };
   const restoreTrans = () => {
     previewRef.current?.querySelectorAll('.md-trans').forEach(s => s.remove());

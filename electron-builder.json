@@ -15,6 +15,12 @@
     "type": "commonjs"
   },
   "afterPack": "scripts/adhoc-sign.cjs",
+  "publish": null,
+  "extraResources": [
+    { "from": "LICENSE", "to": "LICENSE" },
+    { "from": "NOTICE.md", "to": "NOTICE.md" },
+    { "from": "node_modules/pdfjs-dist/LICENSE", "to": "licenses/pdfjs-dist-LICENSE.txt" }
+  ],
   "mac": {
     "category": "public.app-category.productivity",
     "target": [

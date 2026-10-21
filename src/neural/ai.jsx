@@ -34,6 +34,10 @@ export const AI_PROVIDERS = [
 ];
 const providerOf = cfg => AI_PROVIDERS.find(x => x.id === cfg.provider) || AI_PROVIDERS[0];
 
+// 本机回环端口白名单：本地模型 / 推理服务的常用端口（Ollama / LM Studio / Jan / OpenWebUI /
+// text-gen-webui / KoboldCpp / Gradio / vLLM / llama.cpp）。与 electron/main.cjs 的 LOCAL_PORTS 保持一致。
+const LOCAL_PORTS = new Set([11434, 11435, 1234, 1337, 3000, 5000, 5001, 7860, 8000, 8080, 8081, 8888]);
+
 // —— 配置单例：模块级 state + 订阅（chip、面板、发送逻辑共享同一份） ——
 const AI_KEY = CONFIG.storagePrefix + '-ai-v1';
 const ENC_PREFIX = 'enc:'; // 桌面版 safeStorage 密文（base64）前缀；无前缀为旧版明文，读取时自动升级
@@ -137,13 +141,18 @@ export async function aiChat(messages) {
     if (!res.ok) throw new Error(res.error || res.data?.error?.message || `HTTP ${res.status}`);
     return res.data;
   }
-  // 网页版直连：与桌面主进程同一套地址规则——https 公网放行，明文 http 仅本机回环（本地 Ollama 场景），
-  // 其余协议拒绝，防止 Base URL 被填成奇怪地址后带着密钥发出去
+  // 网页版直连：与桌面主进程同一套地址规则——https 公网放行，明文 http 仅本机回环且限常见本地
+  // 服务端口（本地 Ollama 场景），其余协议拒绝，防止 Base URL 被填成奇怪地址后带着密钥发出去
   let u;
   try { u = new URL(baseUrl + '/chat/completions'); } catch { throw new Error('Base URL 无效 · Invalid Base URL'); }
   const host = u.hostname.toLowerCase();
   if (u.protocol === 'https:') { /* 任意 https 放行 */ }
-  else if (u.protocol === 'http:' && (host === 'localhost' || host === '::1' || /^127\./.test(host))) { /* 本机回环放行 */ }
+  else if (u.protocol === 'http:' && (host === 'localhost' || host === '::1' || /^127\./.test(host))) {
+    // 回环地址也限制端口：与 electron/main.cjs 的 LOCAL_PORTS 保持一致
+    if (!LOCAL_PORTS.has(Number(u.port) || 0)) {
+      throw new Error(`本机 http 仅允许常见本地服务端口（${[...LOCAL_PORTS].sort((a, b) => a - b).join(' / ')}）· Local port not allowed`);
+    }
+  }
   else if (u.protocol === 'http:') throw new Error('明文 http 仅允许本机地址（localhost / 127.0.0.1 / ::1）· Plain http only for local addresses');
   else throw new Error('仅允许 http(s) 地址 · Only http(s) URLs are allowed');
   const res = await fetch(u, {method: 'POST', headers, body: JSON.stringify(body)});

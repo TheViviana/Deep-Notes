@@ -3,7 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, seedReadings, seedArchives, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
 import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags} from './worksStore';
 import {pickVaultFolder, pickMdFiles, parseVault} from './importer';
-import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId} from './fileStore';
+import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, hasPendingWrites, retryPending, clearPendingWrites} from './fileStore';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
@@ -25,12 +25,13 @@ import './neural.css';
 // 选题、草稿与目标保存在当前浏览器（localStorage）。
 // 写入防抖：打字等高频变更若每次都同步序列化全量数据（大库 + 粘贴图后可达数 MB）会卡顿，
 // 静默 300ms 后再写，UI 保持跟手；窗口关闭前的最后一次输入由 flushPendingSaves 同步补写。
-// 防抖窗口内的待写数据登记进 pendingSaves，写失败不再静默（console 留痕可排查）。
+// 防抖窗口内的待写数据登记进 pendingSaves，写失败不再静默（全局提示条 + console 留痕可排查）。
 const pendingSaves = new Map(); // key -> 防抖窗口内尚未落盘的值
+const STORAGE_ERR = '本地存储写入失败（空间可能已满），近期修改也许没有保存 · localStorage write failed';
 function flushPendingSaves() {
   for (const [key, v] of pendingSaves) {
     try { localStorage.setItem(key, JSON.stringify(v)); }
-    catch (err) { console.warn('localStorage 写入失败 · Save failed:', key, err); }
+    catch (err) { console.warn('localStorage 写入失败 · Save failed:', key, err); showGlobalNotice(STORAGE_ERR); }
   }
   pendingSaves.clear();
 }
@@ -41,11 +42,70 @@ function useSaved(key, fallback) {
     const t = setTimeout(() => {
       pendingSaves.delete(key);
       try { localStorage.setItem(key, JSON.stringify(v)); }
-      catch (err) { console.warn('localStorage 写入失败 · Save failed:', key, err); }
+      catch (err) { console.warn('localStorage 写入失败 · Save failed:', key, err); showGlobalNotice(STORAGE_ERR); }
     }, 300);
     return () => clearTimeout(t);
   }, [key, v]);
   return [v, set];
+}
+
+// —— 全局提示条（非 React，挂在 body 上）：localStorage 写失败 / 未捕获异常等
+// 不该再只进 console——用户必须能看到「东西可能没存上」。同类提示 10s 内只出现一次。 ——
+let noticeEl = null, noticeTimer = null, lastNoticeAt = 0;
+function showGlobalNotice(msg) {
+  const now = Date.now();
+  if (noticeEl?.style.display !== 'none' && now - lastNoticeAt < 10000) return;
+  lastNoticeAt = now;
+  if (!noticeEl) {
+    noticeEl = document.createElement('div');
+    noticeEl.setAttribute('role', 'alert');
+    noticeEl.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:9999;'
+      + 'max-width:min(92vw,640px);padding:10px 14px;border-radius:10px;background:#2b2620;color:#f0e6d2;'
+      + 'border:1px solid #6b5a3e;font:13px/1.5 -apple-system,"PingFang SC",sans-serif;'
+      + 'box-shadow:0 8px 30px rgba(0,0,0,.45);display:flex;gap:10px;align-items:center;';
+    document.body.appendChild(noticeEl);
+  }
+  noticeEl.style.display = 'flex';
+  const text = document.createElement('span');
+  text.textContent = msg;
+  const reload = document.createElement('button');
+  reload.textContent = '重新加载 Reload';
+  reload.style.cssText = 'flex:none;padding:3px 10px;border-radius:7px;border:1px solid #8a7a58;background:transparent;color:#f0e6d2;cursor:pointer;font-size:12px;';
+  reload.onclick = () => location.reload();
+  const close = document.createElement('button');
+  close.textContent = '×';
+  close.setAttribute('aria-label', '关闭提示 Close notice');
+  close.style.cssText = 'flex:none;padding:2px 8px;border:none;background:transparent;color:#bfae8e;cursor:pointer;font-size:15px;';
+  close.onclick = () => { noticeEl.style.display = 'none'; };
+  noticeEl.replaceChildren(text, reload, close);
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { noticeEl.style.display = 'none'; }, 30000);
+}
+window.addEventListener('error', () => showGlobalNotice('页面出现异常，建议重新加载 · Unexpected error, reload recommended'));
+window.addEventListener('unhandledrejection', () => showGlobalNotice('页面出现异常，建议重新加载 · Unexpected error, reload recommended'));
+
+// —— 渲染层兜底：任何组件抛错都不再白屏，给出错误摘要与重载入口（数据都在本机，重载即恢复） ——
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = {error: null}; }
+  static getDerivedStateFromError(error) { return {error}; }
+  componentDidCatch(error) { console.warn('界面异常已兜底 · Render error:', error); }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return <div role="alert" style={{minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center',
+      justifyContent: 'center', gap: 14, background: '#141414', color: '#e8e2d4', textAlign: 'center',
+      fontFamily: '-apple-system, "PingFang SC", sans-serif', padding: 24}}>
+      <h1 style={{fontSize: 20, margin: 0, fontWeight: 600}}>界面出现异常 · Something went wrong</h1>
+      <p style={{maxWidth: 560, margin: 0, opacity: .75, fontSize: 13, lineHeight: 1.7, wordBreak: 'break-all'}}>
+        {String(this.state.error?.message || this.state.error)}
+        <br/>你的数据仍安全保存在本机（浏览器与知识库文件夹），重新加载即可继续使用。
+        <br/><em>Your data stays safe on this machine. Reload to continue.</em>
+      </p>
+      <button onClick={() => location.reload()} style={{padding: '8px 22px', borderRadius: 999,
+        border: '1px solid #6b5a3e', background: 'transparent', color: '#e8b45a', cursor: 'pointer', fontSize: 14}}>
+        重新加载 Reload
+      </button>
+    </div>;
+  }
 }
 // 删除确认的落地说明：桌面版连着知识库时删除会写盘（移入 .trash，30 天后自动清掉），网页版只动浏览器数据
 const deleteScopeNote = () => capable() && getRoot()
@@ -333,12 +393,12 @@ function App() {
   // 不侵入各处 CRUD：每次渲染对比上一份快照，新增/修改 → 写文件，删除 → 移入 .trash。
   const prevContent = useRef(null);
   useEffect(() => {
-    const cur = {works, notes, drafts, readings, archives};
+    const cur = {works, notes, drafts, readings, archives, ideas};
     const prev = prevContent.current;
     prevContent.current = cur;
     if (!capable() || !getRoot()) return;
     if (!prev) return; // 首次渲染只记录快照；导入流程会主动全量写入
-    for (const kind of ['works', 'notes', 'drafts', 'readings', 'archives']) {
+    for (const kind of ['works', 'notes', 'drafts', 'readings', 'archives', 'ideas']) {
       const pv = prev[kind], cv = cur[kind];
       const pmap = new Map(pv.map(x => [x.id, x]));
       const cmap = new Map(cv.map(x => [x.id, x]));
@@ -369,6 +429,24 @@ function App() {
     window.addEventListener('beforeunload', bye);
     return () => window.removeEventListener('beforeunload', bye);
   }, []);
+
+  // —— 挂起写：上次会话有重试后仍失败的写盘操作 ——
+  // 此刻自动同步会用旧文件夹内容覆盖浏览器里更新的数据，必须先由用户裁决（重试 / 放弃）
+  const [pendingWrites, setPendingWrites] = useState(() => capable() && !!getRoot() && hasPendingWrites());
+  async function retryPendingWrites() {
+    const n = await retryPending();
+    if (!hasPendingWrites()) {
+      setPendingWrites(false);
+      setToast(n ? `写盘成功，挂起的 ${n} 个文件已落盘 · Flushed` : '没有待写盘的内容 · Nothing pending');
+      if (n) setTimeout(() => syncRef.current?.(), 400); // 补跑被跳过的自动同步
+    } else setToast('仍有文件写盘失败（磁盘已满或权限不足？）· Still failing');
+  }
+  function dropPendingWrites() {
+    if (!window.confirm('放弃这些未写盘的修改？磁盘上将保留旧内容，浏览器里的最新版本不再尝试写盘。')) return;
+    clearPendingWrites();
+    setPendingWrites(false);
+    setToast('已放弃挂起的写盘任务 · Discarded pending writes');
+  }
 
   const close = useCallback(() => setModal(null), []);
   function newDraft(title = '未命名草稿', body = '', source) {
@@ -808,7 +886,10 @@ function App() {
     try {
       // snap：当前知识库信息（账号 / 导入日期 / 来源）一并入快照，恢复后「关于」显示才不串库
       localStorage.setItem(BACKUP_KEY, JSON.stringify({at: nowStamp(), snap, works, notes, ideas, drafts, readings, archives, concepts: kbConcepts}));
-    } catch {} // 快照太大超出 localStorage 配额时静默放弃，不影响主流程
+    } catch {
+      // 快照太大超出 localStorage 配额时放弃主流程不受影响，但必须让用户知道「恢复快照」会缺位
+      showGlobalNotice('数据快照保存失败（本地存储空间不足），⌘K「恢复数据快照」将不可用 · Snapshot save failed');
+    }
   };
   function adoptData(data, msg, keepFolders = false) {
     // 概念词表合并而非覆盖：应用内改过的关键词与手动增删的概念（current）优先，
@@ -881,8 +962,11 @@ function App() {
     if (srcDir) {
       setTarget(target);
       const copy = await prepareCopy(srcDir);
-      if (copy?.ok) { await setRoot(copy.dir); copyDir = copy.dir; } // await：先把旧队列写进旧库再换根目录
-      else { await setRoot(null); setToast('无法创建知识库副本，本次导入只保存在浏览器 · Copy failed'); }
+      if (copy?.ok) {
+        await setRoot(copy.dir); copyDir = copy.dir; // await：先把旧队列写进旧库再换根目录
+        window.deepnotes?.vault?.watch?.(copy.dir); // 新库开始监听外部改动
+      }
+      else { await setRoot(null); window.deepnotes?.vault?.watch?.(null); setToast('无法创建知识库副本，本次导入只保存在浏览器 · Copy failed'); }
     }
     adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${copyDir ? ` · 已写入「${copyDir.replace(/\/+$/, '').split('/').pop()}」` : ''}`);
     try { localStorage.setItem(FILES_KEY, String(data.counts.all)); } catch {} // 文件数基线：自动同步的「拒绝不完整覆盖」以此为参照
@@ -953,6 +1037,7 @@ function App() {
   async function resetToSample() {
     if (!window.confirm('切回虚构示例数据？当前浏览器里的文章、选题和草稿会被清空替换。')) return;
     await setRoot(null); // 桌面版停用文件夹写回（先把待写队列写进旧库）；盘上已有的知识库副本原样保留
+    window.deepnotes?.vault?.watch?.(null); // 停止文件监听
     adoptData({works: seedWorks(), notes: SEED_NOTES, ideas: seedIdeas, drafts: seedDrafts, readings: seedReadings, archives: seedArchives, snapshot, concepts: CONCEPTS}, '已切回示例数据 · Sample data restored');
   }
 
@@ -1009,53 +1094,90 @@ function App() {
   }
 
   // 桌面版打开软件自动同步：已连接知识库文件夹时重新读取文件夹内容（文件夹是唯一事实来源，
-  // 应用内的编辑本来就会写回文件夹）。选题池不落盘，按标题合并——已有优先，文件夹里新增的补进来。
+  // 应用内的编辑本来就会写回文件夹）。选题池同样落盘（04-选题池），随文件夹全量对齐。
   // 比对只看会写进文件的字段（忽略 updatedAt / capturedAt 等应用内字段），完全一致时静默返回。
-  // 非破坏性增量保护：读到的文件数比上次骤减（磁盘休眠 / 网盘未下载完 / 库被临时移走）时
-  // 拒绝同步——否则这批「缺失」会被当成删除写回，整库内容会被清掉。
-  useEffect(() => {
+  // 非破坏性增量保护：
+  // 1) 有挂起写（上次写盘失败留底）时整体跳过——此刻同步会用旧文件夹内容覆盖浏览器里更新的数据；
+  // 2) 文件数骤减（磁盘休眠 / 网盘未下载完 / 库被临时移走）时拒绝同步——「缺失」会被当成删除写回；
+  // 3) iCloud 占位等「存在但读不到」的文件只排除出删除判定，对应内容原样保留，其余文件照常同步。
+  const syncSeq = useRef(0);
+  const syncFromVault = useCallback(async () => {
     if (!capable() || !getRoot()) return;
-    let dead = false;
-    (async () => {
-      const root = getRoot();
-      let files, unreadable = [];
-      try {
-        const res = readVaultFiles(root, await window.deepnotes.vault.read(root));
-        files = res.files; unreadable = res.unreadable;
-      } catch { return; }
-      // 云盘（iCloud 等）文件未下载时读不出内容：此刻同步会把「读不到」当成「已删除」写回，直接跳过
-      if (unreadable.length) {
-        setToast(`知识库有 ${unreadable.length} 个文件暂时读不到（可能未从 iCloud 下载），已跳过本次自动同步 · Sync skipped`);
-        return;
+    if (hasPendingWrites()) { setToast('上次有未写盘的修改，已跳过自动同步以防覆盖 · Sync skipped'); return; }
+    const seq = ++syncSeq.current;
+    const root = getRoot();
+    let files, unreadable = [];
+    try {
+      const res = readVaultFiles(root, await window.deepnotes.vault.read(root));
+      files = res.files; unreadable = res.unreadable;
+    } catch { return; }
+    let data;
+    try { data = await parseVault(files, getTarget()); } catch { return; }
+    if (seq !== syncSeq.current || !data.counts.all) return;
+    const lastCount = Math.max(Number(localStorage.getItem(FILES_KEY) || 0),
+      works.length + notes.length + drafts.length + readings.length + archives.length + ideas.length);
+    // 读不到的文件计入应读数：iCloud 占位不算「库被清空」
+    if (data.counts.all + unreadable.length < lastCount * 0.7) {
+      setToast(`知识库文件数量骤减（${lastCount} → ${data.counts.all}），已跳过自动同步以防误删；若确属有意删除，请重新导入一次该知识库 · Sync skipped`);
+      return;
+    }
+    const fp = (x, keys) => JSON.stringify(keys.map(k => x?.[k] ?? null));
+    const eq = (a, b, keys) => a.length === b.length && a.every((x, i) => fp(x, keys) === fp(b[i], keys));
+    const same =
+      eq(works, data.works || [], ['id', 'title', 'date', 'direction', 'tags', 'body', 'media', 'views', 'likes', 'comments', 'saves', 'follows', 'shares', 'impressions', 'ctr', 'duration']) &&
+      eq(notes, data.notes || [], ['id', 'title', 'path', 'body']) &&
+      eq(drafts, data.drafts || [], ['id', 'title', 'body', 'source']) &&
+      eq(readings, data.readings || [], ['id', 'title', 'author', 'source', 'folder', 'date', 'body']) &&
+      eq(archives, data.archives || [], ['id', 'title', 'date', 'body']) &&
+      // 选题按业务字段判等（不含 id：导入端按出现顺序编号，顺序不代表库变更）
+      eq(ideas, data.ideas || [], ['title', 'platform', 'priority', 'status', 'note']) &&
+      // 概念按名字判等：关键词 / 顺序差异不算库变更（概念由笔记推导且应用内可编辑，不落盘，
+      // 若按整词表比较，每次启动都会判「有变化」触发一次全库重写）
+      (data.concepts || []).every(([n]) => kbConcepts.some(([k]) => k === n));
+    if (same) {
+      if (unreadable.length) setToast(`知识库有 ${unreadable.length} 个文件暂时读不到（可能未从 iCloud 下载），相关内容保持原样 · Sync partial`);
+      return; // 文件夹没有变化就不打扰
+    }
+    // iCloud 占位：读不到的文件不参与删除判定，对应内容原样保留（与当前 state 同引用，
+    // diff 写回时不会重写它们），其余内容照常对齐。选题不保留：数字 id 与读回内容必然撞车，
+    // 保留副本还会对占位路径发起写盘；文件从 iCloud 下载完成后选题自然回来。
+    let keepOld = null;
+    if (unreadable.length) {
+      const ghost = new Set(unreadable);
+      const relOfItem = (kind, x) => pathOf(kind, x) || '';
+      const cur = {works, notes, drafts, readings, archives};
+      keepOld = {};
+      for (const kind of Object.keys(cur)) {
+        const fresh = new Set((data[kind] || []).map(x => relOfItem(kind, x)));
+        keepOld[kind] = (cur[kind] || []).filter(x => { const r = relOfItem(kind, x); return r && ghost.has(r) && !fresh.has(r); });
       }
-      let data;
-      try { data = await parseVault(files, getTarget()); } catch { return; }
-      if (dead || !data.counts.all) return;
-      const lastCount = Math.max(Number(localStorage.getItem(FILES_KEY) || 0), works.length + notes.length + drafts.length + readings.length + archives.length);
-      if (data.counts.all < lastCount * 0.7) {
-        setToast(`知识库文件数量骤减（${lastCount} → ${data.counts.all}），已跳过自动同步以防误删；若确属有意删除，请重新导入一次该知识库 · Sync skipped`);
-        return;
-      }
-      const fp = (x, keys) => JSON.stringify(keys.map(k => x?.[k] ?? null));
-      const eq = (a, b, keys) => a.length === b.length && a.every((x, i) => fp(x, keys) === fp(b[i], keys));
-      const seen = new Set(ideas.map(i => String(i.title || '').trim()));
-      const freshIdeas = (data.ideas || []).filter(i => i.title && !seen.has(String(i.title).trim()));
-      const same =
-        eq(works, data.works || [], ['id', 'title', 'date', 'direction', 'tags', 'body', 'media', 'views', 'likes', 'comments', 'saves', 'follows', 'shares', 'impressions', 'ctr', 'duration']) &&
-        eq(notes, data.notes || [], ['id', 'title', 'path', 'body']) &&
-        eq(drafts, data.drafts || [], ['id', 'title', 'body', 'source']) &&
-        eq(readings, data.readings || [], ['id', 'title', 'author', 'source', 'folder', 'date', 'body']) &&
-        eq(archives, data.archives || [], ['id', 'title', 'date', 'body']) &&
-        // 概念按名字判等：关键词 / 顺序差异不算库变更（概念由笔记推导且应用内可编辑，不落盘，
-        // 若按整词表比较，每次启动都会判「有变化」触发一次全库重写）
-        (data.concepts || []).every(([n]) => kbConcepts.some(([k]) => k === n)) &&
-        !freshIdeas.length;
-      if (same) return; // 文件夹没有变化就不打扰
-      const next = {works: data.works, notes: data.notes ?? SEED_NOTES, ideas: [...ideas, ...freshIdeas], drafts: data.drafts, readings: data.readings ?? seedReadings, archives: data.archives ?? seedArchives, snapshot: data.snapshot, concepts: data.concepts};
-      adoptData(next, `已同步知识库变更：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}`, true);
-      try { localStorage.setItem(FILES_KEY, String(data.counts.all)); } catch {}
-    })();
-    return () => { dead = true; };
+    }
+    const next = {
+      works: keepOld ? [...(data.works || []), ...keepOld.works] : (data.works || []),
+      notes: keepOld ? [...(data.notes ?? SEED_NOTES), ...keepOld.notes] : (data.notes ?? SEED_NOTES),
+      ideas: data.ideas || [],
+      drafts: keepOld ? [...(data.drafts || []), ...keepOld.drafts] : (data.drafts || []),
+      readings: keepOld ? [...(data.readings ?? seedReadings), ...keepOld.readings] : (data.readings ?? seedReadings),
+      archives: keepOld ? [...(data.archives ?? seedArchives), ...keepOld.archives] : (data.archives ?? seedArchives),
+      snapshot: data.snapshot, concepts: data.concepts,
+    };
+    adoptData(next, `已同步知识库变更：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${unreadable.length ? `（另有 ${unreadable.length} 个文件暂时读不到，已保持原样）` : ''}`, true);
+    try { localStorage.setItem(FILES_KEY, String(data.counts.all + unreadable.length)); } catch {} // 文件数基线含占位文件
+  }, [works, notes, ideas, drafts, readings, archives, kbConcepts, snap]);
+  // 挂载跑一次自动同步，并开始监听外部改动：主进程 fs.watch 防抖 2s → 渲染层再防抖 3s → 同一比对
+  // （应用自己写盘引发的回环只是多一次便宜的全量比对，无变化时静默，无害）
+  const syncRef = useRef(syncFromVault);
+  syncRef.current = syncFromVault;
+  useEffect(() => {
+    syncRef.current();
+    const v = window.deepnotes?.vault;
+    const root = getRoot();
+    if (v?.watch && root) v.watch(root); // 换库 / 断开由 importVault 与切示例流程重设
+    if (v?.onChanged) {
+      let t = null;
+      v.onChanged(() => { clearTimeout(t); t = setTimeout(() => syncRef.current(), 3000); });
+      return () => clearTimeout(t);
+    }
   }, []);
 
   const openInGraph = id => { const n = graph.index.get(id); const mod = {post: 'works', note: 'methods', idea: 'ideas', draft: 'drafts', reading: 'readings', archive: 'archives', concept: 'concepts'}[n?.kind]; if (mod) { setFocus({mod, sel: id}); setPage('home'); } };
@@ -1143,6 +1265,11 @@ function App() {
       <span>{CONFIG.footer.zh}<em>{CONFIG.footer.en}</em></span>
     </footer>
 
+    {pendingWrites && <div className="toast glass" role="alert" style={{position: 'fixed', top: 14, bottom: 'auto', left: '50%', transform: 'translateX(-50%)', zIndex: 90, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', maxWidth: 'min(94vw, 760px)'}}>
+      上次有文件未成功写盘，已暂停自动同步以防覆盖你的编辑。
+      <button className="pill" onClick={retryPendingWrites}>重试写盘 <em>Retry</em></button>
+      <button className="pill ghost" onClick={dropPendingWrites}>放弃 <em>Discard</em></button>
+    </div>}
     {toast && <div className="toast glass" role="status"><Icon name="check" size={15}/>{toast}</div>}
     {/* AI 助手浮动入口：工作台已有 dock 常驻对话，其余页面用右下角按钮唤起同一个会话 */}
     {page !== 'home' && <AiFab/>}
@@ -1300,4 +1427,4 @@ function App() {
   </div>;
 }
 
-createRoot(document.getElementById('root')).render(<><Intro/><App/></>);
+createRoot(document.getElementById('root')).render(<ErrorBoundary><Intro/><App/></ErrorBoundary>);

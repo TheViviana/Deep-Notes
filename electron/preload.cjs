@@ -24,5 +24,8 @@ contextBridge.exposeInMainWorld('deepnotes', {
     prepareCopy: srcRoot => ipcRenderer.invoke('vault:prepare-copy', srcRoot),
     exportMany: (root, files) => ipcRenderer.invoke('vault:export', { root, files }),
     asset: (root, ref) => ipcRenderer.invoke('vault:asset', { root, ref }),
+    // 文件监听：外部改动（Obsidian 等）经主进程防抖后回调 onChanged；watch 换库时重设监听目录
+    watch: dir => ipcRenderer.send('vault:watch', dir),
+    onChanged: cb => ipcRenderer.on('vault:changed', () => cb()),
   },
 });
