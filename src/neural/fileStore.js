@@ -2,6 +2,7 @@
 // 仅在 Electron（window.deepnotes 存在）且已选择库根目录时启用；网页版保持 localStorage 不变。
 // 每次导入都在原库旁新建「<原名> - Deep Notes」副本，原知识库文件夹内容不动。
 import {CONFIG} from '../config';
+import {clearAssetCache} from './images';
 
 const ROOT_KEY = CONFIG.storagePrefix + '-vault-root-v1';
 const TARGET_KEY = CONFIG.storagePrefix + '-vault-target-v1';
@@ -32,6 +33,7 @@ export async function setRoot(dir) {
     if (dir) localStorage.setItem(ROOT_KEY, dir);
     else localStorage.removeItem(ROOT_KEY);
   } catch {}
+  clearAssetCache(); // 换库后旧图片缓存全部作废
   clearTimeout(timer);
   timer = null;
   queue.clear();

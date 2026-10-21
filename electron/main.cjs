@@ -85,6 +85,19 @@ ipcMain.handle('vault:trash', async (_e, { root, rel }) => {
 
 // 在原知识库旁新建「<原名> - Deep Notes」副本目录，原库内容不动；重名自动加序号。
 // 文件夹本身已带「 - Deep Notes」后缀（Deep Notes 专属库）：直接作为工作库使用，不再复制副本。
+// 副本同时带走图片等资源文件（.md 正文里的 ![[图片]] 引用才能正常显示）。
+const ASSET_RE = /\.(png|jpe?g|gif|webp|svg|bmp|avif|pdf)$/i;
+async function copyAssets(src, dest) {
+  let entries;
+  try { entries = await fsp.readdir(src, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (e.name.startsWith('.') || SKIP.has(e.name)) continue;
+    const s = path.join(src, e.name), d = path.join(dest, e.name);
+    if (e.isDirectory()) await copyAssets(s, d);
+    else if (e.isFile() && ASSET_RE.test(e.name)) await fsp.copyFile(s, d).catch(() => {});
+  }
+}
+
 ipcMain.handle('vault:prepare-copy', async (_e, srcRoot) => {
   try {
     const resolved = path.resolve(srcRoot);
@@ -94,7 +107,44 @@ ipcMain.handle('vault:prepare-copy', async (_e, srcRoot) => {
     let dir = path.join(parent, base);
     for (let i = 2; fs.existsSync(dir); i++) dir = path.join(parent, `${base} ${i}`);
     await fsp.mkdir(dir, { recursive: true });
+    await copyAssets(resolved, dir);
     return { ok: true, dir };
+  } catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
+
+// 读知识库内的图片等资源 → base64（阅读视图渲染 ![[名字]] 与相对路径引用图）。
+// ref 可以是相对路径，也可以只是文件名（Obsidian 的 ![[文件名]] 不带路径）：找不到就按文件名全库搜。
+const MIME = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.svg': 'image/svg+xml', '.bmp': 'image/bmp', '.avif': 'image/avif'};
+ipcMain.handle('vault:asset', async (_e, { root, ref }) => {
+  try {
+    if (!root || !ref) return { ok: false, error: '参数错误' };
+    const clean = String(ref).replace(/^\.?\//, '');
+    let full = path.resolve(root, clean);
+    if (!fs.existsSync(full) || !fs.statSync(full).isFile()) {
+      const base = path.basename(clean).toLowerCase();
+      let found = null;
+      async function walk(dir) {
+        if (found) return;
+        let entries;
+        try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+          if (found) return;
+          if (e.name.startsWith('.') || SKIP.has(e.name)) continue;
+          const f = path.join(dir, e.name);
+          if (e.isDirectory()) await walk(f);
+          else if (e.isFile() && e.name.toLowerCase() === base) { found = f; return; }
+        }
+      }
+      await walk(root);
+      if (!found) return { ok: false, error: '找不到资源' };
+      full = found;
+    }
+    if (!inside(root, full)) return { ok: false, error: '路径越界' };
+    const mime = MIME[path.extname(full).toLowerCase()];
+    if (!mime) return { ok: false, error: '不支持的格式' };
+    const buf = await fsp.readFile(full);
+    return { ok: true, mime, data: buf.toString('base64') };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 

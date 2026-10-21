@@ -150,9 +150,13 @@ html, body { margin: 0; background: #0d0e0e; }
 .legend { position: absolute; right: 28px; top: 128px; padding: 12px 14px; min-width: 190px; font-size: 11.5px; animation: introFade 1s 2.2s both; z-index: 4; }
 .legend h3 { margin: 0 0 8px; font-size: 10.5px; letter-spacing: .14em; color: var(--text-2); font-weight: 600; }
 .legend div { display: flex; align-items: center; gap: 8px; padding: 2px 0; color: var(--text-2); }
-.legend div i { width: 8px; height: 8px; border-radius: 50%; background: var(--kc); box-shadow: 0 0 8px var(--kc); }
-.legend div i.ghost { background: none; border: 1px dashed var(--kc); box-shadow: none; }
-.legend div b { margin-left: auto; color: var(--text); font-weight: 500; }
+.legend button.lg-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 2px 0; border: none; background: none; cursor: pointer; color: var(--text-2); font: inherit; text-align: left; transition: opacity .2s; }
+.legend button.lg-row:hover em { color: var(--gold); }
+.legend button.lg-row.off { opacity: .35; }
+.legend button.lg-row.off i { box-shadow: none; }
+.legend div i, .legend button.lg-row i { width: 8px; height: 8px; border-radius: 50%; background: var(--kc); box-shadow: 0 0 8px var(--kc); flex: none; }
+.legend div i.ghost, .legend button.lg-row i.ghost { background: none; border: 1px dashed var(--kc); box-shadow: none; }
+.legend div b, .legend button.lg-row b { margin-left: auto; color: var(--text); font-weight: 500; }
 .legend-lines { display: flex !important; gap: 12px !important; margin-top: 6px; padding-top: 8px !important; border-top: 1px solid var(--line); }
 .legend-lines span { display: inline-flex; align-items: center; gap: 6px; }
 .ln { width: 16px; height: 2px; border-radius: 2px; }
@@ -697,7 +701,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .form-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 @media (max-width: 760px) { .form-metrics { grid-template-columns: repeat(2, 1fr); } }
-.form-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 .reader pre { margin: 0; white-space: pre-wrap; font: inherit; font-size: 14px; line-height: 1.9; color: var(--text); }
 .reader-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
 .reader-bar .quiet { margin: 0; }
@@ -741,6 +745,24 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .md-preview table { border-collapse: collapse; margin: .9em 0; width: 100%; font-size: 13px; }
 .md-preview th, .md-preview td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; }
 .md-preview th { color: var(--text-2); font-weight: 500; background: rgba(255, 255, 255, .03); }
+/* KaTeX 公式：本地渲染，深色主题下继承正文颜色；过宽公式横向滚动 */
+.md-preview .katex { font-size: 1.06em; }
+.md-preview .katex-display { margin: .9em 0; padding: 3px 0; overflow-x: auto; overflow-y: hidden; }
+.md-preview .mord.text, .md-preview .katex-text { font-family: inherit; }
+/* 脚注：编号上标 + 文末脚注区 */
+.md-preview sup.md-fn a { color: var(--gold); text-decoration: none; padding: 0 2px; }
+.md-preview sup.md-fn a:hover { text-decoration: underline; }
+.md-preview .md-footnotes { margin-top: 1.6em; padding-top: .7em; border-top: 1px solid var(--line); }
+.md-preview .md-fn-item { color: var(--text-2); font-size: 12.5px; margin: .4em 0; }
+.md-preview .md-fn-item sup { color: var(--gold); margin-right: 4px; }
+.md-preview .md-fn-back { color: var(--muted); text-decoration: none; margin-left: 4px; }
+.md-preview .md-fn-back:hover { color: var(--gold); }
+/* GFM 任务列表复选框 */
+.md-preview li > input[type=checkbox] { margin-right: 6px; accent-color: #d4b483; vertical-align: -1px; }
+/* 知识库引用图 ![[名字]]：桌面版经 vault:asset 回填；未解析/网页版显示 alt 占位 */
+.md-preview img.md-embed { display: block; max-width: 100%; border-radius: 10px; border: 1px dashed var(--line-2); background: rgba(255, 255, 255, .04); min-height: 40px; }
+/* 编辑器镜像层：dataURL 图片直接渲染成缩略图（base64 不进正文排版） */
+.line-mirror img.lm-img { max-height: 150px; max-width: min(70%, 420px); border-radius: 8px; vertical-align: top; margin: 2px 0; border: 1px solid var(--line-2); }
 .md-wikilink { display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; margin: 0 1px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--mint, #ace0cf) 38%, transparent); background: color-mix(in srgb, var(--mint, #ace0cf) 10%, transparent); color: var(--text); font-size: .92em; line-height: 1.6; cursor: pointer; text-decoration: none; }
 .md-wikilink::before { content: ""; flex: none; width: 5px; height: 5px; border-radius: 50%; background: var(--mint, #ace0cf); box-shadow: 0 0 6px var(--mint, #ace0cf); }
 .md-wikilink:hover { border-color: color-mix(in srgb, var(--mint, #ace0cf) 65%, transparent); background: color-mix(in srgb, var(--mint, #ace0cf) 18%, transparent); }
@@ -931,10 +953,21 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .palette-foot { margin: 2px 6px 0; color: var(--muted); font-size: 10.5px; letter-spacing: .04em; }
 @media (prefers-reduced-motion: reduce) { .palette { animation: none; } }
 
-/* —— 选中即问 AI（plugins.jsx）：选中文本上方浮出的胶囊按钮 —— */
-.ask-ai-chip { position: fixed; z-index: 60; display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; border-radius: 999px; border: 1px solid rgba(213, 200, 164, .4); background: rgba(20, 21, 21, .92); color: var(--gold); font-size: 12px; box-shadow: 0 10px 28px rgba(0, 0, 0, .45); animation: fadeUp .18s both; }
-.ask-ai-chip:hover { border-color: var(--gold); }
-@media (prefers-reduced-motion: reduce) { .ask-ai-chip { animation: none; } }
+/* —— 选中 AI 菜单（plugins.jsx）：选中文本旁浮出的竖向动作菜单 + 提问输入框 —— */
+/* 选中 AI 菜单：竖向动作列表 + 底部提问输入框（fixed 定位，样式与 .suggest 同族） */
+.sel-menu { position: fixed; z-index: 60; width: 200px; padding: 5px; border-radius: 12px; border: 1px solid rgba(213, 200, 164, .35); background: rgba(20, 21, 21, .96); box-shadow: 0 14px 34px rgba(0, 0, 0, .5); animation: fadeUp .16s both; }
+.sel-menu > button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 9px; border: 0; border-radius: 8px; background: none; color: var(--text); font-size: 12.5px; text-align: left; cursor: pointer; }
+.sel-menu > button:hover:not(:disabled) { background: rgba(213, 200, 164, .12); }
+.sel-menu > button:disabled { opacity: .55; cursor: default; }
+.sel-menu > button i { flex: none; width: 5px; height: 5px; border-radius: 50%; background: var(--gold); opacity: .75; }
+.sel-menu > button small { margin-left: auto; color: var(--text-2); opacity: .7; font-size: 10px; }
+.sel-menu .sel-err { margin: 2px 6px; font-size: 11px; line-height: 1.5; color: #e05d5d; }
+.sel-menu .sel-ask { display: flex; align-items: center; gap: 5px; margin-top: 4px; padding: 5px 2px 2px; border-top: 1px solid var(--line); }
+.sel-menu .sel-ask input { flex: 1; min-width: 0; height: 30px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-2); background: rgba(255, 255, 255, .06); color: var(--text); font-size: 12px; outline: none; }
+.sel-menu .sel-ask input:focus { border-color: rgba(230, 207, 152, .5); }
+.sel-menu .sel-ask .send { flex: none; width: 26px; height: 26px; border: 0; border-radius: 50%; display: grid; place-items: center; color: #161716; background: linear-gradient(135deg, #f4f4f1, #c6c7c2); cursor: pointer; }
+.sel-menu .sel-ask .send:disabled { opacity: .4; cursor: default; }
+@media (prefers-reduced-motion: reduce) { .sel-menu { animation: none; } }
 
 /* —— 概念内页卡片：定义与手动关键词编辑（pages.jsx Concepts） —— */
 .concept-card .rc-title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -973,9 +1006,46 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .review-grade { display: flex; gap: 10px; justify-content: center; }
 @media (prefers-reduced-motion: reduce) { .review-veil, .review-face { animation: none; transition: none; } }
 
+/* —— 段落闪卡（概念网络内页「段落卡」tab；编辑器选中文本一键存卡） —— */
+.rc-para { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; white-space: pre-wrap; }
+.para-card .rc-title { font-size: 13px; font-weight: 600; }
+.rev-para { margin: 0; max-width: 60ch; max-height: 44vh; overflow: auto; color: var(--text-2); font-size: 13.5px; line-height: 1.7; white-space: pre-wrap; text-align: left; }
+.rev-cue { color: var(--muted); font-size: 12px; max-height: 3.4em; overflow: hidden; text-align: center; }
+button.rev-links.as-link { background: none; border: none; padding: 0; cursor: pointer; color: var(--gold); }
+button.rev-links.as-link:hover { text-decoration: underline; }
+
 /* —— 分析栏概念定义行（Analysis.jsx ConceptEditor） —— */
 .le-def { margin: 4px 0 0; display: flex; align-items: baseline; gap: 6px; color: var(--text-2); font-size: 12px; line-height: 1.6; }
 .le-def .le-btn { flex: none; align-self: center; }
 
 /* —— ⌘K 键位提示（关于弹窗） —— */
 .about kbd { display: inline-block; padding: 0 6px; border: 1px solid var(--line-2); border-bottom-width: 2px; border-radius: 6px; background: rgba(255, 255, 255, .05); font-family: inherit; font-size: 11px; }
+
+/* —— 闪念箱（创作台右侧抽屉，pages.jsx InboxPanel） —— */
+.inbox-panel { position: fixed; top: 66px; right: 14px; bottom: 14px; width: 344px; max-width: calc(100vw - 28px); z-index: 55; display: flex; flex-direction: column; border-radius: 16px; padding: 14px; animation: fadeUp .18s both; }
+.inbox-panel header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.inbox-panel h3 { margin: 0; font-size: 15px; }
+.inbox-panel h3 b { margin-left: 8px; font-size: 11px; color: var(--gold); }
+.inbox-panel header > div { display: flex; gap: 6px; align-items: center; }
+.inbox-input { display: flex; gap: 8px; align-items: flex-end; margin-bottom: 10px; }
+.inbox-input textarea { flex: 1; resize: none; min-height: 54px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line-2); background: rgba(255, 255, 255, .05); color: var(--text); font: inherit; font-size: 12.5px; line-height: 1.6; outline: none; }
+.inbox-input textarea:focus { border-color: rgba(230, 207, 152, .5); }
+.inbox-list { flex: 1; overflow: auto; padding-right: 2px; }
+.inbox-day { margin: 12px 2px 6px; font-size: 10.5px; letter-spacing: .08em; color: var(--text-2); }
+.inbox-item { border: 1px solid var(--line); border-radius: 12px; padding: 9px 11px; margin-bottom: 8px; background: rgba(255, 255, 255, .03); }
+.inbox-item p { margin: 0; font-size: 12.5px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.inbox-item footer { display: flex; align-items: center; justify-content: space-between; margin-top: 7px; }
+.inbox-item footer small { color: var(--text-2); font-size: 10.5px; }
+.inbox-item footer span { display: flex; gap: 6px; }
+.inbox-item footer button { border: 1px solid var(--line-2); background: none; color: var(--text-2); border-radius: 999px; padding: 2px 9px; font-size: 10.5px; cursor: pointer; }
+.inbox-item footer button:hover { color: var(--text); border-color: rgba(230, 207, 152, .5); }
+.inbox-item footer button.del { padding: 2px 6px; }
+.inbox-item footer button.del:hover { color: #e05d5d; border-color: rgba(224, 93, 93, .5); }
+@media (prefers-reduced-motion: reduce) { .inbox-panel { animation: none; } }
+
+/* —— 未链接提及（Analysis.jsx Mentions） —— */
+.um-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.um-row { display: flex; align-items: center; gap: 7px; font-size: 12px; min-width: 0; }
+.um-row i { flex: none; width: 5px; height: 5px; border-radius: 50%; background: var(--kc, var(--gold)); opacity: .7; }
+.um-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.um-row small { margin-left: 6px; color: var(--text-2); font-size: 10.5px; }

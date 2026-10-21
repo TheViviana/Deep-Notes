@@ -5,7 +5,8 @@ import {Analysis, Count} from './Analysis';
 import {ArticleView, LineMirror, renderMarkdown} from './ArticleView';
 import {useWikiComplete, WikiSuggest, resolveTarget, scrollToAnchor, headingMap} from './wiki';
 import {useEditorEnhancers} from './plugins';
-import {conceptExtras, setConceptExtra, conceptReview, gradeConcept} from './conceptStore';
+import {conceptExtras, setConceptExtra, conceptReview, gradeConcept, paraCards, paraReview, deleteParaCard, gradePara} from './conceptStore';
+import {parseDocFile} from './docImport';
 import {CONFIG} from '../config';
 import {T} from './theme';
 
@@ -26,6 +27,7 @@ function nameIndex(graph) {
   return m;
 }
 const FILE_KIND_ZH = {post: ['文章', 'Posts'], draft: ['草稿', 'Drafts'], note: ['方法笔记', 'Notes']};
+const dayOfTs = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
 
 export function PageHead({zh, en, sub, subEn, children}) {
   return <header className="page-head">
@@ -35,7 +37,7 @@ export function PageHead({zh, en, sub, subEn, children}) {
 }
 
 // —— 作品库 Works ——
-export function Library({graph, works, selected, setSelected, openArticle, setOpenArticle, onNewWork, onUpdateWork, onDeleteWork, onGo, onAction, onBody, onNoteTitle, onConcept, concepts}) {
+export function Library({graph, works, selected, setSelected, openArticle, setOpenArticle, onNewWork, onUpdateWork, onDeleteWork, onGo, onAction, onBody, onNoteTitle, onConcept, concepts, onLinkify}) {
   const [q, setQ] = useState('');
   const [sort, setSort] = useState('date');
   const charsOf = p => (p.body || '').length;
@@ -84,7 +86,7 @@ export function Library({graph, works, selected, setSelected, openArticle, setOp
         {!rows.length && <div className="empty"><Icon name="search" size={30}/><p>没有找到这篇文章 <em>No match</em></p><button className="pill" onClick={() => setQ('')}>清空搜索 <em>Clear</em></button></div>}
         <p className="source-line"><Icon name="info" size={13}/>{works.length} 篇文章保存在此浏览器，可导入知识库整体替换 <em>Saved locally</em>。</p>
       </section>
-      {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES[0]} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={concepts}/></aside>}
+      {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES[0]} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={concepts} onLinkify={onLinkify}/></aside>}
     </div>
     {openWork && <ArticleView key={openWork.id} work={openWork} graph={graph} onChange={patch => onUpdateWork(openWork.id, patch)} onClose={() => setOpenArticle(null)} onGo={onGo} onEditInfo={() => onAction({type: 'editWork', id: openWork.id})}/>}
   </div>;
@@ -112,7 +114,57 @@ function MiniGraph({graph, node, focus}) {
   </svg>;
 }
 
-export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onGo, works, notes, onMove}) {
+// —— 闪念箱：随手记想法，自动按天分组；一键转草稿 / 方法笔记沉淀进知识库 ——
+function InboxPanel({items, setItems, onToDraft, onToNote, onDaily, onClose}) {
+  const [q, setQ] = useState('');
+  const add = () => {
+    const t = q.trim(); if (!t) return;
+    setItems([{id: 'i-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), text: t, ts: Date.now()}, ...items]);
+    setQ('');
+  };
+  const dayOf = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+  const timeOf = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0'); return `${p(d.getHours())}:${p(d.getMinutes())}`; };
+  const today = dayOf(Date.now()), yest = dayOf(Date.now() - 864e5);
+  const groups = [];
+  for (const it of items) {
+    const k = dayOf(it.ts), g = groups[groups.length - 1];
+    if (g && g.k === k) g.list.push(it); else groups.push({k, list: [it]});
+  }
+  return <aside className="inbox-panel glass" role="complementary" aria-label="闪念箱 Inbox">
+    <header>
+      <h3>闪念箱 <em>Inbox</em><b>{items.length}</b></h3>
+      <div>
+        <button className="pill" onClick={onDaily}>今日笔记 <em>Daily</em></button>
+        <button className="icon-btn" onClick={onClose} aria-label="收起闪念箱"><Icon name="close" size={14}/></button>
+      </div>
+    </header>
+    <div className="inbox-input">
+      <textarea value={q} onChange={e => setQ(e.target.value)} rows={2} aria-label="记录闪念"
+        placeholder="随手记一条想法…（Enter 保存）"
+        onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); add(); } }}/>
+      <button className="pill primary" onClick={add} disabled={!q.trim()}>记下 <em>Save</em></button>
+    </div>
+    <div className="inbox-list">
+      {groups.map(g => <div key={g.k}>
+        <p className="inbox-day">{g.k === today ? '今天 Today' : g.k === yest ? '昨天 Yesterday' : g.k}</p>
+        {g.list.map(it => <div key={it.id} className="inbox-item">
+          <p>{it.text}</p>
+          <footer>
+            <small>{timeOf(it.ts)}</small>
+            <span>
+              <button onClick={() => onToDraft(it.id)}>转草稿 <em>Draft</em></button>
+              <button onClick={() => onToNote(it.id)}>转笔记 <em>Note</em></button>
+              <button className="del" onClick={() => setItems(items.filter(x => x.id !== it.id))} aria-label="删除闪念"><Icon name="trash" size={12}/></button>
+            </span>
+          </footer>
+        </div>)}
+      </div>)}
+      {!items.length && <p className="empty-line">还没有闪念，随手记一条吧 <em>Nothing captured yet</em></p>}
+    </div>
+  </aside>;
+}
+
+export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onGo, works, notes, onMove, inbox, setInbox, onFlashToDraft, onFlashToNote, onDaily}) {
   const draft = drafts.find(d => d.id === active) || drafts[0];
   const area = useRef(null);
   const pv = useRef(null); // 阅读模式渲染容器（浮动目录在阅读下跳转/高亮用）
@@ -123,6 +175,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
   const [cmp, setCmp] = useLocalState(CONFIG.storagePrefix + '-drafts-compare-v1', {on: false, id: ''});
   const [splitPct, setSplitPct] = useLocalState(CONFIG.storagePrefix + '-drafts-split-v1', 50); // 对照分屏左栏宽度（25–75%）
   const [dragSplit, setDragSplit] = useState(false);
+  const [inboxOpen, setInboxOpen] = useState(false); // 闪念箱抽屉
   const change = (key, value) => setDrafts(drafts.map(d => d.id === draft.id ? {...d, [key]: value} : d));
   const titles = useMemo(() => graph.nodes.filter(n => CONTENT.has(n.kind) && n.id !== 'draft:' + draft?.id).map(n => ({id: n.id, title: n.path?.split('/').pop().replace(/\.md$/, '') || n.title, short: n.short || n.title, kind: n.kind})), [graph, draft?.id]);
   const heads = useMemo(() => headingMap(graph), [graph]);
@@ -182,8 +235,10 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
   };
   return <div className="page page-drafts">
     <PageHead zh="创作台" en="Drafts" sub="把灵感，写成下一篇。" subEn="Write with [[links]] — every link grows a backlink.">
+      <button className="pill" onClick={() => setInboxOpen(v => !v)}>闪念箱{inbox.length ? ` · ${inbox.length}` : ''} <em>Inbox</em></button>
       <button className="pill primary" onClick={() => onNew()}><Icon name="plus" size={15}/>新建草稿 <em>New draft</em></button>
     </PageHead>
+    {inboxOpen && <InboxPanel items={inbox} setItems={setInbox} onToDraft={onFlashToDraft} onToNote={onFlashToNote} onDaily={onDaily} onClose={() => setInboxOpen(false)}/>}
     <div className={`drafts-layout${focusMode ? ' focused' : ''}${unfocusing ? ' unfocusing' : ''}`}>
       <aside className="draft-list glass">
         <h3>我的草稿 <em>My drafts</em><b>{drafts.length}</b></h3>
@@ -442,7 +497,7 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
 }
 
 // —— 阅读区 Readings：放别人写好的内容，自己拿来阅读（可批注编辑），左侧分类目录管理 ——
-export function Readings({graph, readings, selected, setSelected, openReading, setOpenReading, onGo, onAction, onNew, onUpdate, onDelete, readFolders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder}) {
+export function Readings({graph, readings, selected, setSelected, openReading, setOpenReading, onGo, onAction, onNew, onUpdate, onDelete, readFolders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder, onLinkify, onImportFiles}) {
   const [q, setQ] = useState('');
   const [curFolder, setCurFolder] = useState(null); // null = 全部；「未分类」是删除分类时的兜底去处
   const [renaming, setRenaming] = useState(null);
@@ -450,6 +505,19 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
   const [newName, setNewName] = useState('');
   const [hover, setHover] = useState(null); // 拖拽悬停的分类
   const folderOf = r => r.folder || '未分类';
+  // —— 本地文件导入：PDF / HTML / Markdown / TXT → 阅读条目（docImport.js 离线解析） ——
+  const fileRef = useRef(null);
+  const [importing, setImporting] = useState(false);
+  const onPickFiles = async e => {
+    const files = [...(e.target.files || [])];
+    e.target.value = '';
+    if (!files.length || typeof onImportFiles !== 'function') return;
+    setImporting(true);
+    const ok = []; let failed = 0;
+    for (const f of files) { try { ok.push(await parseDocFile(f)); } catch { failed++; } }
+    setImporting(false);
+    onImportFiles(ok, failed);
+  };
   // 分类目录：阅读条目的 folder 字段推导 ∪ 手动新建的空分类（-read-folders-v1）
   const allFolders = useMemo(() => {
     const names = [];
@@ -489,8 +557,10 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
   };
   return <div className="page page-readings">
     <PageHead zh="阅读区" en="Readings" sub="别人的好内容，收进自己的网络。" subEn="Reading list — others' words, linked into your graph.">
+      <button className="pill" onClick={() => fileRef.current?.click()} disabled={importing} title="支持 PDF / HTML / Markdown / TXT（离线解析）">{importing ? '解析中…' : '导入文件'} <em>Import</em></button>
       <button className="pill primary" onClick={onNew}><Icon name="plus" size={15}/>添加阅读 <em>New reading</em></button>
     </PageHead>
+    <input ref={fileRef} type="file" accept=".pdf,.html,.htm,.md,.markdown,.txt" multiple hidden onChange={onPickFiles} aria-hidden="true"/>
     <div className="library-layout readings-layout">
       <aside className="read-folders glass" aria-label="阅读分类目录">
         <h3>分类 <em>Folders</em></h3>
@@ -558,14 +628,14 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
         {!rows.length && <div className="empty"><Icon name="book" size={30}/><p>还没有收藏的阅读 <em>Nothing here yet</em></p><button className="pill" onClick={() => setQ('')}>清空搜索 <em>Clear</em></button></div>}
         <p className="source-line"><Icon name="info" size={13}/>{readings.length} 条阅读保存在此浏览器，正文可批注，[[双链]] 会汇入图谱 <em>Saved locally</em>。</p>
       </section>
-      {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'readings')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)}/></aside>}
+      {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'readings')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} onLinkify={onLinkify}/></aside>}
     </div>
     {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenReading(null)} onGo={onGo} eyebrow={['READING', '阅读全文']} exportKind="readings"/>}
   </div>;
 }
 
 // —— 档案区 Archives：放创作者自己的个人档案（简介、回顾、清单等），与阅读区同构，双链汇入图谱 ——
-export function Archives({graph, archives, selected, setSelected, openArchive, setOpenArchive, onGo, onAction, onNew, onUpdate, onDelete}) {
+export function Archives({graph, archives, selected, setSelected, openArchive, setOpenArchive, onGo, onAction, onNew, onUpdate, onDelete, onLinkify}) {
   const [q, setQ] = useState('');
   const rows = archives.filter(a => ((a.title || '') + ' ' + (a.body || '')).toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
@@ -604,7 +674,7 @@ export function Archives({graph, archives, selected, setSelected, openArchive, s
         {!rows.length && <div className="empty"><Icon name="archive" size={30}/><p>还没有档案 <em>Nothing here yet</em></p><button className="pill" onClick={() => setQ('')}>清空搜索 <em>Clear</em></button></div>}
         <p className="source-line"><Icon name="info" size={13}/>{archives.length} 份档案保存在此浏览器，正文里的 [[双链]] 会汇入图谱 <em>Saved locally</em>。</p>
       </section>
-      {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'archives')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)}/></aside>}
+      {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'archives')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} onLinkify={onLinkify}/></aside>}
     </div>
     {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenArchive(null)} onGo={onGo} eyebrow={['ARCHIVE', '档案全文']} exportKind="archives"/>}
   </div>;
@@ -612,21 +682,32 @@ export function Archives({graph, archives, selected, setSelected, openArchive, s
 
 // 概念网络内页：全部概念一张清单（模块「还有 x 条」跳到这里）。
 // 每张概念卡可展开编辑（定义 + 手动关键词，存独立键不随导入覆盖）；
-// 页头「开始复习」进入闪卡模式（到期优先，忘了 / 模糊 / 记得三档调度），点击概念回到工作台图谱选中它。
+// 页头「开始复习」进入闪卡模式（到期优先，忘了 / 模糊 / 记得三档调度），
+// 复习分「概念卡 / 段落卡」两类：段落卡来自编辑器选中文本一键存卡（格式栏「存为闪卡」）。
+// 点击概念回到工作台图谱选中它。
 export function Concepts({graph, onGo}) {
   const [q, setQ] = useState('');
   const extras = conceptExtras.use();   // {概念名: {text, terms}}
   const review = conceptReview.use();   // {概念名: {due, ivl, ef, reps}}
+  const pcs = paraCards.use();          // {卡片id: {id, text, source, ts}}
+  const prev = paraReview.use();        // {卡片id: {due, ivl, ef, reps}}
+  const [tab, setTab] = useState('concept'); // 复习哪一类卡
   const [editing, setEditing] = useState(null);  // 正在展开编辑的概念名
   const [draftText, setDraftText] = useState(''); // 定义草稿
   const [termDraft, setTermDraft] = useState(''); // 关键词输入
-  const [rev, setRev] = useState(null); // 复习会话 {queue, i, flipped}
+  const [rev, setRev] = useState(null); // 复习会话 {tab, queue, i, flipped}
+  const names = useMemo(() => nameIndex(graph), [graph]); // 来源标题 → 节点 id
   const linkedOf = c => graph.links.filter(l => (l.a === c.id || l.b === c.id) && l.kind === 'mention')
     .map(l => graph.index.get(l.a === c.id ? l.b : l.a)?.title).filter(Boolean);
   const rows = graph.nodes.filter(n => n.kind === 'concept' && (!q || n.title.toLowerCase().includes(q.toLowerCase())))
     .sort((a, b) => (b.in || 0) - (a.in || 0) || a.title.localeCompare(b.title, 'zh-CN'));
+  const paraRows = useMemo(() => Object.values(pcs)
+    .filter(c => !q || c.text.toLowerCase().includes(q.toLowerCase()) || (c.source || '').toLowerCase().includes(q.toLowerCase()))
+    .sort((a, b) => b.ts - a.ts), [pcs, q]);
   const now = Date.now();
-  const dueCount = rows.filter(c => (review[c.title]?.due || 0) <= now).length;
+  const dueKey = tab === 'concept' ? (c => review[c.title]?.due || 0) : (c => prev[c.id]?.due || 0);
+  const list = tab === 'concept' ? rows : paraRows;
+  const dueCount = list.filter(c => dueKey(c) <= now).length;
   const toggleEdit = c => {
     if (editing === c) { setEditing(null); return; }
     setEditing(c);
@@ -641,15 +722,17 @@ export function Concepts({graph, onGo}) {
     setTermDraft('');
   };
   const removeTerm = (name, t) => setConceptExtra(name, {terms: (extras[name]?.terms || []).filter(x => x !== t)});
-  // 复习队列：到期优先，其次按最近到期时间；一次把全部概念排进去，不设上限
+  // 复习队列：到期优先，其次按最近到期时间；一次把全部卡片排进去，不设上限
   const startReview = () => {
-    if (!rows.length) return;
-    const due = rows.filter(c => (review[c.title]?.due || 0) <= now);
-    const rest = rows.filter(c => (review[c.title]?.due || 0) > now).sort((a, b) => (review[a.title]?.due || 0) - (review[b.title]?.due || 0));
-    setRev({queue: [...due, ...rest], i: 0, flipped: false});
+    if (!list.length) return;
+    const due = list.filter(c => dueKey(c) <= now);
+    const rest = list.filter(c => dueKey(c) > now).sort((a, b) => dueKey(a) - dueKey(b));
+    setRev({tab, queue: [...due, ...rest], i: 0, flipped: false});
   };
   const grade = g => {
-    gradeConcept(rev.queue[rev.i].title, g);
+    const card = rev.queue[rev.i];
+    if (rev.tab === 'concept') gradeConcept(card.title, g);
+    else gradePara(card.id, g);
     setRev(r => ({...r, i: r.i + 1, flipped: false}));
   };
   // 复习弹窗：Esc 结束本轮
@@ -662,16 +745,38 @@ export function Concepts({graph, onGo}) {
   const done = rev && rev.i >= rev.queue.length; // 本轮全部过完 → 总结页
   return <div className="page page-concepts">
     <PageHead zh="概念网络" en="Concepts" sub="全部概念，以及它们出现在哪些内容里。" subEn="Every concept and where it shows up.">
-      <button className="pill primary" onClick={startReview} disabled={!rows.length}>
+      <button className="pill primary" onClick={startReview} disabled={!list.length}>
         <Icon name="replay" size={15}/>开始复习 <em>Review{dueCount ? ` · ${dueCount} due` : ''}</em>
       </button>
     </PageHead>
     <div className="library-layout">
       <section className="works-col">
         <div className="toolbar-row">
-          <label className="search"><Icon name="search" size={15}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索概念… Search concepts" aria-label="搜索概念"/></label>
+          <label className="search"><Icon name="search" size={15}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索卡片… Search cards" aria-label="搜索卡片"/></label>
+          <div className="seg" role="group" aria-label="闪卡类型 Card type">
+            <button className={tab === 'concept' ? 'active' : ''} onClick={() => setTab('concept')}>概念卡<em>{rows.length}</em></button>
+            <button className={tab === 'para' ? 'active' : ''} onClick={() => setTab('para')}>段落卡<em>{paraRows.length}</em></button>
+          </div>
         </div>
-        <div className="read-list">{rows.map(c => {
+        {tab === 'para' && <div className="read-list">{paraRows.map(c => {
+          const due = (prev[c.id]?.due || 0) <= now;
+          const to = c.source ? names.get(c.source.toLowerCase()) : null;
+          return <div key={c.id} className="read-card glass concept-card para-card">
+            <span className="rc-body">
+              <span className="rc-title-row">
+                {to
+                  ? <button className="rc-title as-link" onClick={() => onGo(to)} title="打开原文 · Open source">{c.source}</button>
+                  : <span className="rc-title">{c.source || '未命名'}</span>}
+                {due && <span className="rc-due">待复习 <em>due</em></span>}
+                <button className="icon-btn rc-edit" aria-label="删除卡片 Delete card" title="删除卡片 Delete" onClick={() => deleteParaCard(c.id)}><Icon name="trash" size={13}/></button>
+              </span>
+              <p className="rc-def rc-para">{c.text}</p>
+              <span className="rc-sub">{dayOfTs(c.ts)} 存入 · saved</span>
+            </span>
+          </div>;
+        })}</div>}
+        {tab === 'para' && !paraRows.length && <div className="empty"><Icon name="spark" size={30}/><p>还没有段落卡 <em>No cards yet</em></p><p className="source-line">在编辑器里选中一段文字，点格式栏的「存为闪卡」 <em>Select text → Save flashcard</em></p></div>}
+        {tab === 'concept' && <div className="read-list">{rows.map(c => {
           const linked = linkedOf(c);
           const ex = extras[c.title] || {};
           const open = editing === c.title;
@@ -707,12 +812,46 @@ export function Concepts({graph, onGo}) {
               </div>}
             </span>
           </div>;
-        })}</div>
-        {!rows.length && <div className="empty"><Icon name="concept" size={30}/><p>还没有概念 <em>No concepts yet</em></p><p className="source-line">给文章或笔记加 #标签，概念就会自动汇入网络 <em>Use #tags</em></p></div>}
-        <p className="source-line"><Icon name="info" size={13}/>共 {rows.length} 个概念；点击概念名回到工作台，在图谱里查看它的位置；定义与关键词只存在本机 <em>Click to view in graph</em>。</p>
+        })}</div>}
+        {tab === 'concept' && !rows.length && <div className="empty"><Icon name="concept" size={30}/><p>还没有概念 <em>No concepts yet</em></p><p className="source-line">给文章或笔记加 #标签，概念就会自动汇入网络 <em>Use #tags</em></p></div>}
+        <p className="source-line"><Icon name="info" size={13}/>{tab === 'concept'
+          ? <>共 {rows.length} 个概念；点击概念名回到工作台，在图谱里查看它的位置；定义与关键词只存在本机 <em>Click to view in graph</em>。</>
+          : <>共 {paraRows.length} 张段落卡；复习调度与概念卡同一条间隔曲线，进度只存在本机 <em>Scheduling stays local</em>。</>}</p>
       </section>
     </div>
-    {rev && !done && (() => {
+    {rev && !done && rev.tab === 'para' && (() => {
+      const card = rev.queue[rev.i];
+      const to = card.source ? names.get(card.source.toLowerCase()) : null;
+      return <div className="review-veil" role="dialog" aria-modal="true" aria-label="段落复习 Paragraph review">
+        <div className="review-card glass">
+          <header className="review-head">
+            <span>{rev.i + 1} / {rev.queue.length} · 到期优先 <em>due first</em></span>
+            <button className="icon-btn" aria-label="结束复习 End review" onClick={() => setRev(null)}><Icon name="close" size={14}/></button>
+          </header>
+          <button className={`review-face${rev.flipped ? ' back' : ''}`} onClick={() => setRev(r => ({...r, flipped: !r.flipped}))}
+            aria-label={rev.flipped ? '点击回到正面 Flip back' : '点击翻面看答案 Reveal answer'}>
+            {rev.flipped
+              ? <>
+                <span className="rev-hint">来自「{card.source || '未命名'}」 <em>from</em></span>
+                <p className="rev-para">{card.text}</p>
+                {to && <span className="rev-links as-link" role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setRev(null); onGo(to); } }} onMouseDown={e => e.stopPropagation()} onClick={() => { setRev(null); onGo(to); }}>打开原文 <em>Open source</em></span>}
+              </>
+              : <>
+                <span className="rev-hint">回想这段内容 <em>Recall this passage</em></span>
+                <span className="rev-title">{card.source || '未命名'}</span>
+                <span className="rev-para rev-cue">{card.text.slice(0, 60)}{card.text.length > 60 ? '…' : ''}</span>
+                <span className="rev-tip">点击卡片显示全文 <em>Click to reveal</em></span>
+              </>}
+          </button>
+          {rev.flipped && <div className="review-grade" role="group" aria-label="给这次回忆打分 Grade recall">
+            <button className="pill ghost" onClick={() => grade(0)}>忘了 <em>Forgot</em></button>
+            <button className="pill" onClick={() => grade(1)}>模糊 <em>Fuzzy</em></button>
+            <button className="pill primary" onClick={() => grade(2)}>记得 <em>Got it</em></button>
+          </div>}
+        </div>
+      </div>;
+    })()}
+    {rev && !done && rev.tab === 'concept' && (() => {
       const c = rev.queue[rev.i];
       const linked = linkedOf(c);
       const ex = extras[c.title] || {};

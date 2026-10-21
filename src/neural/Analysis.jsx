@@ -363,7 +363,30 @@ function analyze(graph, node) {
   };
 }
 
-export function Analysis({graph, node, module, onGo, onAction, onClose, onBody, onNoteTitle, onConcept, concepts}) {
+// —— 未链接提及：他篇正文以纯文本提到本篇标题但未加 [[双链]]，一键全部接线 ——
+function Mentions({graph, node, onLinkify}) {
+  const list = useMemo(() => {
+    if (!node?.title || typeof onLinkify !== 'function') return [];
+    const rx = new RegExp(node.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+    const out = [];
+    for (const n of graph.nodes) {
+      if (!CONTENT.has(n.kind) || n.id === node.id || !n.body) continue;
+      const segs = String(n.body).split(/(\[\[[^\]]*\]\])/g); // 偶数段是普通文本，奇数段是已有双链
+      let cnt = 0;
+      for (let i = 0; i < segs.length; i += 2) cnt += (segs[i].match(rx) || []).length;
+      if (cnt) out.push({n, cnt});
+    }
+    return out.slice(0, 6);
+  }, [graph, node, onLinkify]);
+  if (!list.length) return null;
+  return <section className="an-section"><h3>未链接提及 <em>Unlinked mentions</em></h3>
+    <p className="quiet">有内容以纯文本提到「{node.short || node.title}」但还没接上双链。<em>Plain-text mentions found.</em></p>
+    <div className="um-list">{list.map(m => <div key={m.n.id} className="um-row"><i/><span>{m.n.short || m.n.title}<small>{m.cnt} 处 · mentions</small></span></div>)}</div>
+    <button className="le-add" onClick={() => onLinkify(node.title)}><Icon name="link" size={12}/>全部转为双链 <em>Link all</em></button>
+  </section>;
+}
+
+export function Analysis({graph, node, module, onGo, onAction, onClose, onBody, onNoteTitle, onConcept, concepts, onLinkify}) {
   const a = useMemo(() => analyze(graph, node), [graph, node]);
   const color = KINDS[node.kind].color;
   return <div className="analysis glass" style={{'--kc': color}} role="region" aria-label={`${node.title} 的分析`}>
@@ -395,6 +418,7 @@ export function Analysis({graph, node, module, onGo, onAction, onClose, onBody, 
       <Insights items={a.insights}/>
       {node.tags?.length > 0 && <section className="an-section"><h3>话题标签 <em>Topics</em></h3><div className="chip-row">{node.tags.map(t => <span key={t} className="chip static" style={{'--kc': KINDS.tag.color}}>#{t}</span>)}</div></section>}
       <Links graph={graph} node={node} onGo={onGo} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={concepts} onAction={onAction}/>
+      <Mentions graph={graph} node={node} onLinkify={onLinkify}/>
     </div>
     <AskBox graph={graph} node={node} onGo={onGo}/>
   </div>;

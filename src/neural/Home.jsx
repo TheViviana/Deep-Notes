@@ -419,7 +419,7 @@ function Dock({graph, onGo}) {
   </div>;
 }
 
-export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced, name, onRename, onBody, onNoteTitle, onConcept, concepts}) {
+export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced, name, onRename, onBody, onNoteTitle, onConcept, concepts, onLinkify}) {
   const stageRef = useRef(null);
   const [size, setSize] = useState({w: 1280, h: 760});
   const [paused, setPaused] = useState(false);
@@ -430,6 +430,8 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
   const FAN_MAX = 15;
   const items = useMemo(() => rawItems.length <= FAN_MAX ? rawItems
     : [...rawItems.slice(0, FAN_MAX - 1), {id: '__more__', kind: 'more', more: rawItems.length - (FAN_MAX - 1)}], [rawItems]);
+  // 图例过滤：关掉的类型不再画进背景网络（会话内记忆，不落盘）
+  const [kindsOff, setKindsOff] = useState(() => new Set());
   const live = useRef(null);
   if (!live.current) {
     const now = performance.now();
@@ -440,7 +442,7 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
     live.current.introSeen = reduced || seen;
     if (live.current.introSeen) live.current.t0 = now - 6000;
   }
-  Object.assign(live.current, {stage, mod, items, size, reduced, paused});
+  Object.assign(live.current, {stage, mod, items, size, reduced, paused, sel, filter: kindsOff});
   useLayoutEffect(() => {
     const el = stageRef.current;
     const measure = () => {
@@ -549,16 +551,23 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
       <button onClick={onAbout} title="关于图谱 About"><Icon name="info" size={15}/><span>数据来源 <em>Sources</em></span></button>
     </div>
 
-    {stage === 'hub' && <div className="legend glass" aria-label="图例">
-      <h3>图例 <em>Legend</em></h3>
-      {['post', 'note', 'idea', 'draft', 'concept', 'tag', 'ghost'].map(k => <div key={k}><i style={{'--kc': KINDS[k].color}} className={k === 'ghost' ? 'ghost' : ''}/>{KINDS[k].label} <em>{KINDS[k].en}</em><b>{graph.nodes.filter(n => n.kind === k).length}</b></div>)}
+    {stage === 'hub' && <div className="legend glass" aria-label="图例与过滤">
+      <h3>图例 · 点击过滤 <em>Legend · click to filter</em></h3>
+      {['post', 'note', 'idea', 'draft', 'concept', 'tag', 'ghost'].map(k => {
+        const off = kindsOff.has(k);
+        return <button key={k} className={`lg-row${off ? ' off' : ''}`} aria-pressed={!off}
+          title={off ? '点击显示在网络里 Show in network' : '点击从网络里隐藏 Hide from network'}
+          onClick={() => setKindsOff(s => { const n = new Set(s); if (n.has(k)) n.delete(k); else n.add(k); return n; })}>
+          <i style={{'--kc': KINDS[k].color}} className={k === 'ghost' ? 'ghost' : ''}/>{KINDS[k].label} <em>{KINDS[k].en}</em><b>{graph.nodes.filter(n => n.kind === k).length}</b>
+        </button>;
+      })}
       <div className="legend-lines"><span><i className="ln mutual"/>双向 <em>Mutual</em></span><span><i className="ln one"/>单向 <em>One-way</em></span></div>
     </div>}
     {stage === 'hub' && <Dock graph={graph} onGo={go}/>}
     {stage === 'module' && <p className="module-hint">选择一篇笔记查看全部分析 · <em>Select a note to see its full analysis</em></p>}
 
     {node && <aside className="analysis-wrap" key={sel} ref={panelRef}>
-      <Analysis graph={graph} node={node} module={m} onGo={go} onAction={onAction} onClose={() => setFocus({mod, sel: null})} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={concepts}/>
+      <Analysis graph={graph} node={node} module={m} onGo={go} onAction={onAction} onClose={() => setFocus({mod, sel: null})} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={concepts} onLinkify={onLinkify}/>
     </aside>}
   </section>;
 }

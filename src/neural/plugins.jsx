@@ -4,6 +4,8 @@ import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {Icon} from './icons';
 import {CONFIG} from '../config';
 import {aiChat, setAiDraft, openAiPanel} from './ai';
+import {saveParaCard} from './conceptStore';
+import {fileToDataUrl} from './images';
 
 // —— 内置插件清单 ——
 export const BUILTIN_PLUGINS = [
@@ -214,10 +216,30 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
   const [menu, setMenu] = useState(null); // {q, start, pick}
   const [tplOpen, setTplOpen] = useState(false);
   const [clrOpen, setClrOpen] = useState(false);
+  const [cardOk, setCardOk] = useState(false); // 存为闪卡的瞬时反馈
+  const imgPick = useRef(null);                // 「插图」按钮的文件选择
   const [curLine, setCurLine] = useState(-1);
   const live = useRef(null); live.current = {menu};
 
   const tw = on('typewriter');
+  // —— 粘贴图片：压缩成 dataURL 存进正文（离线自包含，网页版也能显示） ——
+  useEffect(() => {
+    const el = area.current;
+    if (!el) return undefined;
+    const onPaste = e => {
+      const f = [...(e.clipboardData?.files || [])].find(x => x.type.startsWith('image/'));
+      if (!f) return;
+      e.preventDefault();
+      fileToDataUrl(f).then(url => {
+        const cur = area.current; if (!cur) return;
+        const s = cur.selectionStart, end = cur.selectionEnd, v = cur.value;
+        const md = `![图片](${url})`;
+        mutate(v.slice(0, s) + md + v.slice(end), s + md.length, s + md.length);
+      }).catch(() => {});
+    };
+    el.addEventListener('paste', onPaste);
+    return () => el.removeEventListener('paste', onPaste);
+  }, [area.current]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const el = area.current;
     if (!tw || !el) return;
@@ -430,7 +452,7 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
   // —— AI 双链建议（ai 插件 + 联网开关双闸）：正文节选 + 全部标题发给模型，返回建议列表 ——
   const [aiSug, setAiSug] = useState(null); // null 收起 | {busy, list, err}
   const aiReady = on('ai') && netOn;
-  const liveFx = useRef(null); liveFx.current = {on}; // 事件回调里读最新的插件开关
+  const liveFx = useRef(null); liveFx.current = {on, aiReady}; // 事件回调里读最新的插件开关与联网状态
   const runAiSug = async () => {
     if (!aiReady || aiSug?.busy) return;
     setAiSug({busy: true, list: []});
@@ -448,37 +470,87 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
   };
   const aiLinkAt = t => { insert(`[[${t}]]`); setAiSug(null); };
 
-  // —— 选中即问（ai 插件）：选中文本后浮出「问 AI」，点击唤起 AI 面板并预填引用 ——
-  const [askSel, setAskSel] = useState(null); // {text, left, top}（视口坐标，fixed 定位）
+  // —— 选中 AI 菜单（ai 插件）：选中正文浮出竖向菜单——润色就地替换选区，
+  // 总结 / 解释 / 延伸 / 定义 / 研究送 AI 面板自动发送，底部小输入框可针对选区自由提问 ——
+  const [askSel, setAskSel] = useState(null); // {text, s, e, style}（style 为 fixed 定位）
+  const [askBusy, setAskBusy] = useState(false); // 润色请求进行中
+  const [askErr, setAskErr] = useState('');
+  const [askQ, setAskQ] = useState('');
   useEffect(() => {
     const el = area.current;
     if (!el) return;
     const check = () => {
-      if (!liveFx.current?.on('ai')) { setAskSel(null); return; }
+      if (!liveFx.current?.aiReady) { setAskSel(n => (n ? null : n)); return; }
       const s = el.selectionStart, e2 = el.selectionEnd;
       const text = el.value.slice(s, e2);
       const r = s !== e2 && text.trim() ? el.__mirrorApi?.caretRect?.() : null;
-      setAskSel(r ? {text, left: r.left, top: Math.max(8, r.top - 40)} : null);
+      if (!r) { setAskSel(n => (n ? null : n)); return; }
+      setAskSel(prev => {
+        if (prev && prev.s === s && prev.e === e2) return prev; // 选区未变不重算，避免菜单抖动
+        // 菜单约 300px 高：选区上方放得下就朝上弹（bottom 定位），否则朝下；左右夹在视口内
+        const W = 200, vw = window.innerWidth, vy = window.innerHeight;
+        const left = Math.max(8, Math.min(r.left, vw - W - 8));
+        const style = r.top > 330 ? {left, bottom: vy - r.top + 6} : {left, top: r.top + (r.height || 22) + 6};
+        return {text, s, e: e2, style};
+      });
     };
-    const clear = e => { if (!el.contains(e.target) && !e.target.closest?.('.ask-ai-chip')) setAskSel(null); };
-    el.addEventListener('mouseup', check);
-    el.addEventListener('keyup', check); // shift+方向键 / Esc 收起
+    const onSel = () => requestAnimationFrame(check); // selectionchange 覆盖镜像层拖选与键盘选区
+    const clear = e => { if (!el.contains(e.target) && !e.target.closest?.('.sel-menu')) setAskSel(null); };
+    document.addEventListener('selectionchange', onSel);
+    el.addEventListener('keyup', check);
     document.addEventListener('mousedown', clear);
     return () => {
-      el.removeEventListener('mouseup', check);
+      document.removeEventListener('selectionchange', onSel);
       el.removeEventListener('keyup', check);
       document.removeEventListener('mousedown', clear);
     };
   }, [area.current]); // eslint-disable-line react-hooks/exhaustive-deps
-  const ask = askSel && <button className="ask-ai-chip glass" style={{left: askSel.left, top: askSel.top}}
-    onMouseDown={e => e.preventDefault()} onClick={() => {
-      const text = askSel.text;
+  useEffect(() => { setAskErr(''); setAskQ(''); }, [askSel?.s, askSel?.e]); // 每次新选区清掉上一次的提问与报错
+  // 润色：就地请求并替换选区；出错时把原因留在菜单里
+  const runPolish = async () => {
+    const el = area.current, sel = askSel;
+    if (!el || !sel || askBusy) return;
+    if (el.value.slice(sel.s, sel.e) !== sel.text) { setAskErr('选区已变化，请重新选择 · Selection changed'); return; }
+    setAskBusy(true); setAskErr('');
+    try {
+      const data = await aiChat([
+        {role: 'system', content: '你是写作润色助手。保持原意、语气与语言（中文润中文、英文润英文），改进表达并适度增强文采；只输出润色后的文字本身，不要任何解释、前缀、引号或代码块包裹。'},
+        {role: 'user', content: `润色这段文字：\n\n${sel.text}`}]);
+      const out = String(data?.choices?.[0]?.message?.content || '').trim().replace(/^```[a-z]*\n?/, '').replace(/```$/, '').trim();
+      if (!out) throw new Error('模型没有返回内容 · Empty response');
+      mutate(el.value.slice(0, sel.s) + out + el.value.slice(sel.e), sel.s, sel.s + out.length);
       setAskSel(null);
-      setAiDraft(`请围绕我选中的这段内容展开讨论或解答：\n\n「${text.slice(0, 800)}」`);
-      openAiPanel();
-    }}>
-    <Icon name="agent" size={12}/>问 AI <em>Ask</em>
-  </button>;
+    } catch (e) { setAskErr(`润色失败：${e?.message || e}`); }
+    finally { setAskBusy(false); }
+  };
+  // 其余动作：送 AI 面板自动发送（工作台是 dock，其他页面是浮动面板）
+  const askRun = prompt => { setAskSel(null); setAiDraft(prompt, true); openAiPanel(); };
+  const clip = t => (t.length > 1200 ? t.slice(0, 1200) + '…（节选）' : t);
+  const submitAsk = e => {
+    e.preventDefault();
+    const q = askQ.trim();
+    if (!q || !askSel || askBusy) return;
+    askRun(`针对这段内容：\n「${clip(askSel.text)}」\n\n我的问题是：${q}`);
+  };
+  const ask = askSel && <div className="sel-menu glass" style={askSel.style} role="menu" aria-label="选中文字的 AI 操作 Selection AI">
+    {[['polish', '润色', 'Polish'], ['sum', '总结', 'Summarize'], ['explain', '解释', 'Explain'], ['extend', '延伸', 'Extend'], ['define', '定义', 'Define'], ['research', '研究', 'Research']].map(([id, zh, en]) =>
+      <button key={id} role="menuitem" disabled={!!askBusy} onMouseDown={e => e.preventDefault()}
+        onClick={() => id === 'polish' ? runPolish() : askRun({
+          sum: `请总结这段内容的要点，条理清晰：\n\n「${clip(askSel.text)}」`,
+          explain: `请用通俗易懂的方式解释这段内容，必要时举例：\n\n「${clip(askSel.text)}」`,
+          extend: `基于这段内容继续延伸：给出新的角度、相关想法或值得追问的方向：\n\n「${clip(askSel.text)}」`,
+          define: `请给出这段内容中核心概念的准确定义，并说明它与相近概念的区别：\n\n「${clip(askSel.text)}」`,
+          research: `请对这段内容做研究式分析：背景、关键事实、不同观点、可能的结论与下一步可查证的方向：\n\n「${clip(askSel.text)}」`,
+        }[id])}>
+        <i aria-hidden="true"/>{askBusy && id === 'polish' ? '润色中…' : zh}<small>{en}</small>
+      </button>)}
+    {askErr && <p className="sel-err" role="alert">{askErr}</p>}
+    <form className="sel-ask" onSubmit={submitAsk}>
+      <input value={askQ} onChange={e => setAskQ(e.target.value)} placeholder="针对选区提问… Ask about this" aria-label="向 AI 提问"
+        onKeyDown={e => { if (e.key === 'Escape' && !e.isComposing) setAskSel(null); }}/>
+      <button className="send" disabled={!askQ.trim() || !!askBusy} aria-label="发送给 AI"><Icon name="send" size={13}/></button>
+    </form>
+  </div>;
 
   // —— 格式工具栏（toolbar + templates 插件） ——
   const btn = (label, en, glyph, act) =>
@@ -514,6 +586,17 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
       {btn('标注块', 'Callout', '！', () => insert('> [!note] 标题\n> 内容\n'))}
       <i className="fmt-sep" aria-hidden="true"/>
       {btn('双链', 'Wikilink', '[[]]', () => wrap('[[', ']]', '链接目标'))}
+      {btn(cardOk ? '已存为闪卡 ✓' : '存为闪卡：把选中文字存进概念页的段落卡复习', cardOk ? 'Saved ✓' : 'Save flashcard', cardOk ? '✓' : '卡', () => {
+        const el = area.current; if (!el) return;
+        const t = el.value.slice(el.selectionStart, el.selectionEnd).trim();
+        if (!t || cardOk) return;
+        saveParaCard(t, title || '');
+        setCardOk(true);
+        setTimeout(() => setCardOk(false), 1500);
+      })}
+      {btn('插图：选一张图片，压缩后存进正文（也可直接粘贴截图）', 'Insert image', '🖼', () => imgPick.current?.click())}
+      <input ref={imgPick} type="file" accept="image/*" hidden aria-hidden="true"
+        onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (!f) return; fileToDataUrl(f).then(url => insert(`![图片](${url})`)).catch(() => {}); }}/>
       <span className="tpl-wrap">
         <button className="fmt-btn" disabled={!aiReady} aria-expanded={!!aiSug}
           title={aiReady ? 'AI 双链建议 AI link suggestions' : '需要打开联网开关并启用 AI 助手插件 Needs the network switch + AI plugin'}
@@ -556,7 +639,11 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
   </div>;
 
   return {
-    onKeyDown: e => { if (on('slash') && slashKey(e)) return; wiki?.onKeyDown(e); },
+    onKeyDown: e => {
+      if (e.key === 'Escape' && !e.isComposing && askSel) { setAskSel(null); return; }
+      if (on('slash') && slashKey(e)) return;
+      wiki?.onKeyDown(e);
+    },
     onInput: slashCheck,
     onBlur: () => { setMenu(null); setTplOpen(false); setClrOpen(false); setAiSug(null); },
     menu: on('slash') && menu && <SlashMenu list={slashFilter(menu.q)} pick={menu.pick} insert={slashInsert}/>,

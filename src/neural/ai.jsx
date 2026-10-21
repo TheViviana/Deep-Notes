@@ -151,11 +151,14 @@ export const useAiErr = () => {
 };
 export function clearAiChat() { chatLog = []; chatErr = ''; persistChat(); notify(chatSubs); notify(errSubs); }
 
-// —— 「选中即问」预填通道：编辑器把选中文本写进草稿，AI 输入框消费后自动清空 ——
+// —— 「选中 AI 菜单」预填通道：编辑器把动作提示写进草稿，AI 输入框消费后自动清空；
+// auto 为 true 时预填即自动发送（润色之外的动作都是一步直达） ——
 let aiDraft = '';
+let aiDraftAuto = false;
 const draftSubs = new Set();
-export function setAiDraft(text) {
+export function setAiDraft(text, auto) {
   aiDraft = String(text || '');
+  aiDraftAuto = !!auto;
   for (const f of draftSubs) f(aiDraft);
 }
 export function useAiDraft() {
@@ -327,13 +330,15 @@ export function AiInput({placeholder}) {
   const [q, setQ] = useState('');
   const busy = useAiBusy();
   const inp = useRef(null);
-  // 「选中即问」：编辑器发来的预填草稿写入输入框并聚焦，消费后清空
+  // 「选中 AI 菜单」：编辑器发来的预填草稿写入输入框并聚焦，消费后清空；auto 标记的立即发送
   const draft = useAiDraft();
   useEffect(() => {
     if (!draft) return;
+    const auto = aiDraftAuto;
     setQ(draft);
-    inp.current?.focus();
     setAiDraft('');
+    if (auto) aiSend(draft);
+    else inp.current?.focus();
   }, [draft]);
   const submit = e => { e.preventDefault(); if (!q.trim() || busy) return; aiSend(q); setQ(''); };
   return <form className="ai-input" onSubmit={submit}>

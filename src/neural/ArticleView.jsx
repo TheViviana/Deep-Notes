@@ -1,6 +1,9 @@
 // 文章全文视图：在页面下方展开，Markdown 编辑 / 预览，[[ 双链自动汇入图谱。
 import React, {useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {marked} from 'marked';
+import katex from 'katex';
+import 'katex/contrib/mhchem'; // 化学式 \ce{...}（注册进同一个 katex 实例）
+import 'katex/dist/katex.min.css';
 import {CONTENT} from './graph';
 import {Icon} from './icons';
 import {useWikiComplete, WikiSuggest, resolveTarget, scrollToAnchor, headingMap} from './wiki';
@@ -51,28 +54,77 @@ marked.use({renderer: {
   codespan({text}) { return `<code class="hl">${hiCode(text, '')}</code>`; },
 }});
 
-// 镜像层行内片段（彩色 span / 双链 / 高亮 / 加粗 / 斜体 / 删除线 / 行内代码）。
+// 镜像层行内片段（dataURL 图片 / 彩色 span / 双链 / 高亮 / 加粗 / 斜体 / 删除线 / 行内代码）。
 // walk 递归处理嵌套片段，每个 walk 实例化独立正则（共享 lastIndex 会互相踩踏）。
-const INLINE_SRC = '<span style="color:(#[0-9a-fA-F]{3,8})">[\\s\\S]*?<\\/span>'
+const INLINE_SRC = '!\\[[^\\]\\n]*\\]\\(data:[^)\\s]+\\)'
+  + '|<span style="color:(#[0-9a-fA-F]{3,8})">[\\s\\S]*?<\\/span>'
   + '|\\[\\[[^\\]\\n]+\\]\\]|==[^=\\n]+==|\\*\\*[^*\\n]+\\*\\*|__[^_\\n]+__|~~[^~\\n]+~~|\\*[^*\\n]+\\*(?!\\*)|`[^`\\n]+`';
+
+// 公式渲染：KaTeX 全本地（CSS + 字体随包），失败时回退原文。mhchem 已注册，\ce{} 化学式可用。
+function renderKatex(tex, display) {
+  try { return katex.renderToString(tex, {displayMode: display, throwOnError: false, strict: 'ignore'}); }
+  catch { return esc(tex); }
+}
 
 // Markdown 渲染：先把 [[双链]] 替换成带 data-target 的内联 <a>（内容已转义），再交给 marked。
 // 同时供创作台阅读模式与对照分屏复用。围栏代码块与行内代码里的 [[..]] 不做替换（与 Obsidian 一致）。
+// 公式与脚注同样先摘出再进 marked：
+//   数学/物理 $…$ 与 $$…$$、\(…\) 与 \[…\] → KaTeX（含 mhchem 化学式 \ce{}）；
+//   脚注 [^key] 引用 + [^key]: 定义（行首）→ 编号上标 + 文末脚注区。
+// 行内 $ 的判定从紧：$ 后不能是空白、$ 前不能紧贴字母/数字/$/反斜杠、$ 后不能紧跟数字（避开「价格 $5 和 $6」）。
 export function renderMarkdown(md) {
-  const wiki = seg => seg
-    .replace(/\[\[([^\]\n]+)\]\]/g, (_, t) => {
-      const [target, alias] = t.split('|');
-      const raw = (target || '').trim();
-      const [name, anchor] = raw.split('#');
-      // 块引用 [[笔记#小节]] 显示为「笔记 › 小节」；别名优先
-      const label = (alias || '').trim()
-        || (anchor ? `${(name || '').trim()} › ${anchor.trim()}` : raw);
-      return `<a class="md-wikilink" data-target="${esc(raw)}">${esc(label)}</a>`;
-    })
-    .replace(/==([^=\n]+)==/g, '<mark>$1</mark>');
-  // 用捕获组 split：奇数段是 ```围栏``` 或 `行内代码`，保持原样；偶数段才替换双链
-  const src = String(md || '').split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g).map((seg, i) => i % 2 ? seg : wiki(seg)).join('');
-  return marked.parse(src);
+  const maths = [];               // {tex, display}
+  const stashMath = (tex, display) => { maths.push({tex, display}); return `\u0000M${maths.length - 1}E\u0000`; };
+  const footnotes = new Map();    // key → 定义文本
+  const fnOrder = [];             // 保持出现顺序编号
+  const proc = seg => {
+    let s = seg
+      // 公式先摘出：避免 _ ^ \\ 等被 marked 当作 Markdown 语法吃掉
+      .replace(/\$\$([\s\S]+?)\$\$/g, (_, t) => stashMath(t, true))
+      .replace(/\\\[([\s\S]+?)\\\]/g, (_, t) => stashMath(t, true))
+      .replace(/\\\(([\s\S]+?)\\\)/g, (_, t) => stashMath(t, false))
+      .replace(/(?<![\\$\w])\$((?:[^\s$]|[^\n$]*?[^\s$]))\$(?!\d)/g, (_, t) => stashMath(t, false));
+    // 脚注定义（行首 [^key]: 文本）；引用（未定义的 [^x] 原样保留）
+    s = s.replace(/^[ \t]*\[\^([^\]\s]+)\]:[ \t]*(.+?)[ \t]*$/gm, (_, k, v) => {
+      if (!footnotes.has(k)) fnOrder.push(k);
+      footnotes.set(k, v);
+      return '';
+    });
+    if (footnotes.size) s = s.replace(/\[\^([^\]\s]+)\]/g, (m, k) => {
+      const i = fnOrder.indexOf(k);
+      return i < 0 ? m : `<sup class="md-fn" id="fnref-${i + 1}"><a href="#fn-${i + 1}">${i + 1}</a></sup>`;
+    });
+    // 标注块 > [!note] 标题 → 引用块开头的加粗标题（内容仍走普通引用样式）
+    s = s.replace(/^>[ \t]*\[!(note|tip|warning|info|important|caution)\][ \t]*([^\n]*)$/gim,
+      (_, t, title) => title.trim() ? `> **${title.trim()}**` : '>');
+    return s
+      // ![[图片.png]] / ![[图.png|300]] 嵌入图（Obsidian 语法）→ <img data-asset>；
+      // 桌面版经 vault:asset 从知识库读文件回填，网页版显示占位。必须在 [[双链]] 之前替换。
+      .replace(/!\[\[([^\]\n]+)\]\]/g, (_, t) => {
+        const [name, size] = t.split('|');
+        const n = (name || '').trim();
+        const w = parseInt(size, 10);
+        return `<img class="md-embed" data-asset="${esc(n)}" alt="${esc(n)}"${w > 0 ? ` style="width:${w}px"` : ''}/>`;
+      })
+      .replace(/\[\[([^\]\n]+)\]\]/g, (_, t) => {
+        const [target, alias] = t.split('|');
+        const raw = (target || '').trim();
+        const [name, anchor] = raw.split('#');
+        // 块引用 [[笔记#小节]] 显示为「笔记 › 小节」；别名优先
+        const label = (alias || '').trim()
+          || (anchor ? `${(name || '').trim()} › ${anchor.trim()}` : raw);
+        return `<a class="md-wikilink" data-target="${esc(raw)}">${esc(label)}</a>`;
+      })
+      .replace(/==([^=\n]+)==/g, '<mark>$1</mark>');
+  };
+  // 用捕获组 split：奇数段是 ```围栏``` 或 `行内代码`，保持原样；偶数段才做替换
+  let src = String(md || '').split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g).map((seg, i) => i % 2 ? seg : proc(seg)).join('');
+  if (fnOrder.length) src += '\n\n<section class="md-footnotes">'
+    + fnOrder.map((k, i) => `<p class="md-fn-item" id="fn-${i + 1}"><sup>${i + 1}</sup> ${marked.parseInline(footnotes.get(k))} <a class="md-fn-back" href="#fnref-${i + 1}" aria-label="返回出处 Back">↩</a></p>`).join('\n')
+    + '</section>';
+  let out = marked.parse(src);
+  if (maths.length) out = out.replace(/\u0000M(\d+)E\u0000/g, (_, i) => { const m = maths[+i]; return m ? renderKatex(m.tex, m.display) : ''; });
+  return out;
 }
 
 // —— Live Preview 式镜像层 v2（对齐 Obsidian）：镜像层是唯一布局主体 ——
@@ -470,7 +522,12 @@ export function buildMirrorHtml(text, sel) {
     while ((m = re.exec(s))) {
       if (m.index > last) out.push(T(s.slice(last, m.index), base + last));
       const t = m[0], at = base + m.index, end = at + t.length, on = inRegion(at, end);
-      if (t.startsWith('<span')) { // 彩色文字：首尾标签是语法符号，内容继续 token 化
+      if (t.startsWith('![')) { // dataURL 图片：镜像层直接渲染成缩略图（base64 太长，源码模式会毁排版；
+        // 整行选中/删除仍可用，光标经零宽锚点落在图片前后）
+        const src = /\((data:[^)\s]+)\)/.exec(t)?.[1] || '';
+        const alt = /^!\[([^\]\n]*)\]/.exec(t)?.[1] || '';
+        out.push(`<i class="lm-z" data-s="${at}"></i><img class="lm-img" src="${esc(src)}" alt="${esc(alt || '图片')}" data-s="${at}" data-e="${end}"/>`);
+      } else if (t.startsWith('<span')) { // 彩色文字：首尾标签是语法符号，内容继续 token 化
         const openLen = t.indexOf('>') + 1;
         out.push(mk(t.slice(0, openLen), at, on) + `<span style="color:${m[1]}">`
           + walk(t.slice(openLen, t.length - 7), at + openLen) + '</span>' + mk('</span>', end - 7, on));

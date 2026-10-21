@@ -22,7 +22,9 @@
     "electron:dist:all": "npm run build && electron-builder --mac --win --linux"
   },
   "dependencies": {
+    "katex": "^0.19.0",
     "marked": "^18.1.1",
+    "pdfjs-dist": "^6.4.299",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

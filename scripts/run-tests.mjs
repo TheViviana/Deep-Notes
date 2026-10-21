@@ -20,6 +20,8 @@ try {
     platform: 'node',
     jsx: 'transform',
     define: {'import.meta.env': '{"BASE_URL":"/"}'},
+    // KaTeX 的 CSS 引用 woff/woff2/ttf 字体，node 测试环境不需要真字体
+    loader: {'.css': 'empty', '.woff': 'empty', '.woff2': 'empty', '.ttf': 'empty'},
     logLevel: 'warning'
   });
   const r = spawnSync(process.execPath, [out], {stdio: 'inherit'});

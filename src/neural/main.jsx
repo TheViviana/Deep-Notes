@@ -17,6 +17,7 @@ import {isTranslatable, translateText} from './translate';
 import {aiRuntime, AiFab} from './ai';
 import {CommandPalette} from './CommandPalette';
 import {conceptExtras} from './conceptStore';
+import {useVaultImages, resolveAllInDoc} from './images';
 import {resolveTarget, scrollToAnchor} from './wiki';
 import {T} from './theme';
 import './neural.css';
@@ -52,6 +53,40 @@ function Modal({title, en, onClose, children, wide}) {
       {children}
     </section>
   </div>;
+}
+
+// —— 导出 PDF：把正文排成打印版 HTML 塞进隐藏 iframe，调起系统打印（目标选「另存为 PDF」）。
+// 全程本地渲染，不新增联网出口；Electron 桌面版与浏览器通用 ——
+function printArticle({title, meta, html}) {
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('aria-hidden', 'true');
+  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+  document.body.appendChild(iframe);
+  const doc = iframe.contentDocument;
+  doc.open();
+  doc.write('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>' + esc(title) + '</title><style>'
+    + 'body{font:13px/1.9 -apple-system,"PingFang SC","Segoe UI",sans-serif;color:#222;max-width:700px;margin:0 auto;padding:36px 20px;}'
+    + 'h1{font-size:22px;margin:0 0 4px;}.meta{color:#888;font-size:11px;margin-bottom:22px;}'
+    + '.md h1,.md h2,.md h3,.md h4{margin:1.4em 0 .5em;line-height:1.4;}.md h1{font-size:19px;}.md h2{font-size:16.5px;}.md h3{font-size:15px;}'
+    + '.md p{margin:.6em 0;}.md ul,.md ol{margin:.6em 0;padding-left:1.5em;}'
+    + '.md blockquote{margin:.8em 0;padding:2px 14px;border-left:3px solid #bbb;color:#555;}'
+    + '.md pre{background:#f5f5f2;padding:10px 12px;border-radius:6px;overflow:auto;font-size:12px;}'
+    + '.md code{background:#f5f5f2;padding:1px 4px;border-radius:3px;font-size:12px;}.md pre code{padding:0;background:none;}'
+    + '.md pre i,.md code i{font-style:normal;}'
+    + '.md a{color:#4a6fa5;text-decoration:none;}.md img{max-width:100%;}'
+    + '.md table{border-collapse:collapse;}.md th,.md td{border:1px solid #ccc;padding:4px 8px;}'
+    + '.md hr{border:0;border-top:1px solid #ddd;margin:1.4em 0;}'
+    + '</style></head><body><h1>' + esc(title) + '</h1><p class="meta">' + esc(meta) + ' · Deep Notes</p><div class="md">' + html + '</div></body></html>');
+  doc.close();
+  const win = iframe.contentWindow;
+  let done = false;
+  const cleanup = () => { if (done) return; done = true; setTimeout(() => iframe.remove(), 100); };
+  win.onafterprint = cleanup;
+  // 知识库引用图先解析完（vault:asset 读文件转 dataURL）再排版打印
+  (resolveAllInDoc(doc).catch(() => {})).then(() => {
+    win.focus(); win.print(); setTimeout(cleanup, 60000); // 60s 兜底回收
+  });
 }
 
 // 「阅读全文」弹窗：默认渲染成阅读视图（双链可点击跳转），右上角可切回 Markdown 原文查看符号。
@@ -154,7 +189,9 @@ const MOVE_ZH = {works: '作品库', methods: '方法库', drafts: '创作台', 
 const MOVE_EN = {works: 'Works', methods: 'Methods', drafts: 'Drafts', ideas: 'Ideas', readings: 'Readings', archives: 'Archives'};
 // 各类内容的常驻模块（移动弹窗里禁用当前所在项）
 const HOME_OF = {post: 'works', note: 'methods', draft: 'drafts', idea: 'ideas', reading: 'readings', archive: 'archives'};
-const initialPage = () => { const h = location.hash.slice(1); return navs.some(n => n[0] === h) ? h : 'home'; };
+// 初始页面取自 URL hash；概念网络不在 navs（顶栏独立入口）但同样是合法页面
+const PAGES = [...navs.map(n => n[0]), 'concepts'];
+const initialPage = () => { const h = location.hash.slice(1); return PAGES.includes(h) ? h : 'home'; };
 
 // 联网开关：默认断网；打开后仅「沉浸式翻译」插件会访问翻译服务，其余功能依然全本地。
 function NetSwitch() {
@@ -204,6 +241,8 @@ function Snapshot({goal, onGoal, ideas, drafts, works, notes, onIdea, onDraft, o
 }
 
 function App() {
+  // 知识库引用图（![[名字]] / 相对路径）：所有 .md-preview 里新出现的 <img> 自动经 vault:asset 回填
+  useVaultImages();
   const [page, setPage] = useState(initialPage);
   const [goal, setGoal] = useSaved(CONFIG.storagePrefix + '-goal-v1', 8);
   const [works, setWorks] = useWorks();
@@ -213,6 +252,7 @@ function App() {
   const [snap, setSnap] = useSaved(CONFIG.storagePrefix + '-snapshot-v1', snapshot);
   const [kbConcepts, setKbConcepts] = useSaved(CONFIG.storagePrefix + '-concepts-v1', CONCEPTS);
   const [notes, setNotes] = useSaved(CONFIG.storagePrefix + '-notes-v1', SEED_NOTES);
+  const [inbox, setInbox] = useSaved(CONFIG.storagePrefix + '-inbox-v1', []); // 闪念箱：随手记的想法
   const [readings, setReadings] = useSaved(CONFIG.storagePrefix + '-readings-v1', seedReadings);
   const [archives, setArchives] = useSaved(CONFIG.storagePrefix + '-archives-v1', seedArchives);
   // 方法库二级分类：path 第二段推导 + 手动新建的空分类（-folders-v1 只存空分类，导入/切回示例时清空）
@@ -329,6 +369,41 @@ function App() {
     const rest = drafts.filter(x => x.id !== id);
     setDrafts(rest); setActive(rest[0]?.id); setToast('草稿已删除 · Draft deleted');
   }
+  // —— 闪念箱：随手记自动带日期，一键沉淀为草稿 / 方法笔记，转出后从闪念箱移除 ——
+  const dayOf = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+  function flashToDraft(id) {
+    const it = inbox.find(x => x.id === id); if (!it) return;
+    newDraft((it.text.split('\n')[0] || '闪念').slice(0, 18), `${it.text}\n\n（来自闪念箱 ${dayOf(it.ts)}）`);
+    setInbox(list => list.filter(x => x.id !== id));
+  }
+  function flashToNote(id) {
+    const it = inbox.find(x => x.id === id); if (!it) return;
+    const t = (it.text.split('\n')[0] || '闪念笔记').slice(0, 24).replace(/[/\\]/g, '·');
+    setNotes(ns => [{id: 'note-' + Date.now(), title: t, path: `05-方法库 methods/闪念/${t}.md`, body: `${it.text}\n`}, ...ns]);
+    setInbox(list => list.filter(x => x.id !== id));
+    setToast('已转入方法笔记 · Saved to methods');
+  }
+  // 每日笔记：以当天日期命名的草稿，已存在就直接打开
+  function openDaily() {
+    const t = `${dayOf(Date.now())} 每日笔记`;
+    const exist = drafts.find(x => x.title === t);
+    if (exist) { setActive(exist.id); setPage('drafts'); setToast('已打开今日笔记 · Daily note opened'); }
+    else newDraft(t, `# ${t}\n\n## 今天\n\n- \n\n## 闪念沉淀\n\n- \n`);
+  }
+  // —— 未链接提及：把他篇正文里以纯文本提到该标题的位置转成 [[双链]]（已存在的 [[ ]] 段不动） ——
+  function linkifyMentions(name) {
+    const t = String(name || '').trim();
+    if (t.length < 2) { setToast('名称太短，不做替换 · Too short to link'); return; }
+    let n = 0;
+    const conv = body => String(body || '').split(/(\[\[[^\]]*\]\])/g).map(seg => seg.startsWith('[[') ? seg
+      : seg.replace(new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), () => { n++; return `[[${t}]]`; })).join('');
+    setWorks(ws => ws.map(x => x.title !== t ? {...x, body: conv(x.body)} : x));
+    setNotes(ns => ns.map(x => x.title !== t ? {...x, body: conv(x.body)} : x));
+    setDrafts(ds => ds.map(x => x.title !== t ? {...x, body: conv(x.body)} : x));
+    setReadings(rs => rs.map(x => x.title !== t ? {...x, body: conv(x.body)} : x));
+    setArchives(as => as.map(x => x.title !== t ? {...x, body: conv(x.body)} : x));
+    setToast(n ? `已在正文中接通 ${n} 处 [[${t}]] · Linked` : '没有找到可转换的提及 · No plain mentions');
+  }
   // —— 方法笔记 CRUD：重命名同步 path 文件名；新建/删除都只影响本浏览器 ——
   function updateNote(id, patch) {
     setNotes(ns => ns.map(n => {
@@ -406,6 +481,15 @@ function App() {
   }
   function updateReading(id, patch) {
     setReadings(rs => rs.map(r => r.id === id ? {...r, ...patch, updatedAt: nowStamp()} : r));
+  }
+  // —— 本地文件导入阅读区：PDF / HTML / Markdown / TXT 已由 docImport.js 离线解析成条目 ——
+  function importReadingItems(items, failed = 0) {
+    if (!items.length) { setToast(`导入失败 ${failed} 个文件 · Import failed`); return; }
+    const made = items.map((it, i) => ({id: 'reading-' + Date.now() + '-' + i, title: it.title || '未命名阅读', author: '', source: it.source || '本地文件', date: dayOf(Date.now()), body: it.body || ''}));
+    setReadings(rs => [...made, ...rs]);
+    setReadSel(made[0].id);
+    setPage('readings');
+    setToast(`已导入 ${made.length} 个文件到阅读区${failed ? `，${failed} 个失败` : ''} · Imported`);
   }
   function deleteReading(id) {
     const r = readings.find(x => x.id === id);
@@ -727,6 +811,41 @@ function App() {
     } catch { setToast('导出失败 · Export failed'); }
   }
 
+  // —— 导出当前内容：正在看的那篇（文章全文 / 草稿 / 方法笔记 / 阅读 / 档案）——
+  // 「正在看」= 已打开全文视图的那篇；没开全文就是列表里选中的那篇。
+  const currentItem = () => {
+    const pick = (list, id) => list.find(x => x.id === id) || null;
+    if (page === 'library') return {kind: 'works', item: pick(works, openArticle || libSel)};
+    if (page === 'methods') return {kind: 'notes', item: pick(notes, methSel)};
+    if (page === 'drafts') return {kind: 'drafts', item: pick(drafts, active)};
+    if (page === 'readings') return {kind: 'readings', item: pick(readings, readOpen || readSel)};
+    if (page === 'archives') return {kind: 'archives', item: pick(archives, arcOpen || arcSel)};
+    return null;
+  };
+  const curItem = currentItem();
+  // PDF 页眉的元信息行：按模块挑代表性字段
+  const curMeta = ({kind, item: it}) => {
+    if (kind === 'works') return [String(it.date || '').slice(0, 16), it.direction, (it.tags || []).map(t => '#' + t).join(' ')].filter(Boolean).join(' · ');
+    if (kind === 'notes') return it.path || '方法笔记';
+    if (kind === 'readings') return [it.author, it.source, String(it.date || '').slice(0, 10)].filter(Boolean).join(' · ');
+    return String(it.date || '').slice(0, 10) || ({drafts: '草稿 Draft', archives: '档案 Archive'}[kind] || '');
+  };
+  async function exportCurrentMd() {
+    const cur = currentItem(); if (!cur?.item) return;
+    setPalette(false); setModal(null);
+    const rel = resolveRels(cur.kind, [cur.item]).get(cur.item.id);
+    if (!rel) { setToast('这条内容没有可导出的文件名 · Nothing to export'); return; }
+    try {
+      const where = await exportFiles([{rel, body: serialize(cur.kind, cur.item)}]);
+      setToast(where === 'download' ? `已下载《${cur.item.title}》 · Exported` : where ? `已导出到「${where.replace(/\/+$/, '').split('/').pop()}」 · Exported` : '');
+    } catch { setToast('导出失败 · Export failed'); }
+  }
+  function exportCurrentPdf() {
+    const cur = currentItem(); if (!cur?.item) return;
+    setModal(null);
+    printArticle({title: cur.item.title || '未命名', meta: curMeta(cur), html: renderMarkdown(cur.item.body || '')});
+  }
+
   // 桌面版打开软件自动同步：已连接知识库文件夹时重新读取文件夹内容（文件夹是唯一事实来源，
   // 应用内的编辑本来就会写回文件夹）。选题池不落盘，按标题合并——已有优先，文件夹里新增的补进来。
   // 比对只看会写进文件的字段（忽略 updatedAt / capturedAt 等应用内字段），完全一致时静默返回。
@@ -825,15 +944,15 @@ function App() {
 
     <main>
       {page === 'home' && <>
-        <Home graph={graph} layout={layout} focus={focus} setFocus={setFocus} onAction={onAction} onAbout={() => setModal('about')} reduced={reduced} name={wsName} onRename={setWsName} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts}/>
+        <Home graph={graph} layout={layout} focus={focus} setFocus={setFocus} onAction={onAction} onAbout={() => setModal('about')} reduced={reduced} name={wsName} onRename={setWsName} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions}/>
         <Snapshot goal={goal} onGoal={() => { setGoalInput(String(goal)); setModal('goal'); }} ideas={ideas} drafts={drafts} works={works} notes={notes} onIdea={editIdea} onDraft={id => { setActive(id); setPage('drafts'); }} onLibrary={id => { if (typeof id === 'string') setLibSel(id); setPage('library'); }} snap={snap} graph={graph}/>
       </>}
-      {page === 'library' && <Library graph={graph} works={works} selected={libSel} setSelected={setLibSel} openArticle={openArticle} setOpenArticle={setOpenArticle} onNewWork={newWork} onUpdateWork={updateWork} onDeleteWork={deleteWork} onGo={openInGraph} onAction={onAction} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts}/>}
+      {page === 'library' && <Library graph={graph} works={works} selected={libSel} setSelected={setLibSel} openArticle={openArticle} setOpenArticle={setOpenArticle} onNewWork={newWork} onUpdateWork={updateWork} onDeleteWork={deleteWork} onGo={openInGraph} onAction={onAction} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions}/>}
       {page === 'methods' && <Methods graph={graph} notes={notes} setNotes={setNotes} selected={methSel} setSelected={setMethSel} onGo={openInGraph} onNew={addNote} onDelete={deleteNote} onUpdate={updateNote} onMove={id => setModal({move: {kind: 'note', id}})} folders={folders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveNoteToFolder} onCreateFolder={createFolder} onRenameFolder={renameFolder} onDeleteFolder={deleteFolder}/>}
-      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onGo={openInGraph} works={works} notes={notes} onMove={id => setModal({move: {kind: 'draft', id}})}/>}
+      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onGo={openInGraph} works={works} notes={notes} onMove={id => setModal({move: {kind: 'draft', id}})} inbox={inbox} setInbox={setInbox} onFlashToDraft={flashToDraft} onFlashToNote={flashToNote} onDaily={openDaily}/>}
       {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onNew={() => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
-      {page === 'readings' && <Readings graph={graph} readings={readings} selected={readSel} setSelected={setReadSel} openReading={readOpen} setOpenReading={setReadOpen} onGo={openInGraph} onAction={onAction} onNew={newReading} onUpdate={updateReading} onDelete={deleteReading} readFolders={readFolders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveReadingToFolder} onCreateFolder={createReadingFolder} onRenameFolder={renameReadingFolder} onDeleteFolder={deleteReadingFolder}/>}
-      {page === 'archives' && <Archives graph={graph} archives={archives} selected={arcSel} setSelected={setArcSel} openArchive={arcOpen} setOpenArchive={setArcOpen} onGo={openInGraph} onAction={onAction} onNew={newArchive} onUpdate={updateArchive} onDelete={deleteArchive}/>}
+      {page === 'readings' && <Readings graph={graph} readings={readings} selected={readSel} setSelected={setReadSel} openReading={readOpen} setOpenReading={setReadOpen} onGo={openInGraph} onAction={onAction} onNew={newReading} onUpdate={updateReading} onDelete={deleteReading} readFolders={readFolders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveReadingToFolder} onCreateFolder={createReadingFolder} onRenameFolder={renameReadingFolder} onDeleteFolder={deleteReadingFolder} onLinkify={linkifyMentions} onImportFiles={importReadingItems}/>}
+      {page === 'archives' && <Archives graph={graph} archives={archives} selected={arcSel} setSelected={setArcSel} openArchive={arcOpen} setOpenArchive={setArcOpen} onGo={openInGraph} onAction={onAction} onNew={newArchive} onUpdate={updateArchive} onDelete={deleteArchive} onLinkify={linkifyMentions}/>}
       {page === 'concepts' && <Concepts graph={graph} onGo={openInGraph}/>}
     </main>
 
@@ -853,10 +972,11 @@ function App() {
       <div className="about">
         <div className="form-actions">
           <button className="pill primary" onClick={() => setModal('import')}><Icon name="file" size={14}/>导入知识库文件夹 <em>Import vault</em></button>
-          <button className="pill" onClick={exportVault}><Icon name="save" size={14}/>导出全部 Markdown <em>Export</em></button>
+          <button className="pill" disabled={!curItem} title={curItem ? `导出《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentMd}><Icon name="save" size={14}/>导出当前 · Markdown <em>MD</em></button>
+          <button className="pill" disabled={!curItem} title={curItem ? `打印 / 另存 PDF《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentPdf}><Icon name="outlink" size={14}/>导出当前 · PDF <em>Print</em></button>
           <button className="pill ghost" onClick={resetToSample}>切回示例数据 <em>Reset</em></button>
         </div>
-        <p className="quiet">随时按 <kbd>⌘K</kbd>（Windows 为 <kbd>Ctrl K</kbd>）呼出命令面板：全文搜索、新建、跳转、导入导出都在那里。<em>Press ⌘K anywhere for the command palette.</em></p>
+        <p className="quiet">随时按 <kbd>⌘K</kbd>（Windows 为 <kbd>Ctrl K</kbd>）呼出命令面板：全文搜索、新建、跳转、导出全部 Markdown 都在那里。「导出当前」是正在看的那篇（文章全文 / 草稿 / 方法笔记 / 阅读 / 档案），PDF 经系统打印对话框「另存为 PDF」。<em>Press ⌘K anywhere; the export buttons act on the piece you are viewing.</em></p>
         <p>知识库 <em>Vault</em>：<strong>{snap.account}</strong> · 导入日期 <em>Imported</em>：{snap.capturedAt}</p>
         <p>数据来源 <em>Source</em>：{snap.source}{snap.publishedFrom ? `；内容时间跨度 ${snap.publishedFrom} — ${snap.publishedTo}` : ''}。</p>
         {capable() && getRoot() && <p>文件夹知识库 <em>Vault folder</em>：<code>{getRoot()}</code><br/>编辑会实时写回此文件夹里的 .md 文件，被删除的内容移入 <code>.trash</code>；网页版则只保存在浏览器里。</p>}

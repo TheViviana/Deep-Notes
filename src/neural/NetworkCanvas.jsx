@@ -74,6 +74,13 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
       r: n.kind === 'folder' ? 3.2 : n.kind === 'tag' ? 1.6 : n.kind === 'concept' ? 2.4 : n.kind === 'ghost' ? 2 : 2.2 + Math.min(n.deg, 14) * .22
     }));
     const byId = new Map(nodes.map(x => [x.n.id, x]));
+    // 邻接表：选中节点「聚焦」时只点亮它与直连邻居（含双向、单链、提及等全部连接类型）
+    const adj = new Map();
+    for (const l of graph.links) {
+      if (!adj.has(l.a)) adj.set(l.a, new Set());
+      if (!adj.has(l.b)) adj.set(l.b, new Set());
+      adj.get(l.a).add(l.b); adj.get(l.b).add(l.a);
+    }
     const links = graph.links.filter(l => byId.has(l.a) && byId.has(l.b)).map((l, i) => ({l, A: byId.get(l.a), B: byId.get(l.b), seed: (i * 7919 % 997) / 997}));
     const sparks = Array.from({length: 90}, (_, i) => ({a: i / 90 * Math.PI * 2 + Math.sin(i * 12.9) * .3, v: .35 + (i * 37 % 100) / 100, s: 1 + (i * 13 % 7) / 3}));
 
@@ -85,8 +92,16 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
       const cx = L.orb.x, cy = L.orb.y;
       const sc = (L.orb.s / 440) * Math.min(W * .37 / 380, H * .36 / 300) * (L.stage === 'hub' ? 1 : .55);
       const hover = L.hover;
-      const hl = hover ? new Set(graph.nodes.filter(n => n.kind === hover).map(n => n.id)) : null;
-      if (hl) for (const l of graph.links) { if (hl.has(l.a) && l.kind !== 'contain') hl.add(l.b); }
+      // 过滤：图例里关掉的类型整个不画（连线两端都隐藏才整条隐藏）
+      const off = L.filter && L.filter.size ? L.filter : null;
+      // 聚焦：选中一篇内容时，只点亮它与直连邻居，其余节点大幅淡出
+      const focusSel = L.stage === 'note' && L.sel && byId.has(L.sel) ? L.sel : null;
+      let hl = null;
+      if (focusSel) hl = new Set([focusSel, ...(adj.get(focusSel) || [])]);
+      else if (hover) {
+        hl = new Set(graph.nodes.filter(n => n.kind === hover).map(n => n.id));
+        if (hl) for (const l of graph.links) { if (hl.has(l.a) && l.kind !== 'contain') hl.add(l.b); }
+      }
       const grow = reduced ? 1 : Math.min(1, Math.max(0, (t - .35) / 2.2));
       const prog = x => reduced ? 1 : Math.min(1, Math.max(0, (t - .4 - x.d * .32 - x.seed * .35) / .9));
       const pos = x => {
@@ -115,6 +130,7 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
 
       // 连线
       for (const k of links) {
+        if (off && (off.has(k.A.n.kind) || off.has(k.B.n.kind))) continue;
         const [x1, y1, p1] = k.A.s, [x2, y2, p2] = k.B.s;
         const p = Math.min(p1, p2) * grow;
         if (p <= .02) continue;
@@ -133,6 +149,7 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
         ctx.globalCompositeOperation = ADD;
         for (const k of links) {
           if (k.l.kind === 'contain' || k.l.kind === 'tag') continue;
+          if (off && (off.has(k.A.n.kind) || off.has(k.B.n.kind))) continue;
           const on = !hl || (hl.has(k.l.a) && hl.has(k.l.b));
           const speed = k.l.both ? .16 : .12;
           const lanes = k.l.both ? [0, 1] : [0];
@@ -154,6 +171,7 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
 
       // 节点
       for (const x of nodes) {
+        if (off && off.has(x.n.kind)) continue;
         const [px, py, p] = x.s;
         if (p <= 0) continue;
         const on = !hl || hl.has(x.n.id);
