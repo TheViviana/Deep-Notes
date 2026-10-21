@@ -7,8 +7,7 @@ import {normalizeWork} from './worksStore';
 const pad = n => String(n).padStart(2, '0');
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 
-// 容量上限：超出时按日期/顺序截断，并在结果里报告，避免图谱节点过多导致卡顿。
-const CAPS = {works: 40, notes: 80, readings: 60, archives: 60, files: 600};
+// 不设容量上限：知识库有多少内容就导入多少，图谱与列表天然支持滚动与折叠。
 const SKIP_DIRS = new Set(['.obsidian', '.trash', '.git', 'node_modules']);
 const isMd = name => /\.(md|markdown)$/i.test(name);
 const clean = body => String(body).replace(/\r/g, '').trim();
@@ -51,7 +50,7 @@ function tagsOf(fm, body) {
   const raw = pick(fm, ['tags', 'tag', '标签', '话题']);
   const list = Array.isArray(raw) ? raw : raw ? String(raw).split(/[,，\s]+/) : [];
   for (const m of body.matchAll(/(?:^|\s)#([^\s#，。,.!?！？、；;:：()（）[\]]+)/g)) list.push(m[1]);
-  return [...new Set(list.map(t => t.replace(/^#/, '').trim()).filter(t => t && !/^\d+$/.test(t)))].slice(0, 12);
+  return [...new Set(list.map(t => t.replace(/^#/, '').trim()).filter(t => t && !/^\d+$/.test(t)))];
 }
 
 // —— 分类：作品 / 草稿 / 选题 / 方法笔记 / 阅读 / 档案，按文件夹名识别；未识别的全部作为方法笔记 ——
@@ -87,7 +86,7 @@ export function pickVaultFolder() {
 // target：'auto' 按文件夹名自动分类；也可指定 'works' | 'methods' | 'ideas' | 'drafts' | 'readings' | 'archives'，把全部文件归入所选模块
 export async function parseVault(fileList, target = 'auto') {
   const all = fileList.filter(f => f && isMd(f.name) && !f.name.startsWith('.'));
-  const files = all.slice(0, CAPS.files).map(f => {
+  const files = all.map(f => {
     // webkitRelativePath 形如「仓库名/子目录/文件.md」；第一段是所选文件夹名，分类时跳过
     const parts = (f.webkitRelativePath || f.name).split('/');
     const rel = parts.length > 1 ? parts.slice(1).join('/') : f.name;
@@ -118,11 +117,11 @@ export async function parseVault(fileList, target = 'auto') {
       saves: num(pick(x.fm, ['saves', '收藏'])) ?? 0,
       body: clean(x.body), tags: tagsOf(x.fm, x.body), media
     };
-  }).sort(byDate).slice(0, CAPS.works)
+  }).sort(byDate)
     .map((w, i) => normalizeWork({id: 'w' + (i + 1), ...w}));
 
   const noteTags = [];
-  const notes = bucket.methods.slice(0, CAPS.notes).map((x, i) => {
+  const notes = bucket.methods.map((x, i) => {
     const sub = x.dirs.length > 1 ? x.dirs[1] : (x.dirs[0] || '笔记');
     noteTags.push(...tagsOf(x.fm, x.body));
     return {id: 'n' + (i + 1), title: x.title, path: `05-方法库 methods/${sub}/${x.file.name}`, body: clean(x.body)};
@@ -147,19 +146,19 @@ export async function parseVault(fileList, target = 'auto') {
     source: String(pick(x.fm, ['source', '来源', '出处', 'url', '链接']) || ''),
     date: dateOf(pick(x.fm, ['date', '收藏日期', '发布日期', 'published']), x.file.lastModified).slice(0, 10),
     body: clean(x.body)
-  })).sort((a, b) => b.date.localeCompare(a.date)).slice(0, CAPS.readings);
+  })).sort((a, b) => b.date.localeCompare(a.date));
 
   // 档案区：创作者自己的个人档案（简介、回顾、清单等），同样参与双链与图谱。
   const archives = bucket.archives.map((x, i) => ({
     id: 'archive-' + (i + 1), title: x.title,
     date: dateOf(pick(x.fm, ['date', '收档日期', '创建日期', 'published']), x.file.lastModified).slice(0, 10),
     body: clean(x.body)
-  })).sort((a, b) => b.date.localeCompare(a.date)).slice(0, CAPS.archives);
+  })).sort((a, b) => b.date.localeCompare(a.date));
 
-  // 概念词：至少在两条内容里出现的话题标签，取出现最多的 20 个（与导入脚本同规则）。
+  // 概念词：内容里出现的全部话题标签（不设数量上限），出现越多在概念网络里越靠前。
   const count = new Map();
   for (const t of [...works.flatMap(w => w.tags), ...noteTags]) count.set(t, (count.get(t) || 0) + 1);
-  const concepts = [...count].filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]).slice(0, 20).map(([t]) => [t, [t.toLowerCase()]]);
+  const concepts = [...count].sort((a, b) => b[1] - a[1]).map(([t]) => [t, [t.toLowerCase()]]);
 
   const dates = works.map(w => w.date.slice(0, 10)).sort();
   const snapshot = {
@@ -170,13 +169,6 @@ export async function parseVault(fileList, target = 'auto') {
   return {
     vault: (fileList[0]?.webkitRelativePath || '').split('/')[0] || '所选文件夹',
     works, notes, ideas, drafts, readings, archives, snapshot, concepts,
-    counts: {all: read.length, works: works.length, notes: notes.length, ideas: ideas.length, drafts: drafts.length, readings: readings.length, archives: archives.length},
-    truncated: {
-      files: all.length > CAPS.files ? all.length - CAPS.files : 0,
-      works: bucket.works.length > CAPS.works ? bucket.works.length - CAPS.works : 0,
-      notes: bucket.methods.length > CAPS.notes ? bucket.methods.length - CAPS.notes : 0,
-      readings: bucket.readings.length > CAPS.readings ? bucket.readings.length - CAPS.readings : 0,
-      archives: bucket.archives.length > CAPS.archives ? bucket.archives.length - CAPS.archives : 0
-    }
+    counts: {all: read.length, works: works.length, notes: notes.length, ideas: ideas.length, drafts: drafts.length, readings: readings.length, archives: archives.length}
   };
 }

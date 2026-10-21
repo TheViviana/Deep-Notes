@@ -4,11 +4,20 @@
 import {CONFIG} from '../config';
 
 const ROOT_KEY = CONFIG.storagePrefix + '-vault-root-v1';
+const TARGET_KEY = CONFIG.storagePrefix + '-vault-target-v1';
 const api = () => window.deepnotes?.vault || null;
 export const capable = () => !!api();
 
 export function getRoot() {
   try { return localStorage.getItem(ROOT_KEY) || null; } catch { return null; }
+}
+
+// 导入时的归类方式（'auto' 或指定模块）：打开软件自动同步知识库时按同一方式重新解析。
+export function getTarget() {
+  try { return localStorage.getItem(TARGET_KEY) || 'auto'; } catch { return 'auto'; }
+}
+export function setTarget(t) {
+  try { t && t !== 'auto' ? localStorage.setItem(TARGET_KEY, t) : localStorage.removeItem(TARGET_KEY); } catch {}
 }
 
 // 写盘失败回调（权限不足 / 磁盘满等），由渲染层注册用来提示用户。
@@ -33,6 +42,29 @@ const DIRS = {works: '02-作品库', drafts: '03-创作台/正在写', readings:
 
 // 文件名安全化：路径分隔符换成 ·，去首尾空白，限长 60。
 const safe = t => String(t || '未命名').trim().replace(/[/\\]/g, '·').replace(/\s+/g, ' ').slice(0, 60) || '未命名';
+export const safeName = safe; // 导出功能复用同一套文件名规则
+
+// —— 导出 Markdown：桌面版选目录逐文件写盘（vault:export 限制在所选目录内）；
+// 网页版合并成单个 .md 经浏览器下载。files: [{rel, body}]，返回落盘目录 / 'download'（用户取消返回 null）。 ——
+export async function exportFiles(files) {
+  if (!Array.isArray(files) || !files.length) return null;
+  const v = api();
+  if (v) {
+    const dir = await v.chooseDir();
+    if (!dir) return null;
+    const res = await v.exportMany(dir, files);
+    if (!res?.ok) throw new Error(res?.error || '导出失败');
+    return dir;
+  }
+  const merged = files.map(f => f.body).join('\n\n---\n\n');
+  const blob = new Blob([merged], {type: 'text/markdown'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = files.length === 1 ? files[0].rel.split('/').pop() : 'Deep-Notes-导出.md';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  return 'download';
+}
 
 // 计算一条内容对应的库内相对路径（posix 分隔）。kind ∈ works | notes | drafts | readings | archives
 export function pathOf(kind, item) {
@@ -48,18 +80,13 @@ export function pathOf(kind, item) {
 const shortId = id => String(id || '').replace(/[^a-zA-Z0-9]/g, '').slice(-6) || 'x';
 export function resolveRels(kind, items) {
   if (kind === 'notes') return new Map(items.filter(x => x?.id).map(x => [x.id, pathOf(kind, x)]));
-  const counts = new Map();
-  for (const x of items) {
-    if (!x?.id) continue;
-    const rel = pathOf(kind, x);
-    if (rel) counts.set(rel, (counts.get(rel) || 0) + 1);
-  }
   const seen = new Set();
   const map = new Map();
   for (const x of items) {
     if (!x?.id) continue;
     let rel = pathOf(kind, x);
-    if (rel && counts.get(rel) > 1) {
+    // 先到先得：撞车时后来的那条追加 id 短码，第一条保持原名
+    if (rel && seen.has(rel)) {
       let dedup = rel.replace(/\.md$/, `--${shortId(x.id)}.md`);
       while (seen.has(dedup)) dedup = dedup.replace(/\.md$/, `-${shortId(x.id)}.md`);
       rel = dedup;

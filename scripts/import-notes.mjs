@@ -14,8 +14,8 @@
 //   --all-as-notes       没被识别的笔记也作为方法笔记导入
 //   --account <名字>     账号名（默认「我的账号」）
 //   --followers <数字>   粉丝数
-//   --max-works <数字>   最多导入多少篇作品（默认 30，按日期取最新）
-//   --max-notes <数字>   最多导入多少篇方法笔记（默认 40）
+//   --max-works <数字>   最多导入多少篇作品（默认不限制，按日期取最新）
+//   --max-notes <数字>   最多导入多少篇方法笔记（默认不限制）
 //   --out <文件>         输出到指定文件，且不切换看板数据（用于测试）
 import {readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync} from 'node:fs';
 import {join, relative, resolve, dirname, basename, sep} from 'node:path';
@@ -47,7 +47,7 @@ if (opt.help) { console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8')
 if (opt.reset) { writeFileSync(INDEX, indexFor('sample.js')); console.log('已切回示例数据（src/data/sample.js）。'); process.exit(0); }
 if (!opt.vault || !existsSync(opt.vault) || !statSync(opt.vault).isDirectory()) { console.error('请用 --vault 指定一个存在的笔记文件夹。'); process.exit(1); }
 const VAULT = resolve(opt.vault);
-const maxWorks = opt.maxWorks || 30, maxNotes = opt.maxNotes || 40;
+const maxWorks = opt.maxWorks || Infinity, maxNotes = opt.maxNotes || Infinity;
 
 // —— 读取 Markdown ——
 const SKIP = new Set(['.obsidian', '.trash', '.git', 'node_modules', '.DS_Store']);
@@ -101,7 +101,7 @@ function tagsOf(fm, body) {
   const raw = pick(fm, ['tags', 'tag', '标签', '话题']);
   const list = Array.isArray(raw) ? raw : raw ? String(raw).split(/[,，\s]+/) : [];
   for (const m of body.matchAll(/(?:^|\s)#([^\s#，。,.!?！？、；;:：()（）[\]]+)/g)) list.push(m[1]);
-  return [...new Set(list.map(t => t.replace(/^#/, '').trim()).filter(t => t && !/^\d+$/.test(t)))].slice(0, 12);
+  return [...new Set(list.map(t => t.replace(/^#/, '').trim()).filter(t => t && !/^\d+$/.test(t)))];
 }
 const clean = body => body.replace(/\r/g, '').trim();
 
@@ -182,19 +182,19 @@ const readings = bucket.readings.map((x, i) => ({
   source: String(pick(x.fm, ['source', '来源', '出处', 'url', '链接']) || ''),
   date: dateOf(pick(x.fm, ['date', '收藏日期', '发布日期', 'published']), x.file).slice(0, 10),
   body: clean(x.body)
-})).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 60);
+})).sort((a, b) => b.date.localeCompare(a.date));
 
 // 档案区：创作者自己的个人档案（简介、回顾、清单等），同样参与双链与图谱。
 const archives = bucket.archives.map((x, i) => ({
   id: 'archive-' + (i + 1), title: x.title,
   date: dateOf(pick(x.fm, ['date', '收档日期', '创建日期', 'published']), x.file).slice(0, 10),
   body: clean(x.body)
-})).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 60);
+})).sort((a, b) => b.date.localeCompare(a.date));
 
-// 概念词：至少在两条内容里出现的话题标签，取出现最多的 20 个。
+// 概念词：内容里出现的全部话题标签（不设数量上限），出现越多在概念网络里越靠前。
 const count = new Map();
 for (const t of [...works.flatMap(w => w.content.tags), ...notes.flatMap(n => n.tags)]) count.set(t, (count.get(t) || 0) + 1);
-const concepts = [...count].filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]).slice(0, 20).map(([t]) => [t, [t.toLowerCase()]]);
+const concepts = [...count].sort((a, b) => b[1] - a[1]).map(([t]) => [t, [t.toLowerCase()]]);
 
 const dates = works.map(w => w.post.date.slice(0, 10)).sort();
 const today = new Date();
@@ -238,5 +238,5 @@ if (!opt.out) writeFileSync(INDEX, indexFor('my-data.js'));
 
 console.log(`导入完成：作品 ${works.length}、方法笔记 ${notes.length}、选题 ${ideas.length}、草稿 ${drafts.length}、阅读 ${readings.length}、档案 ${archives.length}、概念词 ${concepts.length}`);
 console.log(`输出：${relative(process.cwd(), target) || target}${opt.out ? '' : '（看板已切换到这份数据）'}`);
-if (!concepts.length) console.log('提示：没有生成概念词（需要同一个话题标签出现在至少两条笔记里），可以手动编辑输出文件末尾的 concepts。');
-if (bucket.works.length > maxWorks) console.log(`提示：作品共 ${bucket.works.length} 篇，只取了最新的 ${maxWorks} 篇（--max-works 可调整）。`);
+if (!concepts.length) console.log('提示：没有生成概念词（给笔记加 #话题标签 就会自动生成概念），也可以手动编辑输出文件末尾的 concepts。');
+if (Number.isFinite(maxWorks) && bucket.works.length > maxWorks) console.log(`提示：作品共 ${bucket.works.length} 篇，只取了最新的 ${maxWorks} 篇（--max-works 可调整）。`);

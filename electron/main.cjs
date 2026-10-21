@@ -53,6 +53,20 @@ ipcMain.handle('vault:write', async (_e, { root, rel, body }) => {
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
+// 导出：把渲染层给出的 [{rel, body}] 批量写入所选目录（同样限制在该目录内）。
+ipcMain.handle('vault:export', async (_e, { root, files }) => {
+  try {
+    if (!Array.isArray(files)) return { ok: false, error: '参数错误' };
+    for (const f of files) {
+      const full = path.join(root, f.rel);
+      if (!inside(root, full)) return { ok: false, error: '路径越界' };
+      await fsp.mkdir(path.dirname(full), { recursive: true });
+      await fsp.writeFile(full, f.body, 'utf8');
+    }
+    return { ok: true };
+  } catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
+
 ipcMain.handle('vault:trash', async (_e, { root, rel }) => {
   try {
     const full = path.join(root, rel);
@@ -70,10 +84,13 @@ ipcMain.handle('vault:trash', async (_e, { root, rel }) => {
 });
 
 // 在原知识库旁新建「<原名> - Deep Notes」副本目录，原库内容不动；重名自动加序号。
+// 文件夹本身已带「 - Deep Notes」后缀（Deep Notes 专属库）：直接作为工作库使用，不再复制副本。
 ipcMain.handle('vault:prepare-copy', async (_e, srcRoot) => {
   try {
-    const parent = path.dirname(path.resolve(srcRoot));
-    const base = path.basename(path.resolve(srcRoot)) + ' - Deep Notes';
+    const resolved = path.resolve(srcRoot);
+    if (/ - Deep Notes$/i.test(path.basename(resolved))) return { ok: true, dir: resolved, reused: true };
+    const parent = path.dirname(resolved);
+    const base = path.basename(resolved) + ' - Deep Notes';
     let dir = path.join(parent, base);
     for (let i = 2; fs.existsSync(dir); i++) dir = path.join(parent, `${base} ${i}`);
     await fsp.mkdir(dir, { recursive: true });

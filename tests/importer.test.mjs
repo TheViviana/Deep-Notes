@@ -80,11 +80,13 @@ test('草稿：来源选题按标题解析为 id', async () => {
   assert.equal(r.drafts[0].source, r.ideas[0].id);
 });
 
-test('概念词：出现在两条以上内容的话题标签才入选', async () => {
+test('概念词：全部话题标签入选（不限数量），按出现次数排序', async () => {
   const r = await parseVault(files);
-  // t1 出现在甲、乙两条作品 → 入选；t2 / t3 只出现一次 → 落选
+  // 不设阈值与上限：t1 出现两次、t2 / t3 出现一次，全部入选，出现多的排前面
   assert.ok(r.concepts.some(([name]) => name === 't1'));
-  assert.ok(!r.concepts.some(([name]) => name === 't2' || name === 't3'));
+  assert.ok(r.concepts.some(([name]) => name === 't2'));
+  assert.ok(r.concepts.some(([name]) => name === 't3'));
+  assert.ok(r.concepts.findIndex(([name]) => name === 't1') < r.concepts.findIndex(([name]) => name === 't2'));
 });
 
 test('快照：来源说明为本地导入，日期区间来自作品', async () => {
