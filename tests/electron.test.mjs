@@ -42,3 +42,31 @@ test('窗口：will-navigate 拦截 + openExternal 只放行 http(s)/mailto', ()
   assert.match(src, /\^\(https\?:\|mailto:\)/i);
   assert.match(src, /e\.preventDefault\(\)/);
 });
+
+// —— 文件恢复快照网（对标 Obsidian File Recovery）：本应用覆盖库内文件前，旧内容先进
+// userData 的快照库（7 天 TTL、每文件 30 份、内容去重），快照失败绝不阻塞写盘 ——
+
+test('写前快照：vault:write / vault:export / flush-sync 三条写盘路径覆盖前都先备份旧内容', () => {
+  assert.match(src, /const crypto = require\('crypto'\)/);
+  assert.match(src, /async function snapshotBeforeWrite/);
+  assert.match(src, /function snapshotBeforeWriteSync/); // 退出同步通道用同步版
+  assert.match(src, /await snapshotBeforeWrite\(root, full, body\)/); // vault:write
+  assert.match(src, /await snapshotBeforeWrite\(root, full, f\.body\)/); // vault:export
+  assert.match(src, /snapshotBeforeWriteSync\(op\.root, full, op\.body\)/); // flush-sync
+  assert.match(src, /SNAP_TTL = 7 \* 24 \* 60 \* 60 \* 1000/); // 保留 7 天
+  assert.match(src, /SNAP_KEEP = 30/); // 每文件最多 30 份（超出删最旧）
+  assert.match(src, /内容去重/); // 与该文件最新一份快照相同就跳过
+  assert.match(src, /catch \{\} \/\/ 快照是保底网/); // 快照自身故障不影响正常写盘
+});
+
+test('文件恢复 IPC：快照列表与读取都限制在快照目录内，读取拒绝符号链接越界', () => {
+  assert.match(src, /ipcMain\.handle\('vault:snapshots'/);
+  assert.match(src, /ipcMain\.handle\('vault:snapshot-read'/);
+  assert.match(src, /inside\(base, full\)/);
+  assert.match(src, /isSymlink\(full\)/);
+  assert.match(src, /SNAP_LIST_MAX/);
+  // preload 只暴露读取通道，不出写快照的口子
+  const pre = readFileSync(join(__TEST_ROOT__, 'electron/preload.cjs'), 'utf8');
+  assert.match(pre, /snapshots: root => ipcRenderer\.invoke\('vault:snapshots'/);
+  assert.match(pre, /snapshotRead: \(root, file\) => ipcRenderer\.invoke\('vault:snapshot-read'/);
+});

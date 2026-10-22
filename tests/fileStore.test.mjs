@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseVault} from '../src/neural/importer.js';
-import {serialize, resolveRels, queueSync, flush, setErrorHandler, retryPending, hasPendingWrites} from '../src/neural/fileStore.js';
+import {serialize, resolveRels, queueSync, flush, flushAll, setErrorHandler, retryPending, hasPendingWrites, clearPendingWrites, snapshotBeforeAdopt, listSnapshots} from '../src/neural/fileStore.js';
 import {VAULT_ROOT_KEY, CONFIG} from '../src/config.js';
 
 // —— 浏览器全局桩：fileStore 引用裸 localStorage 与 window.deepnotes ——
@@ -176,4 +176,82 @@ test('retryPending：没有桌面 API 时不清留底', async () => {
   assert.ok(hasPendingWrites(), '留底原样保留（清了就真丢）');
   assert.ok(JSON.parse(store.get(PENDING_KEY)).length);
   setErrorHandler(null);
+});
+
+// —— 自动同步防丢编辑回归：flushAll 必须把队列写尽（含一次自动重试）再返回 ——
+
+test('flushAll：含自动重试写尽队列，重试成功不留底；空队列无害', async () => {
+  store.clear();
+  clearPendingWrites();
+  store.set(VAULT_ROOT_KEY, '/tmp/vault');
+  let n = 0;
+  const rels = [];
+  window.deepnotes = {vault: {
+    write: async (root, rel) => { n++; rels.push(rel); return n === 1 ? {ok: false, error: '瞬时故障'} : {ok: true}; },
+  }};
+  setErrorHandler(() => {});
+  const item = {id: 'd20', title: '重试稿', body: 'x'};
+  queueSync('drafts', item, null, resolveRels('drafts', [item]));
+  await flushAll(); // 第一次失败入重试队列，flushAll 内部第二次写成功
+  assert.equal(n, 2, '同一操作共写两次（原次 + 重试）');
+  assert.ok(!hasPendingWrites(), '重试成功不留底');
+  await flushAll(); // 队列已空：no-op
+  assert.equal(n, 2);
+  setErrorHandler(null);
+});
+
+test('flushAll：持续失败全部留底，队列写尽后返回（同步可据此跳过）', async () => {
+  store.clear();
+  clearPendingWrites();
+  store.set(VAULT_ROOT_KEY, '/tmp/vault');
+  let n = 0;
+  window.deepnotes = {vault: {write: async () => { n++; return {ok: false, error: '磁盘满'}; }}};
+  setErrorHandler(() => {});
+  const item = {id: 'd21', title: '留底稿', body: 'x'};
+  queueSync('drafts', item, null, resolveRels('drafts', [item]));
+  await flushAll();
+  assert.equal(n, 2, '原次 + 重试各一次');
+  assert.ok(hasPendingWrites(), '两次失败 → 挂起留底（同步据此跳过防覆盖）');
+  // 清掉留底再单独验证第二轮：无历史留底干扰时，flushAll 恰好原次 + 重试各一次
+  clearPendingWrites();
+  const before = n;
+  const item2 = {id: 'd22', title: '再排', body: 'y'};
+  queueSync('drafts', item2, null, resolveRels('drafts', [item2]));
+  await flushAll();
+  assert.equal(n, before + 2, '第二条同样原次 + 重试，队列写尽');
+  assert.ok(JSON.parse(store.get(PENDING_KEY)).some(op => op.rel.includes('再排')), '第二条留底已记录');
+  setErrorHandler(null);
+  clearPendingWrites();
+});
+
+// —— 应用内快照（文件恢复第二层网）：外部同步 adopt 用盘上版本覆盖内存前，先把内存里
+// 有差异的条目记进 IndexedDB 快照网（测试环境无 indexedDB，持久层静默失败、内存列表可用）——
+
+test('snapshotBeforeAdopt：外部覆盖前记录内存版本，同内容重跑不重复，每条上限 15 份、新的在前', () => {
+  const cur = {drafts: [{id: 'd1', title: '稿', body: '旧版'}]};
+  const fresh = {drafts: [{id: 'd1', title: '稿', body: '新版'}]};
+  snapshotBeforeAdopt(cur, fresh); // 内存版本『旧版』即将被盘上『新版』顶掉：先留快照
+  let list = listSnapshots();
+  assert.equal(list.length, 1);
+  assert.equal(list[0].key, 'drafts:d1');
+  assert.equal(list[0].item.body, '旧版', '存的是即将被覆盖的内存版本');
+  assert.ok(list[0].ts > 0);
+  assert.equal(list[0].title, '稿');
+  snapshotBeforeAdopt(cur, fresh); // 同样的差异再跑一遍：内容相同不重复记
+  assert.equal(listSnapshots().length, 1);
+  snapshotBeforeAdopt({drafts: [{id: 'd1', title: '稿', body: '新版'}]}, fresh); // 内存与盘上一致：不记
+  assert.equal(listSnapshots().length, 1);
+  // 盘上没有的条目视为应用内已删除（.trash 可找回），不参与快照
+  snapshotBeforeAdopt({drafts: [{id: 'd2', title: '已删', body: 'x'}]}, fresh);
+  assert.equal(listSnapshots().length, 1);
+  // 每轮内容变化都记一份，超出 15 份只留最新 15 份
+  for (let i = 0; i < 20; i++) {
+    snapshotBeforeAdopt(
+      {drafts: [{id: 'd1', title: '稿', body: '内存 v' + i}]},
+      {drafts: [{id: 'd1', title: '稿', body: '盘上 v' + i}]});
+  }
+  const mine = listSnapshots().filter(s => s.key === 'drafts:d1');
+  assert.equal(mine.length, 15, '每条内容最多保留 15 份');
+  assert.equal(mine[0].item.body, '内存 v19', '新的在前');
+  assert.equal(mine[14].item.body, '内存 v5', '最旧的被截掉');
 });

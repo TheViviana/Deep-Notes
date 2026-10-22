@@ -297,6 +297,97 @@ export async function flush() {
   return failedOps; // 调用方（retryPending）据此知道哪些操作最终仍失败
 }
 
+// 全量写尽防抖队列：含一次自动重试，所有操作落定（写成或留底）才返回。
+// 自动同步前调用：保证随后读到的文件快照包含全部未落盘编辑——否则 adopt 会用
+// 不含这些编辑的文件版本回滚界面，diff 再把回滚内容写盘，编辑就真的丢了。
+export async function flushAll() {
+  await flush();
+  if (queue.size) await flush(); // 第一次 flush 失败的操作已带 _retry 标记，第二次要么写成要么留底
+}
+
+// —— 应用内快照（文件恢复第二层网）：自动同步 adopt 用盘上版本覆盖内存前，先把内存里的
+// 当前版本按条目存进 IndexedDB。主进程的写前快照只保「盘上被覆盖前的旧内容」；这一层再保
+// 「内存里即将被文件版本顶掉的内容」——即使那次 adopt 本身就是误覆盖，内容也能原样找回。
+// 与挂起写留底同一 IndexedDB 库（deepnotes-pending 的 kv store），用独立 key 'snapshots'。
+// 每条内容最多 15 份、全局 800 份、内容没变不拍；快照网自身故障绝不阻塞 adopt。
+const SNAP_FIELDS = {
+  works: ['title', 'date', 'direction', 'tags', 'body'],
+  notes: ['title', 'path', 'body'],
+  drafts: ['title', 'body', 'source'],
+  readings: ['title', 'author', 'source', 'folder', 'date', 'body'],
+  archives: ['title', 'date', 'body'],
+};
+const SNAP_MAX_PER = 15;  // 每条内容最多保留份数（超出删最旧）
+const SNAP_MAX_ALL = 800; // 全局上限，防止存储无限膨胀
+let snapList = []; // 内存为唯一事实源：{key:'kind:id', kind, id, title, ts, item(字段子集)}
+const snapIdbGet = () => idbRun('readonly', st => st.get('snapshots')).then(r => Array.isArray(r) ? r : []).catch(() => []);
+const snapIdbPut = list => idbRun('readwrite', st => st.put(list, 'snapshots'));
+snapIdbGet().then(list => { // 启动读回：按 key+ts 合并去重，按时间新的在前
+  if (!list.length) return;
+  const seen = new Set(snapList.map(s => s.key + '@' + s.ts));
+  snapList = snapList.concat(list.filter(s => s && !seen.has(s.key + '@' + s.ts)));
+  snapList.sort((a, b) => b.ts - a.ts);
+}).catch(() => {});
+export const listSnapshots = () => snapList.slice();
+export function recordSnapshots(entries) {
+  for (const e of entries) {
+    if (!e?.key || !e.item) continue;
+    const latest = snapList.find(s => s.key === e.key);
+    if (latest && JSON.stringify(latest.item) === JSON.stringify(e.item)) continue; // 内容没变不拍
+    snapList.unshift({...e, ts: Date.now()});
+  }
+  const perKey = new Map();
+  snapList = snapList.filter(s => { // 每 key 只留最新 15 份
+    const n = (perKey.get(s.key) || 0) + 1;
+    perKey.set(s.key, n);
+    return n <= SNAP_MAX_PER;
+  }).slice(0, SNAP_MAX_ALL);
+  snapIdbPut(snapList).catch(() => {});
+}
+// adopt 前快照：cur 为当前内存五类数组，fresh 为刚从盘上解析出的同结构数据。
+// 盘上没有的条目视为应用内已删除（内容在 .trash 可找回），不参与快照；
+// 选题池不参与（位置 id，盘上以文件夹为准）。
+export function snapshotBeforeAdopt(cur, fresh) {
+  try {
+    const freshMaps = {};
+    for (const kind of Object.keys(SNAP_FIELDS)) {
+      freshMaps[kind] = new Map((Array.isArray(fresh?.[kind]) ? fresh[kind] : []).map(x => [String(x?.id), x]));
+    }
+    const entries = [];
+    for (const [kind, fields] of Object.entries(SNAP_FIELDS)) {
+      for (const item of (Array.isArray(cur?.[kind]) ? cur[kind] : [])) {
+        if (!item?.id) continue;
+        const onDisk = freshMaps[kind].get(String(item.id));
+        if (!onDisk) continue;
+        const pick = obj => Object.fromEntries(fields.map(f => [f, obj?.[f] ?? null]));
+        if (JSON.stringify(pick(item)) === JSON.stringify(pick(onDisk))) continue; // 内容一致不拍
+        entries.push({key: kind + ':' + item.id, kind, id: item.id, title: item.title || '', item: pick(item)});
+      }
+    }
+    if (entries.length) recordSnapshots(entries);
+  } catch {} // 保底网自身故障不能影响正常同步
+}
+
+// —— 桌面文件历史（文件恢复第一层网的数据源）：主进程写前快照的列表与读取 ——
+export async function listFileSnapshots() {
+  const v = api();
+  const root = getRoot();
+  if (!v?.snapshots || !root) return [];
+  try {
+    const res = await v.snapshots(root);
+    return res?.ok && Array.isArray(res.list) ? res.list : [];
+  } catch { return []; }
+}
+export async function readFileSnapshot(file) {
+  const v = api();
+  const root = getRoot();
+  if (!v?.snapshotRead || !root) return null;
+  try {
+    const res = await v.snapshotRead(root, file);
+    return res?.ok ? String(res.body ?? '') : null;
+  } catch { return null; }
+}
+
 // 退出前的同步落盘：beforeunload 里异步 IPC（flush）可能页面先卸载、操作根本发不出去，
 // 改走 sendSync 阻塞通道，主进程用同步 fs 写完才放行关闭。只应在 beforeunload 里调用。
 export function flushSyncNow() {

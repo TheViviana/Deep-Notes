@@ -3,7 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, seedReadings, seedArchives, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
 import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags} from './worksStore';
 import {pickVaultFolder, pickMdFiles, parseVault} from './importer';
-import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, hasPendingWrites, retryPending, clearPendingWrites, pendingReady} from './fileStore';
+import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushAll, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, hasPendingWrites, retryPending, clearPendingWrites, pendingReady, snapshotBeforeAdopt, readFileSnapshot} from './fileStore';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
@@ -16,6 +16,7 @@ import {PluginList, useNetwork, usePlugins, TocPanel, parseOutline} from './plug
 import {isTranslatable, translateText} from './translate';
 import {aiRuntime, AiFab} from './ai';
 import {CommandPalette} from './CommandPalette';
+import {RecoveryModal} from './recovery';
 import {conceptExtras} from './conceptStore';
 import {useVaultImages, resolveAllInDoc} from './images';
 import {resolveTarget, scrollToAnchor} from './wiki';
@@ -805,6 +806,64 @@ function App() {
     setOpenArticle(a => a === id ? null : a);
     setModal(null); setToast('文章已删除 · Article deleted');
   }
+  // —— 文件恢复：从快照网找回被覆盖的内容（recovery.jsx 的两个回调）——
+  // 就地恢复的字段口径：notes 不含 path（不回退外部对文件路径的改名）；选题不参与（位置 id）
+  const RECOVER_PATCH = {
+    works: ['title', 'date', 'direction', 'tags', 'body'],
+    notes: ['title', 'body'],
+    drafts: ['title', 'body', 'source'],
+    readings: ['title', 'author', 'source', 'folder', 'date', 'body'],
+    archives: ['title', 'date', 'body'],
+  };
+  const RECOVER_KIND_ZH = {works: '文章', notes: '方法笔记', drafts: '草稿', readings: '阅读', archives: '档案'};
+  function patchItem(kind, id, patch) {
+    if (kind === 'works') updateWork(id, patch);
+    else if (kind === 'notes') updateNote(id, patch);
+    else if (kind === 'drafts') setDrafts(ds => ds.map(d => d.id === id ? {...d, ...patch, updatedAt: nowStamp()} : d));
+    else if (kind === 'readings') updateReading(id, patch);
+    else if (kind === 'archives') updateArchive(id, patch);
+  }
+  function restoreSnapVersion(s) {
+    const arr = {works, notes, drafts, readings, archives}[s.kind] || [];
+    const cur = arr.find(x => String(x.id) === String(s.id));
+    if (!cur) { setToast('该内容已不存在，试试「文件历史」里的恢复为副本 · Item no longer exists'); return; }
+    const at = new Date(s.ts).toLocaleString();
+    if (!window.confirm(`把${RECOVER_KIND_ZH[s.kind] || '内容'}「${cur.title || '未命名'}」恢复到 ${at} 的版本？当前内容会被覆盖。`)) return;
+    const patch = {};
+    for (const k of RECOVER_PATCH[s.kind] || []) patch[k] = s.item?.[k] ?? (k === 'tags' ? [] : null);
+    patchItem(s.kind, s.id, patch);
+    setModal(null);
+    setToast(`已恢复「${cur.title || '未命名'}」的旧版本（${at}） · Version restored`);
+  }
+  async function restoreFileCopy(entry) {
+    const body = await readFileSnapshot(entry.file);
+    if (body == null) { setToast('快照读取失败 · Failed to read snapshot'); return; }
+    const rel = String(entry.rel || '');
+    const hit = [['02-作品库', 'works'], ['03-创作台', 'drafts'], ['06-阅读区', 'readings'], ['07-档案区', 'archives']].find(([d]) => rel.startsWith(d));
+    const kind = hit ? hit[1] : 'notes';
+    const title = (rel.split('/').pop().replace(/\.md$/i, '') || '未命名') + '（恢复）';
+    // 快照是「覆盖前」的完整文件：剥掉 frontmatter 只取正文，恢复成全新条目（新 id 不与现有撞车；
+    // 恢复走全局 diff 自动写盘，写盘前主进程又会把当前盘上版本拍进快照——恢复动作本身也可撤销）
+    const text = body.replace(/^---\r?\n[\s\S]*?\n---\r?\n?/, '');
+    if (kind === 'works') {
+      const w = normalizeWork({title, date: nowStamp(), tags: [], body: text});
+      setWorks(ws => [w, ...ws]); setLibSel(w.id); setPage('library');
+    } else if (kind === 'drafts') {
+      const d = {id: 'draft-' + Date.now(), title, body: text, source: null};
+      setDrafts(ds => [d, ...ds]); setActive(d.id); setPage('drafts');
+    } else if (kind === 'readings') {
+      const r = {id: 'reading-' + Date.now(), title, author: '', source: '', date: nowStamp().slice(0, 10), body: text};
+      setReadings(rs => [r, ...rs]); setReadSel(r.id); setPage('readings');
+    } else if (kind === 'archives') {
+      const a = {id: 'archive-' + Date.now(), title, date: nowStamp().slice(0, 10), body: text};
+      setArchives(as => [a, ...as]); setArcSel(a.id); setPage('archives');
+    } else {
+      const n = {id: 'note-' + Date.now(), title, path: `05-方法库 methods/恢复/${title.replace(/[/\\]/g, '·')}.md`, body: text};
+      setNotes(ns => [n, ...ns]); setMethSel(n.id); setPage('methods');
+    }
+    setModal(null);
+    setToast('已恢复为副本（新建条目，现有内容不动） · Restored as copy');
+  }
   const onAction = useCallback(a => {
     if (a.type === 'page') { if (a.page === 'library') setLibSel(a.id); if (a.page === 'methods') setMethSel(String(a.id || '').replace(/^note:/, '')); if (a.page === 'drafts') setActive(a.id); setPage(a.page); }
     if (a.type === 'read') setModal({read: graph.index.get(a.id)});
@@ -1165,12 +1224,20 @@ function App() {
   // 非破坏性增量保护：
   // 1) 有挂起写（上次写盘失败留底）时整体跳过——此刻同步会用旧文件夹内容覆盖浏览器里更新的数据；
   // 2) 文件数骤减（磁盘休眠 / 网盘未下载完 / 库被临时移走）时拒绝同步——「缺失」会被当成删除写回；
-  // 3) iCloud 占位等「存在但读不到」的文件只排除出删除判定，对应内容原样保留，其余文件照常同步。
+  // 3) iCloud 占位等「存在但读不到」的文件只排除出删除判定，对应内容原样保留，其余文件照常同步；
+  // 4) 同步前先 flushAll 把防抖队列写尽再读文件——快照必须包含未落盘的编辑；
+  // 5) 读文件期间又有新编辑（内存数组引用已变）则跳过本次采用并稍后重跑——否则 adopt 会用
+  //    不含新编辑的文件版本回滚界面，diff 再把回滚内容写盘，编辑就真的丢了。
   const syncSeq = useRef(0);
+  // 每次渲染对齐的最新内容引用：同步流程用它检测「读文件期间又有编辑」（闭包值仍是调用瞬间的）
+  const contentRef = useRef(null);
+  contentRef.current = {works, notes, drafts, readings, archives, ideas};
   const syncFromVault = useCallback(async () => {
     if (!capable() || !getRoot()) return;
     await pendingReady; // IndexedDB 兜底的挂起写先灌回内存，再判定是否跳过同步（防覆盖）
     if (hasPendingWrites()) { setToast('上次有未写盘的修改，已跳过自动同步以防覆盖 · Sync skipped'); return; }
+    await flushAll(); // 先把防抖队列里的编辑写尽再读文件，快照才包含用户最新编辑
+    if (hasPendingWrites()) return; // 写尽后仍有留底（磁盘故障等）：跳过同步防覆盖，横幅已弹出
     const seq = ++syncSeq.current;
     const root = getRoot();
     let files, unreadable = [];
@@ -1219,6 +1286,18 @@ function App() {
         keepOld[kind] = (cur[kind] || []).filter(x => { const r = relOfItem(kind, x); return r && ghost.has(r) && !fresh.has(r); });
       }
     }
+    // 读文件期间用户又编辑过（内存数组引用已变）：本次快照不含这些新编辑，adopt 会把界面
+    // 回滚成文件版本、diff 随后把回滚内容写盘。跳过本次采用并稍后重跑——新编辑会先被
+    // flushAll 写盘，下轮快照自然包含它们，外部变更同样不会丢（重跑在用户停手 1.5s 后收敛）。
+    const latest = contentRef.current;
+    if (latest && (latest.works !== works || latest.notes !== notes || latest.drafts !== drafts ||
+        latest.readings !== readings || latest.archives !== archives || latest.ideas !== ideas)) {
+      setTimeout(() => syncRef.current(), 1500);
+      return;
+    }
+    // 外部文件版本即将覆盖内存：先把内存里有差异的条目存进应用内恢复快照（IndexedDB，每条 15 份），
+    // 即使这次 adopt 是误覆盖，内容也能从「文件恢复」（About 或 ⌘K）里找回
+    snapshotBeforeAdopt({works, notes, drafts, readings, archives}, data);
     const next = {
       works: keepOld ? [...(data.works || []), ...keepOld.works] : (data.works || []),
       notes: keepOld ? [...(data.notes ?? SEED_NOTES), ...keepOld.notes] : (data.notes ?? SEED_NOTES),
@@ -1276,6 +1355,7 @@ function App() {
     {group: '数据 Data', icon: 'outlink', zh: '导入选定内容', en: 'Import selected files', run: () => setModal('import-files')},
     {group: '数据 Data', icon: 'save', zh: '导出全部 Markdown', en: 'Export all Markdown', run: exportVault},
     {group: '数据 Data', icon: 'replay', zh: '恢复数据快照', en: 'Restore data snapshot', run: restoreSnapshot},
+    {group: '数据 Data', icon: 'replay', zh: '文件恢复', en: 'File recovery', run: () => setModal('recovery')},
     {group: '数据 Data', icon: 'replay', zh: '切回示例数据', en: 'Reset to sample', run: resetToSample},
   ];
   const s = stats(graph);
@@ -1318,13 +1398,13 @@ function App() {
         <Home graph={graph} layout={layout} focus={focus} setFocus={setFocus} onAction={onAction} onAbout={() => setModal('about')} reduced={reduced} name={wsName} onRename={setWsName} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions}/>
         <Snapshot goal={goal} onGoal={() => { setGoalInput(String(goal)); setModal('goal'); }} ideas={ideas} drafts={drafts} works={works} notes={notes} onIdea={editIdea} onDraft={id => { setActive(id); setPage('drafts'); }} onLibrary={id => { if (typeof id === 'string') setLibSel(id); setPage('library'); }} snap={snap} graph={graph}/>
       </>}
-      {page === 'library' && <Library graph={graph} works={works} selected={libSel} setSelected={setLibSel} openArticle={openArticle} setOpenArticle={setOpenArticle} onNewWork={newWork} onUpdateWork={updateWork} onDeleteWork={deleteWork} onGo={openInGraph} onAction={onAction} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions}/>}
-      {page === 'methods' && <Methods graph={graph} notes={notes} setNotes={setNotes} selected={methSel} setSelected={setMethSel} onGo={openInGraph} onNew={addNote} onDelete={deleteNote} onUpdate={updateNote} onMove={id => setModal({move: {kind: 'note', id}})} folders={folders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveNoteToFolder} onCreateFolder={createFolder} onRenameFolder={renameFolder} onDeleteFolder={deleteFolder}/>}
-      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onGo={openInGraph} works={works} notes={notes} onMove={id => setModal({move: {kind: 'draft', id}})} inbox={inbox} setInbox={setInbox} onFlashToDraft={flashToDraft} onFlashToNote={flashToNote} onDaily={openDaily}/>}
+      {page === 'library' && <Library graph={graph} works={works} selected={libSel} setSelected={setLibSel} openArticle={openArticle} setOpenArticle={setOpenArticle} onNewWork={newWork} onUpdateWork={updateWork} onDeleteWork={deleteWork} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions}/>}
+      {page === 'methods' && <Methods graph={graph} notes={notes} setNotes={setNotes} selected={methSel} setSelected={setMethSel} onGo={openInGraph} onJumpContent={openContent} onNew={addNote} onDelete={deleteNote} onUpdate={updateNote} onMove={id => setModal({move: {kind: 'note', id}})} folders={folders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveNoteToFolder} onCreateFolder={createFolder} onRenameFolder={renameFolder} onDeleteFolder={deleteFolder}/>}
+      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onGo={openInGraph} onJumpContent={openContent} works={works} notes={notes} onMove={id => setModal({move: {kind: 'draft', id}})} inbox={inbox} setInbox={setInbox} onFlashToDraft={flashToDraft} onFlashToNote={flashToNote} onDaily={openDaily}/>}
       {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onNew={() => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
-      {page === 'readings' && <Readings graph={graph} readings={readings} selected={readSel} setSelected={setReadSel} openReading={readOpen} setOpenReading={setReadOpen} onGo={openInGraph} onAction={onAction} onNew={newReading} onUpdate={updateReading} onDelete={deleteReading} readFolders={readFolders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveReadingToFolder} onCreateFolder={createReadingFolder} onRenameFolder={renameReadingFolder} onDeleteFolder={deleteReadingFolder} onLinkify={linkifyMentions} onImportFiles={importReadingItems}/>}
-      {page === 'archives' && <Archives graph={graph} archives={archives} selected={arcSel} setSelected={setArcSel} openArchive={arcOpen} setOpenArchive={setArcOpen} onGo={openInGraph} onAction={onAction} onNew={newArchive} onUpdate={updateArchive} onDelete={deleteArchive} onLinkify={linkifyMentions}/>}
-      {page === 'concepts' && <Concepts graph={graph} onGo={openInGraph}/>}
+      {page === 'readings' && <Readings graph={graph} readings={readings} selected={readSel} setSelected={setReadSel} openReading={readOpen} setOpenReading={setReadOpen} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onNew={newReading} onUpdate={updateReading} onDelete={deleteReading} readFolders={readFolders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveReadingToFolder} onCreateFolder={createReadingFolder} onRenameFolder={renameReadingFolder} onDeleteFolder={deleteReadingFolder} onLinkify={linkifyMentions} onImportFiles={importReadingItems}/>}
+      {page === 'archives' && <Archives graph={graph} archives={archives} selected={arcSel} setSelected={setArcSel} openArchive={arcOpen} setOpenArchive={setArcOpen} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onNew={newArchive} onUpdate={updateArchive} onDelete={deleteArchive} onLinkify={linkifyMentions}/>}
+      {page === 'concepts' && <Concepts graph={graph} onGo={openInGraph} onJumpContent={openContent}/>}
     </main>
 
     <footer className="site-foot">
@@ -1351,9 +1431,10 @@ function App() {
           <button className="pill" onClick={() => setModal('import-files')}><Icon name="outlink" size={14}/>导入选定内容 <em>Import files</em></button>
           <button className="pill" disabled={!curItem} title={curItem ? `导出《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentMd}><Icon name="save" size={14}/>导出当前 · Markdown <em>MD</em></button>
           <button className="pill" disabled={!curItem} title={curItem ? `打印 / 另存 PDF《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentPdf}><Icon name="outlink" size={14}/>导出当前 · PDF <em>Print</em></button>
+          <button className="pill" onClick={() => setModal('recovery')}><Icon name="replay" size={14}/>文件恢复 <em>Recovery</em></button>
           <button className="pill ghost" onClick={resetToSample}>切回示例数据 <em>Reset</em></button>
         </div>
-        <p className="quiet">随时按 <kbd>⌘K</kbd>（Windows 为 <kbd>Ctrl K</kbd>）呼出命令面板：全文搜索、新建、跳转、导出全部 Markdown、恢复数据快照都在那里。「导入选定内容」挑几个 .md 文件合并进某个模块（同标题更新、其余追加，不动其他内容），整体替换请用「导入知识库文件夹」；「导出当前」是正在看的那篇（文章全文 / 草稿 / 方法笔记 / 阅读 / 档案），PDF 经系统打印对话框「另存为 PDF」。任何整体替换之前都会自动存一份快照，可从 ⌘K 恢复。<em>Press ⌘K anywhere; imports are snapshotted first and reversible.</em></p>
+        <p className="quiet">随时按 <kbd>⌘K</kbd>（Windows 为 <kbd>Ctrl K</kbd>）呼出命令面板：全文搜索、新建、跳转、导出全部 Markdown、恢复数据快照都在那里。「导入选定内容」挑几个 .md 文件合并进某个模块（同标题更新、其余追加，不动其他内容），整体替换请用「导入知识库文件夹」；「导出当前」是正在看的那篇（文章全文 / 草稿 / 方法笔记 / 阅读 / 档案），PDF 经系统打印对话框「另存为 PDF」。任何整体替换之前都会自动存一份快照，可从 ⌘K 恢复；内容被意外覆盖时（外部同步、同名顶掉等），用「文件恢复」从两层快照网里找回旧版本。<em>Press ⌘K anywhere; imports are snapshotted first and reversible; overwritten versions live in File recovery.</em></p>
         <p>知识库 <em>Vault</em>：<strong>{snap.account}</strong> · 导入日期 <em>Imported</em>：{snap.capturedAt}</p>
         <p>数据来源 <em>Source</em>：{snap.source}{snap.publishedFrom ? `；内容时间跨度 ${snap.publishedFrom} — ${snap.publishedTo}` : ''}。</p>
         {capable() && getRoot() && <p>文件夹知识库 <em>Vault folder</em>：<code>{getRoot()}</code><br/>编辑会实时写回此文件夹里的 .md 文件，被删除的内容移入 <code>.trash</code>；网页版则只保存在浏览器里。</p>}
@@ -1372,6 +1453,7 @@ function App() {
         <p className="quiet">图谱分析是本地规则检索，未调用 AI。选题、草稿与目标保存在当前浏览器，不写入 Obsidian、不发布到平台。<em>Local rules only · no AI · nothing is published.</em></p>
       </div>
     </Modal>}
+    {modal === 'recovery' && <RecoveryModal onClose={close} onRestoreSnap={restoreSnapVersion} onRestoreCopy={restoreFileCopy}/>}
     {/* 导入去向选择：自动按文件夹分类，或全部归入指定模块；选定后再挑文件夹 */}
     {modal === 'import' && <Modal title="导入知识库" en="Import vault" onClose={close}>
       <div className="about import-pick">

@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
 const dns = require('dns');
+const crypto = require('crypto');
 
 // —— 文件夹知识库（桌面版）：渲染层经 preload 暴露的 window.deepnotes.vault 调用 ——
 // 所有写操作都限制在所选根目录（root）内，路径越界一律拒绝。
@@ -139,6 +140,74 @@ function rejectIncomplete(full, body) {
   return '拒绝写入空文件';
 }
 
+// —— 写前快照（「文件恢复」网，对标 Obsidian 的 File Recovery）——
+// 本应用每次覆盖库内已有文件前，若旧内容与本次写入不同，先把旧内容存进 userData 的快照库
+// （在知识库文件夹之外，不进 .trash，也不会被知识库同步读走）。时序防线再严密也可能有漏网
+// （双编辑器并发、未来的新代码路径），快照网保证任何被本应用覆盖掉的版本都能从恢复界面捞回来。
+// 按内容去重（与该文件最新一份快照相同就跳过）+ 每文件最多 30 份 + 超过 7 天自动清理；
+// 快照失败绝不阻塞写入本身。vault:snapshots / vault:snapshot-read 供恢复界面列出与读取。
+const SNAP_TTL = 7 * 24 * 60 * 60 * 1000;
+const SNAP_KEEP = 30; // 每文件最多保留份数（超出删最旧）
+const SNAP_LIST_MAX = 400; // 恢复界面单次列出的条数上限（新到旧）
+function snapDirFor(root) {
+  // 按库根目录哈希分目录：多库互不混放，路径里的特殊字符也不进文件系统
+  const key = crypto.createHash('sha1').update(path.resolve(String(root))).digest('hex').slice(0, 12);
+  return path.join(app.getPath('userData'), 'file-snapshots', key);
+}
+function snapPathFor(root, full, ts) {
+  const rel = path.relative(path.resolve(String(root)), path.resolve(full));
+  return path.join(snapDirFor(root), rel.replace(/\.md$/i, '') + '_' + ts + '.md');
+}
+let snapPruned = false;
+async function pruneSnapshots(dir, now) { // 超期清理：整库快照树一遍，失败静默（下次触发再清）
+  let entries;
+  try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) { await pruneSnapshots(p, now); continue; }
+    try {
+      const st = await fsp.stat(p);
+      if (now - st.mtimeMs > SNAP_TTL) await fsp.rm(p, { force: true });
+    } catch {}
+  }
+}
+async function capSnapshots(dir) { // 单个文件的快照超额删最旧（文件名带毫秒时间戳前缀，天然可排序）
+  let names = [];
+  try { names = (await fsp.readdir(dir)).filter(n => n.endsWith('.md')).sort(); } catch { return; }
+  if (names.length <= SNAP_KEEP) return;
+  for (const n of names.slice(0, names.length - SNAP_KEEP)) await fsp.rm(path.join(dir, n), { force: true }).catch(() => {});
+}
+async function snapshotBeforeWrite(root, full, body) {
+  try {
+    let old = null;
+    try { old = await fsp.readFile(full, 'utf8'); } catch { return; } // 新文件（首次创建）无需快照
+    if (String(old) === String(body)) return; // 内容没变不拍
+    const dest = snapPathFor(root, full, Date.now());
+    const dir = path.dirname(dest);
+    // 内容去重：与本文件最新一份快照相同就跳过（连续保存只留真正变化过的版本）
+    const stem = path.basename(dest).replace(/_\d{13,}\.md$/, '');
+    let names = [];
+    try { names = (await fsp.readdir(dir)).filter(n => n.startsWith(stem + '_') && n.endsWith('.md')).sort(); } catch {}
+    if (names.length) {
+      try { if ((await fsp.readFile(path.join(dir, names[names.length - 1]), 'utf8')) === String(old)) return; } catch {}
+    }
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(dest, String(old), 'utf8');
+    capSnapshots(dir).catch(() => {});
+    if (!snapPruned) { snapPruned = true; pruneSnapshots(snapDirFor(root), Date.now()).catch(() => {}); }
+  } catch {} // 快照是保底网，自身故障不能影响正常写盘
+}
+function snapshotBeforeWriteSync(root, full, body) { // 退出同步通道用：同步 fs，不能 await
+  try {
+    let old = null;
+    try { old = fs.readFileSync(full, 'utf8'); } catch { return; }
+    if (String(old) === String(body)) return;
+    const dest = snapPathFor(root, full, Date.now());
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, String(old), 'utf8');
+  } catch {}
+}
+
 // 自底向上清理空目录：只沿受影响的目录链（被删/被写文件所在目录 → 根目录）走，
 // 链上某一层还占有内容就停。根目录永不删；. 开头的目录（.trash / .obsidian 等）算占用不删。
 async function pruneUp(root, dir) {
@@ -214,6 +283,7 @@ ipcMain.handle('vault:write', async (_e, { root, rel, body }) => {
     if (isSymlink(full)) return { ok: false, error: '目标是符号链接，拒绝写入' };
     const blocked = rejectIncomplete(full, body);
     if (blocked) return { ok: false, error: blocked };
+    await snapshotBeforeWrite(root, full, body); // 覆盖前把盘上旧内容存进恢复快照库（失败不阻塞写盘）
     await fsp.mkdir(path.dirname(full), { recursive: true });
     await atomicWrite(full, body);
     await pruneUp(root, path.dirname(full)).catch(() => {}); // 顺手清掉因改名/移动而空掉的目录
@@ -259,6 +329,7 @@ ipcMain.handle('vault:export', async (_e, { root, files }) => {
       if (isSymlink(full)) return { ok: false, error: `${f.rel}: 目标是符号链接，拒绝写入` };
       const blocked = rejectIncomplete(full, f.body);
       if (blocked) return { ok: false, error: `${f.rel}: ${blocked}` };
+      await snapshotBeforeWrite(root, full, f.body); // 导出覆盖同路径文件前也留快照
       await fsp.mkdir(path.dirname(full), { recursive: true });
       await atomicWrite(full, f.body);
     }
@@ -347,6 +418,7 @@ ipcMain.on('vault:flush-sync', (e, ops) => {
         if (isSymlink(full)) { failed.push(rel); continue; }
         const blocked = rejectIncomplete(full, op.body);
         if (blocked) { failed.push(rel); continue; }
+        snapshotBeforeWriteSync(op.root, full, op.body); // 退出写盘前的最后一道快照
         fs.mkdirSync(path.dirname(full), { recursive: true });
         const tmp = path.join(path.dirname(full), '.' + path.basename(full) + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8));
         // 与 atomicWrite 同一套落盘纪律：fsync 后 rename，句柄 finally 关闭
@@ -358,6 +430,47 @@ ipcMain.on('vault:flush-sync', (e, ops) => {
     } catch { failed.push(rel); }
   }
   e.returnValue = { ok: failed.length === 0, failed };
+});
+
+// —— 文件恢复：列出某库的写前快照（恢复界面数据源）——
+// 快照目录结构与库内目录一一对应，文件名 = 原文件名去 .md + _毫秒时间戳。
+// file 供 vault:snapshot-read 使用（快照目录内相对路径），rel 还原出原库相对路径。
+ipcMain.handle('vault:snapshots', async (_e, { root }) => {
+  try {
+    if (!root) return { ok: false, error: '参数错误' };
+    if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
+    const base = snapDirFor(root);
+    const list = [];
+    async function walk(dir) {
+      let entries;
+      try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) { await walk(p); continue; }
+        if (!e.isFile() || !e.name.endsWith('.md')) continue;
+        const m = e.name.match(/_(\d{13})\.md$/);
+        if (!m) continue;
+        const file = path.relative(base, p).split(path.sep).join('/');
+        list.push({ file, ts: Number(m[1]), rel: file.replace(/_(\d{13})\.md$/, '.md') });
+      }
+    }
+    await walk(base);
+    list.sort((a, b) => b.ts - a.ts); // 新的在前
+    return { ok: true, list: list.slice(0, SNAP_LIST_MAX) };
+  } catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
+
+// —— 文件恢复：读取一份快照内容（同样只许读快照目录内、且不许借符号链接越界）——
+ipcMain.handle('vault:snapshot-read', async (_e, { root, file }) => {
+  try {
+    if (!root || !file) return { ok: false, error: '参数错误' };
+    if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
+    const base = snapDirFor(root);
+    const full = path.join(base, String(file));
+    if (!inside(base, full)) return { ok: false, error: '路径越界' };
+    if (isSymlink(full)) return { ok: false, error: '路径越界' };
+    return { ok: true, body: await fsp.readFile(full, 'utf8') };
+  } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
 // API Key 本机加密存储（safeStorage：macOS Keychain / Windows DPAPI / Linux libsecret）。

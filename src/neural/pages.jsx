@@ -37,7 +37,7 @@ export function PageHead({zh, en, sub, subEn, children}) {
 }
 
 // —— 作品库 Works ——
-export function Library({graph, works, selected, setSelected, openArticle, setOpenArticle, onNewWork, onUpdateWork, onDeleteWork, onGo, onAction, onBody, onNoteTitle, onConcept, concepts, onLinkify}) {
+export function Library({graph, works, selected, setSelected, openArticle, setOpenArticle, onNewWork, onUpdateWork, onDeleteWork, onGo, onJumpContent, onAction, onBody, onNoteTitle, onConcept, concepts, onLinkify}) {
   const [q, setQ] = useState('');
   const [sort, setSort] = useState('date');
   const charsOf = p => (p.body || '').length;
@@ -88,7 +88,7 @@ export function Library({graph, works, selected, setSelected, openArticle, setOp
       </section>
       {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES[0]} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={concepts} onLinkify={onLinkify}/></aside>}
     </div>
-    {openWork && <ArticleView key={openWork.id} work={openWork} graph={graph} onChange={patch => onUpdateWork(openWork.id, patch)} onClose={() => setOpenArticle(null)} onGo={onGo} onEditInfo={() => onAction({type: 'editWork', id: openWork.id})}/>}
+    {openWork && <ArticleView key={openWork.id} work={openWork} graph={graph} onChange={patch => onUpdateWork(openWork.id, patch)} onClose={() => setOpenArticle(null)} onGo={onGo} onOpenContent={onJumpContent} onEditInfo={() => onAction({type: 'editWork', id: openWork.id})}/>}
   </div>;
 }
 
@@ -164,7 +164,7 @@ function InboxPanel({items, setItems, onToDraft, onToNote, onDaily, onClose}) {
   </aside>;
 }
 
-export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onGo, works, notes, onMove, inbox, setInbox, onFlashToDraft, onFlashToNote, onDaily}) {
+export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onGo, onJumpContent, works, notes, onMove, inbox, setInbox, onFlashToDraft, onFlashToNote, onDaily}) {
   const draft = drafts.find(d => d.id === active) || drafts[0];
   const area = useRef(null);
   const pv = useRef(null); // 阅读模式渲染容器（浮动目录在阅读下跳转/高亮用）
@@ -213,10 +213,11 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
     const a = e.target.closest('a[data-target]');
     if (!a) return;
     // 块引用 [[笔记#小节]]：目标是当前这篇时滚动到对应小节，否则跳到目标内容
+    // （双链就地打开目标内容：作品→作品库、笔记→方法库……；无 onJumpContent 时回退图谱定位）
     const {id, anchor} = resolveTarget(byName, a.dataset.target);
     if (!id) return;
     if (anchor && node && id === node.id) { scrollToAnchor(pv.current, anchor); return; }
-    onGo(id);
+    (onJumpContent || onGo)(id);
   };
   // 可拖动分割线：拖动调左栏宽度（钳制 25–75%），双击恢复对半，左右方向键微调
   const onDividerDown = e => {
@@ -333,7 +334,7 @@ const LANES = [['待写', 'To write'], ['待扩展', 'To expand'], ['已转草�
 const PRI = {高: ['High', 'high'], 中: ['Medium', 'mid'], 低: ['Low', 'low']};
 
 // —— 方法库 Methods：左侧笔记列表按二级分类分组（可折叠、可拖拽归类、分类可增删改），右侧就地编辑 ——
-export function Methods({graph, notes, setNotes, selected, setSelected, onGo, onNew, onDelete, onUpdate, onMove, folders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder}) {
+export function Methods({graph, notes, setNotes, selected, setSelected, onGo, onJumpContent, onNew, onDelete, onUpdate, onMove, folders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder}) {
   const note = notes.find(n => n.id === selected) || notes[0];
   const area = useRef(null);
   const pv = useRef(null); // 阅读模式渲染容器（浮动目录在阅读下跳转/高亮用）
@@ -362,10 +363,11 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
     const a = e.target.closest('a[data-target]');
     if (!a) return;
     // 块引用 [[笔记#小节]]：目标是当前这篇时滚动到对应小节，否则跳到目标内容
+    // （双链就地打开目标内容；无 onJumpContent 时回退图谱定位）
     const {id, anchor} = resolveTarget(byName, a.dataset.target);
     if (!id) return;
     if (anchor && note && id === 'note:' + note.id) { scrollToAnchor(pv.current, anchor); return; }
-    onGo(id);
+    (onJumpContent || onGo)(id);
   };
   const rows = notes.filter(n => (n.title + ' ' + (n.path || '')).toLowerCase().includes(q.toLowerCase()));
   const subOf = n => (n.path || '').split('/')[1] || '笔记';
@@ -497,7 +499,7 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
 }
 
 // —— 阅读区 Readings：放别人写好的内容，自己拿来阅读（可批注编辑），左侧分类目录管理 ——
-export function Readings({graph, readings, selected, setSelected, openReading, setOpenReading, onGo, onAction, onNew, onUpdate, onDelete, readFolders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder, onLinkify, onImportFiles}) {
+export function Readings({graph, readings, selected, setSelected, openReading, setOpenReading, onGo, onJumpContent, onAction, onNew, onUpdate, onDelete, readFolders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder, onLinkify, onImportFiles}) {
   const [q, setQ] = useState('');
   const [curFolder, setCurFolder] = useState(null); // null = 全部；「未分类」是删除分类时的兜底去处
   const [renaming, setRenaming] = useState(null);
@@ -630,12 +632,12 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
       </section>
       {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'readings')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} onLinkify={onLinkify}/></aside>}
     </div>
-    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenReading(null)} onGo={onGo} eyebrow={['READING', '阅读全文']} exportKind="readings"/>}
+    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenReading(null)} onGo={onGo} onOpenContent={onJumpContent} eyebrow={['READING', '阅读全文']} exportKind="readings"/>}
   </div>;
 }
 
 // —— 档案区 Archives：放创作者自己的个人档案（简介、回顾、清单等），与阅读区同构，双链汇入图谱 ——
-export function Archives({graph, archives, selected, setSelected, openArchive, setOpenArchive, onGo, onAction, onNew, onUpdate, onDelete, onLinkify}) {
+export function Archives({graph, archives, selected, setSelected, openArchive, setOpenArchive, onGo, onJumpContent, onAction, onNew, onUpdate, onDelete, onLinkify}) {
   const [q, setQ] = useState('');
   const rows = archives.filter(a => ((a.title || '') + ' ' + (a.body || '')).toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
@@ -676,7 +678,7 @@ export function Archives({graph, archives, selected, setSelected, openArchive, s
       </section>
       {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'archives')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} onLinkify={onLinkify}/></aside>}
     </div>
-    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenArchive(null)} onGo={onGo} eyebrow={['ARCHIVE', '档案全文']} exportKind="archives"/>}
+    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenArchive(null)} onGo={onGo} onOpenContent={onJumpContent} eyebrow={['ARCHIVE', '档案全文']} exportKind="archives"/>}
   </div>;
 }
 
@@ -685,7 +687,7 @@ export function Archives({graph, archives, selected, setSelected, openArchive, s
 // 页头「开始复习」进入闪卡模式（到期优先，忘了 / 模糊 / 记得三档调度），
 // 复习分「概念卡 / 段落卡」两类：段落卡来自编辑器选中文本一键存卡（格式栏「存为闪卡」）。
 // 点击概念回到工作台图谱选中它。
-export function Concepts({graph, onGo}) {
+export function Concepts({graph, onGo, onJumpContent}) {
   const [q, setQ] = useState('');
   const extras = conceptExtras.use();   // {概念名: {text, terms}}
   const review = conceptReview.use();   // {概念名: {due, ivl, ef, reps}}
@@ -765,7 +767,7 @@ export function Concepts({graph, onGo}) {
             <span className="rc-body">
               <span className="rc-title-row">
                 {to
-                  ? <button className="rc-title as-link" onClick={() => onGo(to)} title="打开原文 · Open source">{c.source}</button>
+                  ? <button className="rc-title as-link" onClick={() => (onJumpContent || onGo)(to)} title="打开原文 · Open source">{c.source}</button>
                   : <span className="rc-title">{c.source || '未命名'}</span>}
                 {due && <span className="rc-due">待复习 <em>due</em></span>}
                 <button className="icon-btn rc-edit" aria-label="删除卡片 Delete card" title="删除卡片 Delete" onClick={() => deleteParaCard(c.id)}><Icon name="trash" size={13}/></button>
@@ -834,7 +836,7 @@ export function Concepts({graph, onGo}) {
               ? <>
                 <span className="rev-hint">来自「{card.source || '未命名'}」 <em>from</em></span>
                 <p className="rev-para">{card.text}</p>
-                {to && <span className="rev-links as-link" role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setRev(null); onGo(to); } }} onMouseDown={e => e.stopPropagation()} onClick={() => { setRev(null); onGo(to); }}>打开原文 <em>Open source</em></span>}
+                {to && <span className="rev-links as-link" role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setRev(null); (onJumpContent || onGo)(to); } }} onMouseDown={e => e.stopPropagation()} onClick={() => { setRev(null); (onJumpContent || onGo)(to); }}>打开原文 <em>Open source</em></span>}
               </>
               : <>
                 <span className="rev-hint">回想这段内容 <em>Recall this passage</em></span>

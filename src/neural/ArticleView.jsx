@@ -687,7 +687,7 @@ export function buildMirrorHtml(text, sel) {
   return out.join('');
 }
 
-export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo, eyebrow = ['ARTICLE', '文章全文'], exportKind = 'works'}) {
+export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent, onEditInfo, eyebrow = ['ARTICLE', '文章全文'], exportKind = 'works'}) {
   const [mode, setMode] = useState('edit');
   // 专注模式：隐藏头部信息与页脚，正文区占满（浮层本身已全屏，这里是榨出最后的可视空间）
   const [focusMode, setFocusMode] = useState(false);
@@ -762,11 +762,13 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onEditInfo, e
     const a = e.target.closest('.md-wikilink');
     if (!a) return;
     // 块引用 [[笔记#小节]]：目标是当前这篇时滚动到对应小节，否则跳到目标内容
+    // （双链就地打开目标内容：作品→作品库、笔记→方法库……；概念目标由 openContent 落到工作台图谱；
+    //   未传 onOpenContent 时回退图谱定位）
     const {id, anchor} = resolveTarget(byName, a.dataset.target);
     if (!id) return;
     const selfId = ['post', 'reading', 'archive', 'draft', 'note'].map(k => k + ':' + work.id).find(x => graph.index.has(x));
     if (anchor && id === selfId) { scrollToAnchor(previewRef.current, anchor); return; }
-    onGo(id);
+    (onOpenContent || onGo)(id);
   };
   // —— 单篇导出：桌面版选目录写 .md；网页版浏览器直接下载 ——
   const [expHint, setExpHint] = useState('');
