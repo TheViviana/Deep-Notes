@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseVault} from '../src/neural/importer.js';
-import {serialize, resolveRels, queueSync, flush, flushAll, setErrorHandler, retryPending, hasPendingWrites, clearPendingWrites, snapshotBeforeAdopt, listSnapshots, flushSyncNow} from '../src/neural/fileStore.js';
+import {serialize, resolveRels, queueSync, flush, flushAll, setErrorHandler, retryPending, hasPendingWrites, clearPendingWrites, snapshotBeforeAdopt, listSnapshots, flushSyncNow, uniqueNotePath, setRoot, loadMeta, patchMeta, writeMetaNow} from '../src/neural/fileStore.js';
 import {VAULT_ROOT_KEY, CONFIG} from '../src/config.js';
 
 // —— 浏览器全局桩：fileStore 引用裸 localStorage 与 window.deepnotes ——
@@ -295,4 +295,40 @@ test('flushSyncNow：部分失败时留底收敛为仍失败的（写成功的�
   assert.ok(!left[0].rel.includes('新稿'), '写成功的新稿不留底');
   setErrorHandler(null);
   clearPendingWrites();
+});
+
+// —— N1 回归：uniqueNotePath 传入无 .md 后缀且已占用的路径时必须立即返回，绝不死循环 ——
+test('uniqueNotePath：无 .md 且冲突时补扩展名立即返回，循环有界不空转', () => {
+  const taken = new Map([['05-方法库 methods/新建/甲', 'other']]);
+  const got = uniqueNotePath('05-方法库 methods/新建/甲', taken, 'self');
+  assert.ok(/\.md$/i.test(got) && got.startsWith('05-方法库 methods/新建/甲'), '补 .md 后落到可用路径');
+  // 带扩展名、且 --id 短码也被占用：递增后缀仍可用
+  const taken2 = new Map([['a.md', 'o1'], ['a--self.md', 'o2']]);
+  assert.equal(uniqueNotePath('a.md', taken2, 'self'), 'a-2.md');
+  // 空输入有兜底，taken 为 null 也能用
+  assert.equal(uniqueNotePath('', null), '05-方法库 methods/笔记/未命名.md');
+  // 排除自身：改名改回自己不算冲突
+  assert.equal(uniqueNotePath('a.md', new Map([['a.md', 'self']]), 'self'), 'a.md');
+});
+
+// —— N3 回归：writeMetaNow 对本会话没动的键以盘上为准，绝不拿启动时的陈旧快照覆盖对面机器的改动 ——
+test('writeMetaNow：非脏键保持盘上值（对面机器的改动不被抹），脏键照常写入', async () => {
+  let disk = {folders: ['旧分类'], conceptExtras: {注意力: {def: '启动时的旧定义'}}};
+  let written = null;
+  globalThis.window = {deepnotes: {vault: {
+    metaRead: async () => ({ok: true, data: JSON.parse(JSON.stringify(disk))}),
+    metaWrite: async (root, payload) => { written = JSON.parse(JSON.stringify(payload)); return {ok: true}; },
+  }}};
+  try {
+    await setRoot('/tmp/vault');
+    await loadMeta(); // 启动首读：本机快照 = 盘上旧值
+    disk.conceptExtras = {注意力: {def: '另一台机器的新定义'}}; // 本会话期间对面机器改了盘上
+    patchMeta({folders: ['本机新增分类']}); // 本机只动 folders
+    await writeMetaNow(); // 写前重读盘上：应看到对面的新定义
+    assert.deepEqual(written.folders, ['本机新增分类'], '本会话改过的键照常写入');
+    assert.deepEqual(written.conceptExtras, {注意力: {def: '另一台机器的新定义'}}, '没动的键保持盘上值，不被陈旧快照覆盖');
+  } finally {
+    await setRoot(null);
+    globalThis.window = {};
+  }
 });

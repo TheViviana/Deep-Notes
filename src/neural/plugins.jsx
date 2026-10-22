@@ -602,8 +602,8 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
           const f = e.target.files?.[0]; e.target.value = '';
           if (!f) return;
           // accept 只是选择器提示，拦不住把任意文件拖进来：与粘贴路径同等校验 MIME，并限制体积
-          if (!f.type.startsWith('image/')) { window.alert('只能插入图片文件 · Images only'); return; }
-          if (f.size > 20 * 1024 * 1024) { window.alert('图片过大，上限 20MB · Image too large (max 20MB)'); return; }
+          if (!f.type.startsWith('image/')) { window.showGlobalNotice?.('只能插入图片文件 · Images only'); return; }
+          if (f.size > 20 * 1024 * 1024) { window.showGlobalNotice?.('图片过大，上限 20MB · Image too large (max 20MB)'); return; }
           fileToDataUrl(f).then(url => insert(`![图片](${url})`)).catch(() => {});
         }}/>
       <span className="tpl-wrap">
@@ -640,7 +640,7 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
         <button role="menuitem" className="tpl-save" disabled={!String(value || '').trim()}
           onMouseDown={e => e.preventDefault()}
           title="把编辑器当前正文保存为自定义模板，之后可在这里或「插件管理」里修改"
-          onClick={() => { const ok = setUserTpls([...userTpls, newTpl(`自定义模板 ${userTpls.length + 1}`, value)]); if (ok) setTplOpen(false); else window.alert('模板没能保存到本机（存储不可用或已满），本次会话内仍可使用，重启后会丢失 · Template not saved'); }}>
+          onClick={() => { const ok = setUserTpls([...userTpls, newTpl(`自定义模板 ${userTpls.length + 1}`, value)]); if (ok) setTplOpen(false); else window.showGlobalNotice?.('模板没能保存到本机（存储不可用或已满），本次会话内仍可使用，重启后会丢失 · Template not saved'); }}>
           <b>⊕ 存正文为模板</b><small>Save body as template</small>
         </button>
       </div>}
@@ -692,9 +692,9 @@ export function PluginList() {
         <textarea value={t.body} rows={4} aria-label="模板内容 Template body" placeholder="模板内容，支持 [[双链]] 与变量"
           onChange={e => setTpls(tpls.map(x => x.id === t.id ? {...x, body: e.target.value} : x))}/>
         <button className="icon-btn" aria-label={`删除模板 ${t.label}`} title="删除模板 Delete"
-          onClick={() => { if (!setTpls(tpls.filter(x => x.id !== t.id))) window.alert('模板没能从本机删除（存储不可用），重启后会出现 · Template delete failed'); }}><Icon name="trash" size={13}/></button>
+          onClick={() => { if (!setTpls(tpls.filter(x => x.id !== t.id))) window.showGlobalNotice?.('模板没能从本机删除（存储不可用），重启后会出现 · Template delete failed'); }}><Icon name="trash" size={13}/></button>
       </div>)}
-      <button className="pill ghost" onClick={() => { if (!setTpls([...tpls, newTpl(`自定义模板 ${tpls.length + 1}`, '# <%= title %>\n\n')])) window.alert('模板没能保存到本机（存储不可用或已满），本次会话内仍可使用 · Template not saved'); }}>
+      <button className="pill ghost" onClick={() => { if (!setTpls([...tpls, newTpl(`自定义模板 ${tpls.length + 1}`, '# <%= title %>\n\n')])) window.showGlobalNotice?.('模板没能保存到本机（存储不可用或已满），本次会话内仍可使用 · Template not saved'); }}>
         <Icon name="plus" size={14}/>新建模板 <em>New template</em>
       </button>
     </div>

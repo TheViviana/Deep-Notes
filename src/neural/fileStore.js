@@ -144,15 +144,22 @@ export async function writeMetaNow() {
     try {
       const r = await v.metaRead(root);
       if (gen !== metaGen || root !== getRoot()) return false; // 读盘期间换库：这份结果不作数
-      if (!r?.ok) return false; // 读不到就不写，绝不用不完整的对象覆盖盘上文件
+      if (!r?.ok) { // 读不到就不写，绝不用不完整的对象覆盖盘上文件；但要让用户知道附属数据没落盘
+        try { window.dispatchEvent(new CustomEvent('deepnotes-meta-write-failed', {detail: String(r?.error || 'unknown')})); } catch {}
+        return false;
+      }
       const disk = r.data && typeof r.data === 'object' && !Array.isArray(r.data) ? r.data : {};
       const base = metaBase || {};
       payload = {...disk};
       for (const k of Object.keys(snapshot)) {
-        if (!metaDirty.has(k)) { payload[k] = snapshot[k]; continue; }
+        if (!metaDirty.has(k)) continue; // 本机没动 → 保持盘上值，绝不用启动时的陈旧快照覆盖对面机器的改动
         payload[k] = META_LIST_KEYS.has(k) ? mergeMetaList(snapshot[k], disk[k], base[k]) : snapshot[k];
       }
-    } catch { return false; }
+      for (const k of metaDirty) if (!(k in payload)) payload[k] = snapshot[k]; // 新增键照常写入
+    } catch (err) { // 读盘抛错同样不落盘，提示与 !ok 分支一致
+      try { window.dispatchEvent(new CustomEvent('deepnotes-meta-write-failed', {detail: String(err?.message || err)})); } catch {}
+      return false;
+    }
   }
   try {
     const r = await v.metaWrite(root, payload);
@@ -164,9 +171,13 @@ export async function writeMetaNow() {
     }
     // 写盘成功才广播：conceptStore 据此更新三向合并的 shadow（写失败不更新，shadow 不撒谎）
     if (ok && typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('deepnotes-meta-written', {detail: payload}));
+    if (!ok) try { window.dispatchEvent(new CustomEvent('deepnotes-meta-write-failed', {detail: String(r?.error || 'unknown')})); } catch {}
     return ok;
   }
-  catch { return false; }
+  catch (err) {
+    try { window.dispatchEvent(new CustomEvent('deepnotes-meta-write-failed', {detail: String(err?.message || err)})); } catch {}
+    return false;
+  }
 }
 
 // 各模块内容落盘的默认目录；方法笔记直接使用自身 path（形如 05-方法库 methods/<子目录>/<文件名>.md）。
@@ -215,14 +226,18 @@ export {shortId};
 // 方法笔记路径分配：同一相对路径只能属于一条笔记——否则队列同键覆盖、写盘只落一份，正文静默丢失。
 // taken: Map<rel, id>（由当前 notes 构造）；excludeId 是正在改名 / 移动的这一条（改到自己不算冲突）。
 export function uniqueNotePath(base, taken, excludeId) {
-  const rel = String(base || '').replace(/\\/g, '/');
+  let rel = String(base || '').replace(/\\/g, '/');
+  if (!rel) rel = '05-方法库 methods/笔记/未命名.md';
+  if (!/\.md$/i.test(rel)) rel += '.md'; // 兜底补扩展名：replace 只在有 .md 时生效，否则后缀递增永不生效 → 死循环
   const free = r => !taken || !taken.has(r) || (!!excludeId && taken.get(r) === excludeId);
   if (free(rel)) return rel;
   const withId = rel.replace(/\.md$/i, `--${shortId(excludeId)}.md`);
   if (free(withId)) return withId;
-  let n = 1, next = withId;
-  do { next = rel.replace(/\.md$/i, `-${++n}.md`); } while (!free(next));
-  return next;
+  for (let n = 2; n < 1000; n++) { // 有界循环：任何输入都必须能返回，绝不空转
+    const next = rel.replace(/\.md$/i, `-${n}.md`);
+    if (free(next)) return next;
+  }
+  return rel.replace(/\.md$/i, `-${Date.now()}.md`); // 最后兜底：理论上到不了，但保证函数必然终止
 }
 export function resolveRels(kind, items) {
   // notes 的 path 由调用方保证唯一，这里仍走同一条消歧兜底：万一撞车，也不会两条笔记写同一个文件
@@ -271,7 +286,8 @@ export function serialize(kind, item) {
   } else if (kind === 'archives') {
     fm = frontmatter([...keep, ['deepnotes-id', item.id], ['title', item.title], ['date', item.date || null], ['updated', item.updatedAt || null]]);
   } else if (kind === 'drafts') {
-    fm = frontmatter([...keep, ['deepnotes-id', item.id], ['title', item.title], ['updated', item.updatedAt || null]]);
+    // source（来源选题 id）一并落盘：选题 id 是稳定散列，重导入后引用不断链
+    fm = frontmatter([...keep, ['deepnotes-id', item.id], ['title', item.title], ['source', item.source || null], ['updated', item.updatedAt || null]]);
   } else if (kind === 'ideas') {
     // 选题没有正文：平台 / 优先级 / 状态 / 备注全部入 frontmatter（导入端优先读 fm.note，往返无损）
     fm = frontmatter([...keep, ['deepnotes-id', item.id], ['title', item.title],

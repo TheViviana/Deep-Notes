@@ -77,8 +77,9 @@ export function buildGraph({works = [], notes = notesRaw, ideas = [], drafts = [
 
   // 方法库笔记与子目录（软件内可编辑：notes 来自状态层，未传时用静态数据）。
   for (const n of notes) {
-    const parts = n.path.split('/');
-    const sub = parts[1];
+    // path 可能缺失（历史数据 / 异常状态）：判空兜底归入「笔记」分类，绝不能把整页渲染炸掉
+    const parts = String(n.path || '').split('/');
+    const sub = parts[1] || '笔记';
     const subId = 'f:' + sub;
     add({id: subId, kind: 'folder', title: sub.replace(/^\d+-/, '').replace(/\s+[a-z-]+$/i, ''), path: parts.slice(0, 2).join('/'), level: 2});
     link('f:methods', subId, 'contain');

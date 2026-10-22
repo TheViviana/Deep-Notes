@@ -140,7 +140,8 @@ export async function parseVault(fileList, target = 'auto') {
 
   const drafts = bucket.drafts.map(x => {
     const src = String(pick(x.fm, ['source', '来源选题', '选题']) || '');
-    const idea = ideas.find(d => d.title === src);
+    // 兼容两种写法：旧数据按标题，新落盘写选题 id（deepnotes-id 稳定散列，重导入不漂移）
+    const idea = ideas.find(d => d.title === src) || ideas.find(d => src && String(d.id) === src);
     return {fm: x.fm, rel: x.rel, title: x.title, body: clean(x.body), source: idea ? idea.id : null,
       updatedAt: String(pick(x.fm, ['updated']) || '') || undefined, keep: keepOf(x.fm, 'drafts')};
   });

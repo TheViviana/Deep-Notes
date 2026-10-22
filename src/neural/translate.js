@@ -78,7 +78,7 @@ const translateChunk = async text => {
 
 // 翻译一段原文（自动切块、2 路并发、内存缓存）
 // 单个分块失败时回落原文而不是整体 reject：整段可用，只有失败的那几句保持原文；
-// 结果照常写缓存，避免同一段反复重试形成请求风暴。
+// 部分失败的结果不写缓存（否则本会话永远拿到未翻译的原文），下次重试会重新发请求。
 const CONCURRENCY = 2;
 export async function translateText(text) {
   const src = String(text || '').trim();
@@ -87,15 +87,16 @@ export async function translateText(text) {
   if (hit !== undefined) return hit;
   const parts = chunk(src);
   const out = new Array(parts.length);
-  let i = 0;
+  let i = 0, bad = 0;
   const worker = async () => {
     while (i < parts.length) {
       const k = i++;
-      out[k] = await translateChunk(parts[k]).catch(() => parts[k]);
+      out[k] = await translateChunk(parts[k]).catch(() => { bad += 1; return parts[k]; });
     }
   };
   await Promise.all(Array.from({length: Math.min(CONCURRENCY, parts.length)}, worker));
   const res = out.join('');
-  cacheSet(src, res);
+  // 只有完整成功才写缓存：失败的段落回落了原文，缓存会让本会话永远拿到未翻译结果，用户重试也不会再发请求
+  if (bad === 0) cacheSet(src, res);
   return res;
 }

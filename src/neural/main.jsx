@@ -3,7 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, seedReadings, seedArchives, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
 import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags, WORKS_KEY} from './worksStore';
 import {pickVaultFolder, pickMdFiles, parseVault} from './importer';
-import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushAll, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, uniqueNotePath, hasPendingWrites, retryPending, clearPendingWrites, pendingReady, snapshotBeforeAdopt, readFileSnapshot, loadMeta, patchMeta, VAULT_MODE} from './fileStore';
+import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushAll, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, uniqueNotePath, safeName, hasPendingWrites, retryPending, clearPendingWrites, pendingReady, snapshotBeforeAdopt, readFileSnapshot, loadMeta, patchMeta, VAULT_MODE} from './fileStore';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
@@ -130,6 +130,8 @@ function showGlobalNotice(msg) {
 }
 window.addEventListener('error', () => showGlobalNotice('页面出现异常，建议重新加载 · Unexpected error, reload recommended'));
 window.addEventListener('unhandledrejection', () => showGlobalNotice('页面出现异常，建议重新加载 · Unexpected error, reload recommended'));
+// 顶栏提示条作为渲染层公共通道：插件等独立模块不 import 主模块，统一走 window.showGlobalNotice
+window.showGlobalNotice = showGlobalNotice;
 
 // —— 渲染层兜底：任何组件抛错都不再白屏，给出错误摘要与重载入口（数据都在本机，重载即恢复） ——
 class ErrorBoundary extends React.Component {
@@ -534,11 +536,15 @@ function App() {
     // 留底的 IndexedDB 兜底也写不进（审计 v2-⑧）：留底只在本会话内存里，用户必须知道
     const failNote = () => showGlobalNotice('挂起写盘留底失败（localStorage 与 IndexedDB 均不可用），未落盘的修改仅保留在本次会话内存中，请尽快重试写盘或导出备份 · Pending backup unavailable');
     window.addEventListener('deepnotes-pending-persist-failed', failNote);
+    // 附属数据（概念定义 / 复习进度 / 闪念箱 / 空分类）写库失败：不静默，让用户知道这次改动没落盘
+    const metaFail = () => showGlobalNotice('附属数据未能写入知识库（.deepnotes/meta.json 读写失败），本次的概念定义 / 复习进度等改动可能未保存 · Meta write failed');
+    window.addEventListener('deepnotes-meta-write-failed', metaFail);
     // IndexedDB 补灌完成后再对齐一次（审计 v2-⑦）：补灌事件可能早于本监听器注册，只靠事件会漏
     pendingReady.then(sync).catch(() => {});
     return () => {
       window.removeEventListener('deepnotes-pending-changed', sync);
       window.removeEventListener('deepnotes-pending-persist-failed', failNote);
+      window.removeEventListener('deepnotes-meta-write-failed', metaFail);
     };
   }, []);
   async function retryPendingWrites() {
@@ -601,8 +607,8 @@ function App() {
     const t = (String(it.text || '').split('\n')[0] || '闪念笔记').slice(0, 24).replace(/[/\\]/g, '·');
     const nid = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
     const base = `05-方法库 methods/闪念/${t}.md`;
-    const path = uniqueNotePath(base, noteTaken(notes, nid), nid);
-    setNotes(ns => [{id: nid, title: t, path, body: `${it.text}\n`}, ...ns]);
+    // 路径分配必须进 updater 用最新 notes 查重：连续转两条闪念时渲染闭包里的 notes 是旧值，会撞路径
+    setNotes(ns => [{id: nid, title: t, path: uniqueNotePath(base, noteTaken(ns, nid), nid), body: `${it.text}\n`}, ...ns]);
     setInbox(list => list.filter(x => x.id !== id));
     setToast('已转入方法笔记 · Saved to methods');
   }
@@ -637,29 +643,31 @@ function App() {
   // 统一走 fileStore.uniqueNotePath：有冲突时追加 id 短码，再不行递增 -2.md。
   const noteTaken = (list, excludeId) => new Map(list.filter(x => x.id !== excludeId && x.path).map(x => [x.path, x.id]));
   function updateNote(id, patch) {
-    let notePath = null;
-    if (patch.title != null) {
-      const cur = notes.find(n => n.id === id);
-      if (cur) {
-        const safe = (String(patch.title).trim() || '未命名').replace(/[/\\]/g, '·').slice(0, 60);
-        const base = String(cur.path || '').replace(/[^/]+\.md$/, `${safe}.md`);
-        notePath = uniqueNotePath(base, noteTaken(notes, id), id);
-      }
-    }
+    // 路径分配进 updater：用最新 notes 查重；文件名统一走 safeName（截断 60、分隔符换 ·），
+    // 且 path 缺失 / 无 .md 时按目录重建文件名，标题与磁盘文件名不再脱节。
     setNotes(ns => ns.map(n => {
       if (n.id !== id) return n;
       const next = {...n, ...patch};
-      if (patch.title != null) next.path = notePath || String(n.path || '').replace(/[^/]+\.md$/, `${String(patch.title).replace(/[/\\]/g, '·')}.md`);
+      if (patch.title != null) {
+        const safe = safeName(patch.title);
+        const base = /\/$/.test(String(n.path || '')) || !/\.md$/i.test(String(n.path || ''))
+          ? `${(String(n.path || '').replace(/[^/]+$/, '') || '05-方法库 methods/笔记/')}${safe}.md`
+          : String(n.path).replace(/[^/]+\.md$/, `${safe}.md`);
+        next.path = uniqueNotePath(base, noteTaken(ns, id), id);
+      }
       return next;
     }));
   }
   function addNote() {
     const t = '新建方法笔记';
-    const taken = new Set(notes.map(n => String(n.path || '')).filter(Boolean));
-    let name = t, n = 1;
-    while (taken.has(`05-方法库 methods/新建/${name}.md`)) name = `${t} ${++n}`; // 连点多次各占一个文件
     const id = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5); // 同毫秒点击也不撞 id
-    setNotes(ns => [{id, title: name, path: `05-方法库 methods/新建/${name}.md`, body: `# ${name}\n\n`}, ...ns]);
+    setNotes(ns => {
+      const taken = noteTaken(ns, id);
+      let name = t, n = 1;
+      while (taken.has(`05-方法库 methods/新建/${name}.md`)) name = `${t} ${++n}`; // 连点多次各占一个文件
+      const path = uniqueNotePath(`05-方法库 methods/新建/${name}.md`, taken, id);
+      return [{id, title: name, path, body: `# ${name}\n\n`}, ...ns];
+    });
     setMethSel(id); setPage('methods');
     setToast('方法笔记已创建，保存在此浏览器 · Note created');
   }
@@ -689,8 +697,8 @@ function App() {
     const n = notes.find(x => x.id === id);
     if (!n || subOf(n) === folder) return; // 同分类重复投放：原地不动
     const src = subOf(n);
-    const path = uniqueNotePath(notePathIn(n, folder), noteTaken(notes, id), id);
-    setNotes(ns => ns.map(x => x.id === id ? {...x, path} : x));
+    // 路径分配进 updater：拖拽连点时闭包里的 notes 可能过期
+    setNotes(ns => ns.map(x => x.id === id ? {...x, path: uniqueNotePath(notePathIn(x, folder), noteTaken(ns, id), id)} : x));
     // 原分类因此空了就自动移除，不留空分类
     if (!notes.some(x => x.id !== id && subOf(x) === src) && folders.includes(src)) setFolders(fs => fs.filter(f => f !== src));
     setToast(`已移入「${folder}」 · Moved to ${folder}`);
@@ -889,10 +897,9 @@ function App() {
     if (toKind === 'works') setWorks(ws => [normalizeWork({...moved, date: stamp, tags: moved.tags || []}), ...ws]);
     else if (toKind === 'methods') {
       const nid = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
-      // 文件名安全化：标题里的 / 与 \ 不能进路径（否则写盘时会被当成子目录）
-      const safe = String(moved.title || '未命名').replace(/[/\\]/g, '·').slice(0, 60) || '未命名';
-      const path = uniqueNotePath(`05-方法库 methods/新建/${safe}.md`, noteTaken(notes, nid), nid);
-      setNotes(ns => [{id: nid, title: moved.title, path, body: moved.body}, ...ns]);
+      // 文件名安全化：标题里的 / 与 \ 不能进路径（否则写盘时会被当成子目录）；路径查重进 updater
+      const safe = safeName(moved.title);
+      setNotes(ns => [{id: nid, title: moved.title, path: uniqueNotePath(`05-方法库 methods/新建/${safe}.md`, noteTaken(ns, nid), nid), body: moved.body}, ...ns]);
     }
     else if (toKind === 'drafts') setDrafts(ds => [{id: 'draft-' + Date.now(), title: moved.title, body: moved.body, source: null}, ...ds]);
     else if (toKind === 'ideas') setIdeas(is => [...is, {id: nextIdeaId(is), title: moved.title, platform: '', priority: '中', status: '待写', note: (moved.body || '').slice(0, 120)}]);
@@ -979,9 +986,8 @@ function App() {
       setArchives(as => [a, ...as]); setArcSel(a.id); setPage('archives');
     } else {
       const id = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
-      const path = uniqueNotePath(`05-方法库 methods/恢复/${title.replace(/[/\\]/g, '·')}.md`, noteTaken(notes, id), id);
-      const n = {id, title, path, body: text};
-      setNotes(ns => [n, ...ns]); setMethSel(n.id); setPage('methods');
+      setNotes(ns => [{id, title, path: uniqueNotePath(`05-方法库 methods/恢复/${safeName(title)}.md`, noteTaken(ns, id), id), body: text}, ...ns]);
+      setMethSel(id); setPage('methods');
     }
     setModal(null);
     setToast('已恢复为副本（新建条目，现有内容不动） · Restored as copy');
@@ -1002,9 +1008,8 @@ function App() {
       if (!t) return;
       if (a.kind === 'note') {
         const id = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
-        const safe = t.replace(/[/\\]/g, '·');
-        const path = uniqueNotePath(`05-方法库 methods/新建/${safe}.md`, noteTaken(notes, id), id);
-        setNotes(ns => [{id, title: t, path, body: `# ${t}\n`}, ...ns]);
+        const safe = safeName(t);
+        setNotes(ns => [{id, title: t, path: uniqueNotePath(`05-方法库 methods/新建/${safe}.md`, noteTaken(ns, id), id), body: `# ${t}\n`}, ...ns]);
         setFocus({mod: 'methods', sel: 'note:' + id}); setPage('home');
         setToast('方法笔记已创建，双链已接通 · Note created');
       } else {
@@ -1063,9 +1068,8 @@ function App() {
       return {id: 'post:' + w.id, title: t};
     }
     if (kind === 'note') {
-      const id = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5); const safe = t.replace(/[/\\]/g, '·');
-      const path = uniqueNotePath(`05-方法库 methods/AI/${safe}.md`, noteTaken(notes, id), id);
-      setNotes(ns => [{id, title: t, path, body: body || `# ${t}\n`}, ...ns]);
+      const id = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5); const safe = safeName(t);
+      setNotes(ns => [{id, title: t, path: uniqueNotePath(`05-方法库 methods/AI/${safe}.md`, noteTaken(ns, id), id), body: body || `# ${t}\n`}, ...ns]);
       setToast(`AI 新建了方法笔记「${t}」 · AI created a note`);
       return {id: 'note:' + id, title: t};
     }
@@ -1093,14 +1097,14 @@ function App() {
       return {ok: true, title: patch.title};
     }
     if (kind === 'note') {
-      const safeTitle = patch.title ? patch.title.trim().replace(/[/\\]/g, '·') : patch.title; // 文件名安全化
-      const curNote = notes.find(x => x.id === id);
-      let renamedPath = null;
-      if (safeTitle && curNote?.path) {
-        const base = curNote.path.replace(/[^/]+$/, safeTitle + '.md');
-        renamedPath = uniqueNotePath(base, noteTaken(notes, id), id);
-      }
-      setNotes(ns => ns.map(x => x.id === id ? {...x, ...patch, ...(renamedPath ? {path: renamedPath} : {})} : x)); // path 缺失时只改内容不改路径（审计 v2-⑤）
+      const safeTitle = patch.title ? safeName(patch.title) : patch.title; // 文件名安全化（含 60 截断，与 updateNote 同规则）
+      setNotes(ns => ns.map(x => {
+        if (x.id !== id) return x;
+        const next = {...x, ...patch};
+        // path 缺失时只改内容不改路径（审计 v2-⑤）；改名查重用 updater 里的最新 notes
+        if (safeTitle && x.path) next.path = uniqueNotePath(String(x.path).replace(/[^/]+$/, safeTitle + '.md'), noteTaken(ns, id), id);
+        return next;
+      }));
       return {ok: true, title: patch.title};
     }
     return {error: '未知类型 ' + kind};

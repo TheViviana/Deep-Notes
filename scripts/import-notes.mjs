@@ -146,7 +146,8 @@ settleIds(ideas, 'idea-'); // 无 deepnotes-id 时按标题散列，顺序变化
 
 const drafts = bucket.drafts.map(x => {
   const src = String(pick(x.fm, ['source', '来源选题', '选题']) || '');
-  const idea = ideas.find(d => d.title === src);
+  // 兼容两种写法：旧数据按标题，新落盘写选题 id（与应用内 importer 同口径，规则不分叉）
+  const idea = ideas.find(d => d.title === src) || ideas.find(d => src && String(d.id) === src);
   return {fm: x.fm, rel: x.rel, title: x.title, body: clean(x.body), source: idea ? idea.id : null,
     updatedAt: String(pick(x.fm, ['updated']) || '') || undefined, keep: keepOf(x.fm, 'drafts')};
 });
