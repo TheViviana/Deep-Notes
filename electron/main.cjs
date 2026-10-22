@@ -164,21 +164,22 @@ function snapDirFor(root) {
   const key = crypto.createHash('sha1').update(path.resolve(String(root))).digest('hex').slice(0, 12);
   return path.join(app.getPath('userData'), 'file-snapshots', key);
 }
-function snapPathFor(root, full, ts) {
-  const rel = path.relative(path.resolve(String(root)), path.resolve(full));
-  return path.join(snapDirFor(root), rel.replace(/\.md$/i, '') + '_' + ts + '.md');
-}
-let snapPruned = false;
-async function pruneSnapshots(dir, now) { // 超期清理：整库快照树一遍，失败静默（下次触发再清）
+// 每进程最多一天触发一次全局清理（不再用 snapPruned 布尔值 → 长期运行会失效）。
+let snapLastPrune = 0;
+const SNAP_PRUNE_INTERVAL = 24 * 60 * 60 * 1000;
+async function pruneSnapshots(dir, now, isRoot = true) { // 超期清理 + 空目录清理（审计 B3）
   let entries;
   try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
   for (const e of entries) {
     const p = path.join(dir, e.name);
-    if (e.isDirectory()) { await pruneSnapshots(p, now); continue; }
+    if (e.isDirectory()) { await pruneSnapshots(p, now, false); continue; }
     try {
       const st = await fsp.stat(p);
       if (now - st.mtimeMs > SNAP_TTL) await fsp.rm(p, { force: true });
     } catch {}
+  }
+  if (!isRoot) {
+    try { const remain = await fsp.readdir(dir); if (remain.length === 0) await fsp.rmdir(dir); } catch {}
   }
 }
 async function capSnapshots(dir) { // 单个文件的快照超额删最旧（文件名带毫秒时间戳前缀，天然可排序）
@@ -187,34 +188,57 @@ async function capSnapshots(dir) { // 单个文件的快照超额删最旧（文
   if (names.length <= SNAP_KEEP) return;
   for (const n of names.slice(0, names.length - SNAP_KEEP)) await fsp.rm(path.join(dir, n), { force: true }).catch(() => {});
 }
+function uniqueSnapPath(dir, stem, ts) { // 审计 B5：同毫秒多次写同一文件时追加递增后缀，避免互相覆盖
+  let idx = 0;
+  let dest = path.join(dir, stem + '_' + ts + '.md');
+  while (true) {
+    try { fs.statSync(dest); dest = path.join(dir, stem + '_' + ts + '-' + (++idx) + '.md'); } catch { break; }
+  }
+  return dest;
+}
 async function snapshotBeforeWrite(root, full, body) {
   try {
     let old = null;
     try { old = await fsp.readFile(full, 'utf8'); } catch { return; } // 新文件（首次创建）无需快照
     if (String(old) === String(body)) return; // 内容没变不拍
-    const dest = snapPathFor(root, full, Date.now());
-    const dir = path.dirname(dest);
+    const dir = snapDirFor(root);
+    const now = Date.now();
+    // 审计 B5：追加后缀防毫秒级同名覆盖
+    const dest = uniqueSnapPath(dir, path.relative(path.resolve(String(root)), path.resolve(full)).replace(/\.md$/i, ''), now);
+    await fsp.mkdir(path.dirname(dest), { recursive: true });
     // 内容去重：与本文件最新一份快照相同就跳过（连续保存只留真正变化过的版本）
-    const stem = path.basename(dest).replace(/_\d{13,}\.md$/, '');
+    const stem = path.basename(dest).replace(/_\d{13,}(?:-\d+)?\.md$/, '');
     let names = [];
-    try { names = (await fsp.readdir(dir)).filter(n => n.startsWith(stem + '_') && n.endsWith('.md')).sort(); } catch {}
+    try { names = (await fsp.readdir(path.dirname(dest))).filter(n => n.startsWith(stem + '_') && n.endsWith('.md')).sort(); } catch {}
     if (names.length) {
-      try { if ((await fsp.readFile(path.join(dir, names[names.length - 1]), 'utf8')) === String(old)) return; } catch {}
+      try { if ((await fsp.readFile(path.join(path.dirname(dest), names[names.length - 1]), 'utf8')) === String(old)) return; } catch {}
     }
-    await fsp.mkdir(dir, { recursive: true });
     await fsp.writeFile(dest, String(old), 'utf8');
-    capSnapshots(dir).catch(() => {});
-    if (!snapPruned) { snapPruned = true; pruneSnapshots(snapDirFor(root), Date.now()).catch(() => {}); }
+    capSnapshots(path.dirname(dest)).catch(() => {});
+    if (now - snapLastPrune > SNAP_PRUNE_INTERVAL) {
+      snapLastPrune = now;
+      // 审计 B1：改成周期性清理，不再只跑一次；B3：整棵快照树都扫（旧库残留一并清）
+      pruneSnapshots(path.join(app.getPath('userData'), 'file-snapshots'), now, true).catch(() => {});
+    }
   } catch {} // 快照是保底网，自身故障不能影响正常写盘
 }
-function snapshotBeforeWriteSync(root, full, body) { // 退出同步通道用：同步 fs，不能 await
+function snapshotBeforeWriteSync(root, full, body) { // 退出同步通道用：同步 fs，不能 await（审计 B2）
   try {
     let old = null;
     try { old = fs.readFileSync(full, 'utf8'); } catch { return; }
     if (String(old) === String(body)) return;
-    const dest = snapPathFor(root, full, Date.now());
+    const dir = snapDirFor(root);
+    const dest = uniqueSnapPath(dir, path.relative(path.resolve(String(root)), path.resolve(full)).replace(/\.md$/i, ''), Date.now());
     fs.mkdirSync(path.dirname(dest), { recursive: true });
+    // 内容去重：同步版直接读最新快照文件对比（取目录里排序最末一份）
+    const stem = path.basename(dest).replace(/_\d{13,}(?:-\d+)?\.md$/, '');
+    try {
+      const names = fs.readdirSync(path.dirname(dest)).filter(n => n.startsWith(stem + '_') && n.endsWith('.md')).sort();
+      if (names.length && fs.readFileSync(path.join(path.dirname(dest), names[names.length - 1]), 'utf8') === String(old)) return;
+    } catch {}
     fs.writeFileSync(dest, String(old), 'utf8');
+    // 退出通道不能 await，但仍然可以异步抛一份 capSnapshots（同步写入已落盘，后续清理不影响）
+    capSnapshots(path.dirname(dest)).catch(() => {});
   } catch {}
 }
 
@@ -574,29 +598,48 @@ async function walkByName(dir, base) {
   return null;
 }
 
-// 解析一个资源引用：先按相对路径直找，再按文件名全库搜；工作库找不到时回退原始库。
-// 命中结果缓存在 ASSET_CACHE（键 = 工作库 + 引用），命中后仍校验文件存在，失效自动重找。
+// 解析一个资源引用：先按相对路径直找工作库（每次现算，工作库后放的同名文件优先于旧缓存），
+// 再按文件名全库搜；工作库找不到时回退原始库。命中结果缓存在 ASSET_CACHE（键 = 工作库 + 引用，
+// LRU 上限封顶），命中后仍校验文件存在与符号链接，失效自动重找。
 const ASSET_CACHE = new Map();
+const ASSET_CACHE_MAX = 256;
+function assetCacheSet(key, val) {
+  ASSET_CACHE.delete(key); // 重新插入刷新新鲜度（LRU：最旧的先淘汰）
+  ASSET_CACHE.set(key, val);
+  while (ASSET_CACHE.size > ASSET_CACHE_MAX) ASSET_CACHE.delete(ASSET_CACHE.keys().next().value);
+}
+// 命中校验：是文件、不是符号链接、且真实路径仍在某个搜索根内（审计 A1：库内 symlink 指向库外
+// 时 inside 已按真实路径拦截，这里再显式拒绝 symlink 本体，与写类 IPC / 快照读取的口径一致）
+function assetOk(p, roots) {
+  try {
+    if (isSymlink(p) || !fs.statSync(p).isFile()) return false;
+    return roots.some(r => inside(r, p));
+  } catch { return false; }
+}
 async function findAsset(root, ref) {
   const clean = String(ref || '').replace(/^\.?\//, '');
   if (!root || !clean) return null;
   const roots = [path.resolve(root)];
+  // 回退原始库同样要过授权白名单：「目录名对得上」不等于「用户确认过」（审计 A2，
+  // 与 v2-②「只授权用户亲自确认过的目录」同一口径；正常导入的源库经系统对话框选过，必然已登记）
   const src = sourceRootOf(root);
-  if (src && src !== roots[0]) roots.push(src);
+  if (src && src !== roots[0] && rootAuthorized(src)) roots.push(src);
   const key = roots[0] + '|' + clean;
+  const base = path.basename(clean).toLowerCase();
+  // 审计 B4：工作库直找永远先于缓存——缓存里可能躺着「源库同名文件」的旧命中，
+  // 工作库后来放的真身必须优先被找到（直找只是一次 statSync，代价可忽略）
+  const direct0 = path.resolve(roots[0], clean);
+  if (assetOk(direct0, roots)) { assetCacheSet(key, direct0); return direct0; }
   const cached = ASSET_CACHE.get(key);
   if (cached) {
-    try { if (fs.statSync(cached).isFile()) return cached; } catch {}
+    if (assetOk(cached, roots)) return cached;
     ASSET_CACHE.delete(key);
   }
-  const base = path.basename(clean).toLowerCase();
   for (const r of roots) {
     const direct = path.resolve(r, clean);
-    try {
-      if (fs.statSync(direct).isFile() && inside(r, direct)) { ASSET_CACHE.set(key, direct); return direct; }
-    } catch { /* 不存在或读不到，继续按文件名搜 */ }
+    if (assetOk(direct, roots)) { assetCacheSet(key, direct); return direct; }
     const found = await walkByName(r, base);
-    if (found && inside(r, found)) { ASSET_CACHE.set(key, found); return found; }
+    if (found && assetOk(found, roots)) { assetCacheSet(key, found); return found; }
   }
   return null;
 }

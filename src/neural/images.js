@@ -87,12 +87,20 @@ export function vaultAssetUrl(ref) {
   return `deepnotes-asset://asset/?root=${encodeURIComponent(root)}&ref=${encodeURIComponent(ref)}`;
 }
 
-// 回填一个 <video data-asset>；网页版没有本地访问权限，保持虚线占位
+// 回填一个 <video data-asset>；网页版没有本地访问权限，保持虚线占位。
+// 加载失败（404 找不到 / 403 未授权 / 源库被移走或未从 iCloud 下载）不再静默黑框（审计 B6），
+// 就地换成一行原因提示。
 export function resolveVaultVideo(el) {
   if (!el || el.dataset.vaultDone) return;
   const url = vaultAssetUrl(el.dataset.asset);
   if (!url) return;
   el.dataset.vaultDone = '1';
+  el.addEventListener('error', () => {
+    const tip = document.createElement('div');
+    tip.className = 'md-embed-video-fail';
+    tip.textContent = `本地视频不可用：${el.dataset.asset} · 请确认文件在知识库（或旁边的原始库）中，且本机已下载（iCloud 占位需先取回）`;
+    el.replaceWith(tip);
+  }, {once: true});
   el.src = url;
 }
 

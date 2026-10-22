@@ -9,6 +9,41 @@ let sink = null;      // 连库时由 main.jsx 注入：把改动合并进知识
 let hydrating = false; // 灌入盘上数据期间不回写，避免「读盘 → 写盘」空转
 export function setConceptSink(fn) { sink = fn; }
 
+// —— 三向合并的影子副本（审计 B7）——
+// shadow 记录「本机已确认与盘上一致的最后一版」（hydrate 完成、或 meta 写盘成功后更新）。
+// 双机来回编辑时据此判断每个键是哪边改的：本地没动用盘上、盘上没动用本地、两边都动取盘上
+// （多台机器收敛到同一份）。没有 shadow（老用户首次升级）时退化为本地优先，与旧行为一致。
+const SHADOW_KEY = () => CONFIG.storagePrefix + '-concept-meta-shadow-v1';
+const readShadow = () => { try { return JSON.parse(localStorage.getItem(SHADOW_KEY())) || null; } catch { return {}; } };
+const writeShadow = obj => { try { localStorage.setItem(SHADOW_KEY(), JSON.stringify(obj)); } catch {} };
+// meta 写盘成功（含换库后另一边的成功写入）时同步 shadow；patchMeta 写失败不会派发，shadow 不撒谎
+if (typeof window !== 'undefined') {
+  window.addEventListener('deepnotes-meta-written', e => {
+    const snap = e.detail;
+    if (snap && typeof snap === 'object') {
+      const sh = readShadow();
+      for (const k of ['conceptExtras', 'conceptReview', 'paraCards', 'paraReview']) {
+        if (snap[k] && typeof snap[k] === 'object') sh[k] = snap[k];
+      }
+      writeShadow(sh);
+    }
+  });
+}
+
+// export 供 tests/metaMerge.test.mjs 做三向合并回归
+export function merge3(local, disk, shadow) {
+  const out = {};
+  for (const k of new Set([...Object.keys(local || {}), ...Object.keys(disk || {})])) {
+    const l = local?.[k], d = disk?.[k], s = shadow?.[k];
+    const lj = JSON.stringify(l), dj = JSON.stringify(d), sj = JSON.stringify(s);
+    if (lj === dj) { if (d !== undefined) out[k] = d; continue; }
+    if (lj === sj) { if (d !== undefined) out[k] = d; continue; } // 本地没动 → 用盘上（含本地已删）
+    if (dj === sj) { if (l !== undefined) out[k] = l; continue; } // 盘上没动 → 用本地（含盘上已删）
+    if (d !== undefined) out[k] = d; else out[k] = l;              // 两边都动 → 取盘上，双机收敛
+  }
+  return out;
+}
+
 function makeStore(key, metaKey) {
   const full = CONFIG.storagePrefix + key;
   const load = () => { try { return JSON.parse(localStorage.getItem(full)) || {}; } catch { return {}; } };
@@ -89,17 +124,24 @@ export function deleteParaCard(id) {
 }
 export function gradePara(id, grade) { gradeIn(paraReview, id, grade); }
 
-// 启动时把知识库 meta 里的附属数据灌回来：本地已有的键优先（同一台机器上 localStorage 可能
-// 比上次写盘更新），只在本地缺键时补入盘上版本——这样换机拿到全部数据、同机不丢最新改动。
+// 启动时把知识库 meta 里的附属数据灌回来：有 shadow 时按 merge3 三向合并（双机编辑不互相抹，
+// 审计 B7）；没有 shadow（老用户首次升级 / 从未写盘成功过）退化为本地优先，与旧行为一致。
 export function hydrateConceptMeta(meta) {
   if (!meta || typeof meta !== 'object') return;
   const pairs = [[conceptExtras, 'conceptExtras'], [conceptReview, 'conceptReview'], [paraCards, 'paraCards'], [paraReview, 'paraReview']];
+  const shadow = readShadow();
+  const hasShadow = shadow && typeof shadow === 'object';
   hydrating = true;
   try {
+    const newShadow = {...(hasShadow ? shadow : {})};
     for (const [store, key] of pairs) {
       const incoming = meta[key];
       if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) continue;
-      store.write({...incoming, ...store.get()});
+      const local = store.get();
+      const merged = hasShadow && shadow[key] ? merge3(local, incoming, shadow[key]) : {...incoming, ...local};
+      store.write(merged);
+      newShadow[key] = merged;
     }
+    writeShadow(newShadow);
   } finally { hydrating = false; }
 }

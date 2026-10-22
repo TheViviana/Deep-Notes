@@ -6,3 +6,4 @@ import './data.test.mjs';
 import './fileStore.test.mjs';
 import './contract.test.mjs';
 import './electron.test.mjs';
+import './metaMerge.test.mjs';

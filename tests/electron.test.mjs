@@ -70,3 +70,29 @@ test('文件恢复 IPC：快照列表与读取都限制在快照目录内，读�
   assert.match(pre, /snapshots: root => ipcRenderer\.invoke\('vault:snapshots'/);
   assert.match(pre, /snapshotRead: \(root, file\) => ipcRenderer\.invoke\('vault:snapshot-read'/);
 });
+
+// —— 审计 v3 回归 ——
+
+test('findAsset：符号链接与目录一律拒绝，命中必须落在授权根内（审计 A1）', () => {
+  assert.match(src, /function assetOk\(p, roots\)/);
+  assert.match(src, /isSymlink\(p\) \|\| !fs\.statSync\(p\)\.isFile\(\)/);
+  assert.match(src, /roots\.some\(r => inside\(r, p\)\)/);
+});
+
+test('findAsset：原库回退先过白名单再纳入搜索；路径缓存有上限（审计 A2 / B4）', () => {
+  assert.match(src, /rootAuthorized\(src\)/); // 回退原库必须是授权过的根
+  assert.match(src, /ASSET_CACHE_MAX = 256/); // 按文件名全库搜的结果缓存设上限
+  assert.match(src, /assetCacheSet/);
+  assert.match(src, /工作库直找永远先于缓存/); // B4：源库旧缓存命中不能压过工作库后来放置的同名文件
+});
+
+test('写前快照：整棵树周期性清理、同毫秒文件名去重、同步通道内容去重（审计 B1/B3/B5/B2）', () => {
+  assert.match(src, /SNAP_PRUNE_INTERVAL = 24 \* 60 \* 60 \* 1000/); // 每进程最多一天一次周期清理（不再用一次性布尔）
+  assert.match(src, /snapLastPrune/);
+  assert.match(src, /function uniqueSnapPath/); // 同毫秒多次写同一文件追加 -1/-2 后缀
+  assert.match(src, /_\\d\{13,\}\(\?:-\\d\+\)\?\\\.md\$/); // 去重匹配带后缀的新文件名
+  // 退出同步通道（B2）：同样内容去重 + 超限截断
+  const syncBody = src.slice(src.indexOf('function snapshotBeforeWriteSync'));
+  assert.match(syncBody, /names\[names\.length - 1\]/);
+  assert.match(syncBody, /capSnapshots/);
+});

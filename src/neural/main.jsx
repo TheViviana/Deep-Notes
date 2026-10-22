@@ -77,7 +77,9 @@ function flushPendingSaves() {
 function useSaved(key, fallback) {
   // 磁盘唯一事实源：连接知识库时内容键跳过 localStorage（读写都不做），初始值用调用方给的
   // 空数组/空值占位，真正的内容在启动时从知识库扫描灌入（adoptData）。网页版 / 未连库时不变。
-  const diskMode = VAULT_MODE && VAULT_CONTENT_KEYS.has(key);
+  // 审计 A3：diskMode 运行时判断（VAULT_MODE 是模块加载期常量，会话内「切回示例」后 root 已空，
+  // 若仍按常量判定会同时关闭 localStorage 与写盘两条通道，编辑静默丢失）。
+  const diskMode = VAULT_MODE && VAULT_CONTENT_KEYS.has(key) && !!getRoot();
   const [v, set] = useState(() => {
     if (diskMode) return fallback;
     try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
@@ -385,6 +387,13 @@ const mergeInbox = (incoming, local) => {
   return [...map.values()].sort((a, b) => (b.ts || 0) - (a.ts || 0));
 };
 
+// 手动空分类合并（盘上 meta ∪ 本机，审计 B8）：分类就是字符串数组，并集去重——
+// 换机拿到全部手动空分类，本机新建的不丢；并集优先宁多勿丢，删除语义不做。
+const mergeFolders = (incoming, local) => [...new Set(
+  [...(Array.isArray(incoming) ? incoming : []), ...(Array.isArray(local) ? local : [])]
+    .filter(x => typeof x === 'string' && x.trim())
+)].sort();
+
 function App() {
   // 知识库引用图（![[名字]] / 相对路径）：所有 .md-preview 里新出现的 <img> 自动经 vault:asset 回填
   useVaultImages();
@@ -404,17 +413,21 @@ function App() {
   const [folders, setFolders] = useSaved(CONFIG.storagePrefix + '-folders-v1', []);
   // 阅读区左侧分类：reading.folder 推导 + 手动新建的空分类（-read-folders-v1 只存空分类，导入/切回示例时清空）
   const [readFolders, setReadFolders] = useSaved(CONFIG.storagePrefix + '-read-folders-v1', []);
-  // 闪念箱随库走：启动灌入 meta 完成后的改动才回写（避免用初始空数组覆盖盘上的旧闪念）；
-  // 概念定义 / 段落闪卡的写入口在 conceptStore，这里注入同一个 meta 落盘器。
-  const inboxMetaReady = useRef(false);
+  // 闪念箱 / 手动空分类随库走（B8）：启动灌入 meta 完成后的改动才回写（避免用初始空数组
+  // 覆盖盘上的旧数据）；概念定义 / 段落闪卡的写入口在 conceptStore，这里注入同一个 meta 落盘器。
+  const metaReady = useRef(false);
   useEffect(() => {
     setConceptSink((key, val) => patchMeta({[key]: val}));
     return () => setConceptSink(null);
   }, []);
   useEffect(() => {
-    if (!inboxMetaReady.current) return;
+    if (!metaReady.current) return;
     patchMeta({inbox});
   }, [inbox]);
+  useEffect(() => {
+    if (!metaReady.current) return;
+    patchMeta({folders, readFolders}); // 空数组也写：导入 / 切示例清空分类时同步清掉盘上记录
+  }, [folders, readFolders]);
   // 方法库列表拖拽中的内容（分类间平移 + 拖到顶栏导航跨模块移动）
   const [dragging, setDragging] = useState(null);
   const [dragNav, setDragNav] = useState(null);
@@ -1141,18 +1154,22 @@ function App() {
       const copy = await prepareCopy(srcDir);
       if (copy?.ok) {
         await setRoot(copy.dir); copyDir = copy.dir; // await：先把旧队列写进旧库再换根目录
-        // 新库的附属数据（闪念箱 / 概念定义 / 段落闪卡）与本机合并，再把本机版本写过去
+        // 新库的附属数据（闪念箱 / 概念定义 / 段落闪卡 / 手动空分类）与本机合并，再把本机版本写过去
         const meta = await loadMeta();
         if (meta) {
           hydrateConceptMeta(meta);
           if (Array.isArray(meta.inbox) && meta.inbox.length) setInbox(cur => mergeInbox(meta.inbox, cur));
+          if (Array.isArray(meta.folders)) setFolders(cur => mergeFolders(meta.folders, cur));
+          if (Array.isArray(meta.readFolders)) setReadFolders(cur => mergeFolders(meta.readFolders, cur));
         }
-        inboxMetaReady.current = true;
+        metaReady.current = true;
         window.deepnotes?.vault?.watch?.(copy.dir); // 新库开始监听外部改动
       }
       else { await setRoot(null); window.deepnotes?.vault?.watch?.(null); setToast('无法创建知识库副本，本次导入只保存在浏览器 · Copy failed'); }
     }
-    adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${copyDir ? ` · 已写入「${copyDir.replace(/\/+$/, '').split('/').pop()}」` : ''}`);
+    // 复用已有「 - Deep Notes」专属库时保留手动空分类（B8：它们刚刚从 meta 合并进来，
+    // 不应被 adoptData keepFolders=false 误清后再空写盘上）；新建副本照常清空。
+    adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${copyDir ? ` · 已写入「${copyDir.replace(/\/+$/, '').split('/').pop()}」` : ''}`, reuse);
     try { localStorage.setItem(FILES_KEY, String(data.counts.all)); } catch {} // 文件数基线：自动同步的「拒绝不完整覆盖」以此为参照
   }
 
@@ -1390,14 +1407,17 @@ function App() {
         if (VAULT_MODE) {
           await pendingReady; // IndexedDB 兜底的挂起写先灌回内存
           await retryPending().catch(() => {}); // 补写上次失败的编辑：写成的随首读自然带回界面
-          // 附属数据（闪念箱 / 概念定义 / 段落闪卡）先与盘上 meta 合并，再允许回写；
+          // 附属数据（闪念箱 / 概念定义 / 段落闪卡 / 手动空分类）先与盘上 meta 合并，再允许回写；
           // 读不到就保持本机 localStorage 版本，且不写盘（防覆盖）。
           const meta = await loadMeta();
           if (meta) {
             hydrateConceptMeta(meta);
             if (Array.isArray(meta.inbox) && meta.inbox.length) setInbox(cur => mergeInbox(meta.inbox, cur));
+            // B8：手动空分类随库合并——换机后另一台机器建的分类也能出现在本机
+            if (Array.isArray(meta.folders)) setFolders(cur => mergeFolders(meta.folders, cur));
+            if (Array.isArray(meta.readFolders)) setReadFolders(cur => mergeFolders(meta.readFolders, cur));
           }
-          inboxMetaReady.current = true;
+          metaReady.current = true;
         }
         const data = await syncRef.current({startup: true});
         // 首读没拿到内容：知识库文件夹可能被移动 / 改名 / 整库未下载，明确告诉用户而不是默默展示空库
@@ -1424,7 +1444,7 @@ function App() {
     if (kind === 'draft') { setActive(raw); setPage('drafts'); return; }
     if (kind === 'reading') { setReadSel(raw); setReadOpen(raw); setPage('readings'); return; }
     if (kind === 'archive') { setArcSel(raw); setArcOpen(raw); setPage('archives'); return; }
-    if (kind === 'idea') { const it = ideas.find(x => String(x.id) === String(raw)); if (it) editIdea(it); return; }
+    if (kind === 'idea') { const it = ideas.find(x => String(x.id) === String(raw)); setPage('ideas'); if (it) editIdea(it); return; } // 审计 B9：与其余类型一致，先切到选题池再弹编辑
     openInGraph(id); // concept 与其余类型：回工作台图谱选中
   };
 

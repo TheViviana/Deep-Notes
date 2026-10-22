@@ -61,13 +61,14 @@ const TRUSTED_HTML = new RegExp('^<(?:'
   + '/(?:mark|u|sup|a|span)>'
   + '|mark>|u>'
   + '|span style="color:#[0-9a-fA-F]{3,8}">'
-  + '|a class="md-wikilink" data-target="[^"]*">'
+  // 审计 C1：属性值收紧为不含引号 / 尖括号 / 换行（此前 [^"]* 允许换行与 <，理论可夹带标签）
+  + '|a class="md-wikilink" data-target="[^"<>\\n]*">'
   + '|a href="#fn-\\d+">'
   + '|sup class="md-fn" id="fnref-\\d+">'
-  + '|img class="md-embed" data-asset="[^"]*" alt="[^"]*"(?: style="width:\\d+px")?\\s*/?>'
+  + '|img class="md-embed" data-asset="[^"<>\\n]*" alt="[^"<>\\n]*"(?: style="width:\\d+px")?\\s*/?>'
   // 视频（![[x.mp4]] 注入的受信标签）：整块或分开的起止标签都放行
-  + '|video class="md-embed-video" data-asset="[^"]*"(?: style="width:\\d+px")? controls preload="metadata" playsinline></video>'
-  + '|video class="md-embed-video" data-asset="[^"]*"(?: style="width:\\d+px")? controls preload="metadata" playsinline>'
+  + '|video class="md-embed-video" data-asset="[^"<>\\n]*"(?: style="width:\\d+px")? controls preload="metadata" playsinline></video>'
+  + '|video class="md-embed-video" data-asset="[^"<>\\n]*"(?: style="width:\\d+px")? controls preload="metadata" playsinline>'
   + '|/video>'
   + ')\\s*$');
 

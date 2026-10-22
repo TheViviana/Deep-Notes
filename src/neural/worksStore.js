@@ -4,7 +4,7 @@
 import {useEffect, useState} from 'react';
 import {posts as samplePosts, postContent} from '../data';
 import {CONFIG} from '../config';
-import {VAULT_MODE} from './fileStore';
+import {VAULT_MODE, getRoot} from './fileStore';
 
 export const WORKS_KEY = CONFIG.storagePrefix + '-works-v1';
 const METRIC_KEYS = ['views', 'likes', 'comments', 'saves', 'follows', 'shares', 'impressions', 'ctr', 'duration'];
@@ -59,9 +59,12 @@ export function loadWorks() {
 // 读回（serialize 落盘的 观看/点赞 等指标 importer 全部认得），启动由 main.jsx 读盘灌入。
 let pendingWorks = null;
 export function useWorks() {
+  // 审计 A3：与 main.jsx 的 useSaved 同一口径——断库（切回示例）后 root 为空，
+  // 恢复 localStorage 写入，避免「磁盘/localStorage 两条通道同时关闭」
+  const diskMode = VAULT_MODE && !!getRoot();
   const [works, setWorks] = useState(VAULT_MODE ? () => [] : loadWorks);
   useEffect(() => {
-    if (VAULT_MODE) return; // 内容只写知识库 .md，localStorage 不再保存（退出落盘由 flushSyncNow 负责）
+    if (diskMode) return; // 内容只写知识库 .md，localStorage 不再保存（退出落盘由 flushSyncNow 负责）
     pendingWorks = works;
     const t = setTimeout(() => {
       pendingWorks = null;
@@ -69,7 +72,7 @@ export function useWorks() {
       catch (err) { console.warn('localStorage 写入失败 · Save failed:', err); }
     }, 300);
     return () => clearTimeout(t);
-  }, [works]);
+  }, [works, diskMode]);
   return [works, setWorks];
 }
 if (typeof window !== 'undefined') window.addEventListener('beforeunload', () => {

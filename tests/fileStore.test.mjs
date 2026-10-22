@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseVault} from '../src/neural/importer.js';
-import {serialize, resolveRels, queueSync, flush, flushAll, setErrorHandler, retryPending, hasPendingWrites, clearPendingWrites, snapshotBeforeAdopt, listSnapshots} from '../src/neural/fileStore.js';
+import {serialize, resolveRels, queueSync, flush, flushAll, setErrorHandler, retryPending, hasPendingWrites, clearPendingWrites, snapshotBeforeAdopt, listSnapshots, flushSyncNow} from '../src/neural/fileStore.js';
 import {VAULT_ROOT_KEY, CONFIG} from '../src/config.js';
 
 // —— 浏览器全局桩：fileStore 引用裸 localStorage 与 window.deepnotes ——
@@ -254,4 +254,45 @@ test('snapshotBeforeAdopt：外部覆盖前记录内存版本，同内容重跑�
   assert.equal(mine.length, 15, '每条内容最多保留 15 份');
   assert.equal(mine[0].item.body, '内存 v19', '新的在前');
   assert.equal(mine[14].item.body, '内存 v5', '最旧的被截掉');
+});
+
+// —— 退出同步通道（审计 C2）：先写后清——同步通道返回结果前留底不清，全部成功才清，部分失败收敛 ——
+
+test('flushSyncNow：挂起留底搭上同步通道，全部写成功才清留底', () => {
+  store.clear();
+  store.set(VAULT_ROOT_KEY, '/tmp/vault');
+  setErrorHandler(() => {});
+  window.deepnotes = {vault: {write: async () => ({ok: false, error: '磁盘满'})}};
+  const item = {id: 'd30', title: '同步稿', body: 'x'};
+  queueSync('drafts', item, null, resolveRels('drafts', [item]));
+  // 异步通道两次失败 → 留底（用同步桩直接构造：两次 flush 走的就是失败留底路径）
+  return flush().then(() => flush()).then(() => {
+    assert.ok(JSON.parse(store.get(PENDING_KEY)).length, '两次失败后留底已记录');
+    // 退出前同步通道全部写成功：留底清除
+    window.deepnotes.vault.flushSync = ops => ({ok: true, failed: []});
+    flushSyncNow();
+    assert.ok(!hasPendingWrites(), '全部成功：留底已清');
+    assert.ok(!store.has(PENDING_KEY), 'localStorage 留底键已移除');
+    setErrorHandler(null);
+  });
+});
+
+test('flushSyncNow：部分失败时留底收敛为仍失败的（写成功的不留底）', async () => {
+  store.clear();
+  store.set(VAULT_ROOT_KEY, '/tmp/vault');
+  setErrorHandler(() => {});
+  window.deepnotes = {vault: {write: async () => ({ok: false, error: '磁盘满'})}};
+  await makePending('d31', '挂起一');
+  assert.ok(hasPendingWrites());
+  // 队列里再来一条新的；同步通道里旧的失败、新的成功
+  const fresh = {id: 'd32', title: '新稿', body: 'y'};
+  queueSync('drafts', fresh, null, resolveRels('drafts', [fresh]));
+  window.deepnotes.vault.flushSync = ops => ({ok: true, failed: ops.filter(op => op.rel.includes('挂起一')).map(op => op.rel)});
+  flushSyncNow();
+  const left = JSON.parse(store.get(PENDING_KEY) || '[]');
+  assert.equal(left.length, 1, '只剩失败的那一条');
+  assert.ok(left[0].rel.includes('挂起一'));
+  assert.ok(!left[0].rel.includes('新稿'), '写成功的新稿不留底');
+  setErrorHandler(null);
+  clearPendingWrites();
 });

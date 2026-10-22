@@ -764,6 +764,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 /* 知识库视频 ![[课程.mp4]] / ![](课程.mp4)：桌面版经 deepnotes-asset:// 流式回填 src；
    未解析（网页版）保持虚线空框，不撑破版面 */
 .md-preview video.md-embed-video { display: block; width: min(100%, 760px); max-width: 100%; margin: 12px 0; border-radius: 10px; border: 1px dashed var(--line-2); background: rgba(255, 255, 255, .04); min-height: 140px; }
+.md-preview .md-embed-video-fail { margin: 12px 0; padding: 10px 14px; border: 1px dashed var(--line-2); border-radius: 10px; color: var(--text-dim); font-size: 13px; background: rgba(255, 255, 255, .03); }
 /* 正文 / 表格里的 [文件名](x.mp4)：点击打开灯箱播放 */
 .md-preview a.md-video-link { color: var(--cyan); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .md-preview a.md-video-link::before { content: "▶ "; font-size: .8em; opacity: .85; }

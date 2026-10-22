@@ -108,7 +108,13 @@ export async function writeMetaNow() {
   const root = getRoot();
   if (!v?.metaWrite || !root || !metaCache) return false;
   const snapshot = metaCache;
-  try { const r = await v.metaWrite(root, snapshot); return !!(r && r.ok); }
+  try {
+    const r = await v.metaWrite(root, snapshot);
+    const ok = !!(r && r.ok);
+    // 写盘成功才广播：conceptStore 据此更新三向合并的 shadow（写失败不更新，shadow 不撒谎）
+    if (ok && typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('deepnotes-meta-written', {detail: snapshot}));
+    return ok;
+  }
   catch { return false; }
 }
 
@@ -468,13 +474,11 @@ export function flushSyncNow() {
   if (!v?.flushSync) return;
   clearTimeout(timer);
   timer = null;
-  // 挂起写也搭上退出前的同步通道（最后一次机会）：写成功记录随之清除，仍失败原样留底。
-  // 若只写新操作就清记录，留底内容会被静默丢掉（下次启动按文件夹覆盖）。
+  // 挂起写也搭上退出前的同步通道（最后一次机会）：排队进队列但留底先不清（审计 C2：
+  // 先写后清，与 retryPending 同口径——同步通道执行期间进程被强杀时，留底还在盘上，
+  // 下次启动照常重试，不会出现「留底已清、盘上未成」的窗口）。
   const pend = loadPending();
-  if (pend.length) {
-    savePending([]);
-    for (const op of pend) queue.set(opKey(op), {...op, _retry: true});
-  }
+  if (pend.length) for (const op of pend) queue.set(opKey(op), {...op, _retry: true});
   if (!queue.size) return;
   const ops = [...queue.values()].map(op => ({...op, root: op.root || getRoot()}));
   queue.clear();
@@ -482,13 +486,14 @@ export function flushSyncNow() {
     const res = v.flushSync(ops);
     const bad = Array.isArray(res?.failed) ? res.failed : null;
     if (bad && bad.length) {
-      // 退出前也没写成：记为挂起写，下次启动跳过同步并提示
-      recordPending(ops.filter(op => bad.includes(op.rel || op.from || '')));
-    } else if (pendingRecorded) {
-      clearPendingWrites(); // 退出前全部写成功：挂起记录清掉
+      // 退出前也没写成：留底收敛为仍失败的（写成功的从记录清除）
+      const at = new Date().toISOString();
+      savePending(ops.filter(op => bad.includes(op.rel || op.from || '')).map(op => ({...op, at})));
+    } else if (pendingRecorded || pend.length) {
+      clearPendingWrites(); // 全部写成功（含本次搭车的历史留底）：留底才清除
     }
   } catch (err) {
-    recordPending(ops); // 同步通道整体异常：宁可全部留底（下次重试成功即可清除）
+    recordPending(ops); // 同步通道整体异常：宁可全部留底（recordPending 按 opKey 合并，旧记录不丢）
     console.warn('退出落盘失败 · Flush on quit failed:', err);
   }
 }
