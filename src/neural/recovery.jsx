@@ -1,6 +1,6 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {Icon} from './icons';
-import {listSnapshots, listFileSnapshots, readFileSnapshot} from './fileStore';
+import {listSnapshots, listFileSnapshots, readFileSnapshot, snapReady} from './fileStore';
 
 // 「文件恢复」弹窗：两层快照网的统一查询界面。自包含弹窗结构（与 main.jsx 的 Modal 同形），
 // 避免互相 import 成环。
@@ -25,7 +25,14 @@ export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy}) {
     return () => { window.removeEventListener('keydown', key); if (before?.isConnected) before.focus({preventScroll: true}); };
   }, []);
 
-  const snaps = useMemo(() => listSnapshots(), []); // 打开瞬间定格：恢复操作不再让列表跳动
+  // 应用内快照的 IndexedDB 读回是异步的：等 snapReady 之后再定格，避免刚启动就打开
+  // 弹窗时列表是空的（用户会误以为恢复网缺位）。null = 仍在读取。
+  const [snaps, setSnaps] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    snapReady.then(() => { if (alive) setSnaps(listSnapshots()); }).catch(() => { if (alive) setSnaps([]); });
+    return () => { alive = false; };
+  }, []);
   const [openKey, setOpenKey] = useState(null);
   const [selSnap, setSelSnap] = useState(null);
   const [fileList, setFileList] = useState(null); // null = 快照库还在读取
@@ -40,7 +47,7 @@ export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy}) {
 
   const groups = useMemo(() => { // 应用内快照按条目分组（列表已按时间新→旧，每组头部即最新）
     const map = new Map();
-    for (const s of snaps) { if (!map.has(s.key)) map.set(s.key, []); map.get(s.key).push(s); }
+    for (const s of snaps || []) { if (!map.has(s.key)) map.set(s.key, []); map.get(s.key).push(s); }
     return [...map.values()];
   }, [snaps]);
   const fileGroups = useMemo(() => {
@@ -65,7 +72,9 @@ export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy}) {
         <p className="quiet">两层恢复网自动生效：覆盖盘上旧内容前，旧版本先进本机快照库（保留 7 天、每文件最多 30 份，内容没变不重复留）；外部同步用文件版本覆盖界面内容前，内存版本先存应用内快照（每条最多 15 份）。「恢复此版本」就地覆盖当前内容；「恢复为副本」新建一条，不动现有内容。<em>Overwritten versions are kept automatically and can be restored in place or as a copy.</em></p>
 
         <h3>应用内快照 <em>In-app snapshots</em></h3>
-        {groups.length
+        {!Array.isArray(snaps)
+          ? <p className="quiet">正在读取本机快照库… <em>Loading…</em></p>
+          : groups.length
           ? <div className="snap-list">{groups.map(list => {
               const head = list[0];
               const open = openKey === head.key;

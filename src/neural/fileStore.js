@@ -38,6 +38,8 @@ export async function setRoot(dir) {
   await writeMetaNow();  // 换库前把附属数据落到旧库（防抖窗口内的改动不能跟着根目录走丢）
   metaGen++;             // 作废仍在途的旧库读盘结果
   metaCache = null;      // 换库：附属数据要重新读新库的 meta，不能把旧库的写过去
+  metaBase = null;       // 同理：基线 / 脏键都属于旧库
+  metaDirty.clear();
   metaBlocked = false;
   pendingMeta = {};
   metaLoading = null;
@@ -59,6 +61,8 @@ export async function setRoot(dir) {
 let metaCache = null;     // null = 未读过；{} = 读过但没有
 let metaBlocked = false;  // 读盘失败：不写（避免用不完整的对象覆盖盘上其他键）
 let pendingMeta = {};     // 读盘完成前的改动先攒着
+let metaBase = null;      // 本机读到的盘上版本：判断「本会话新增 / 删除」，避免写盘时把对面机器的改动抹掉
+const metaDirty = new Set(); // 本会话改过的顶层键：写前重读盘上 meta 时只覆盖这些键
 let metaTimer = null;
 let metaLoading = null;
 let metaGen = 0;          // 换库代数：旧库的读盘结果回来时代数已变，直接作废
@@ -74,7 +78,10 @@ export async function loadMeta() {
       try {
         const r = await v.metaRead(root);
         if (gen !== metaGen) return null; // 读盘期间换了库：这份结果不属于新库
-        if (r?.ok) metaCache = r.data && typeof r.data === 'object' && !Array.isArray(r.data) ? r.data : {};
+        if (r?.ok) {
+          metaCache = r.data && typeof r.data === 'object' && !Array.isArray(r.data) ? r.data : {};
+          metaBase = {...metaCache}; // 浅拷贝足够：各键的值都按整块替换，不做原地改
+        }
         else metaBlocked = true;
       } catch { if (gen === metaGen) metaBlocked = true; }
       return metaCache;
@@ -87,13 +94,18 @@ export async function loadMeta() {
 // 合并写：只覆盖本次给的键；metaCache 还没读出来时先读盘再合并，绝不整体覆盖
 export function patchMeta(patch) {
   if (!capable() || !getRoot() || !patch) return;
+  for (const k of Object.keys(patch)) metaDirty.add(k);
   if (metaCache) { Object.assign(metaCache, patch); scheduleMeta(); return; }
   const gen = metaGen;
   Object.assign(pendingMeta, patch);
   loadMeta().then(base => {
     if (!base || gen !== metaGen) return; // 读不到 / 已换库就不写，改动仍在本机 localStorage
-    metaCache = {...base, ...pendingMeta};
+    // 取出 pending 必须是原子操作：两次并发 patchMeta 各自挂的 then 若都读到同一个
+    // pending、又都由自己清空，先执行的那个会把后一批改动一起清掉（两份互相覆盖成空）
+    const take = pendingMeta;
     pendingMeta = {};
+    if (metaCache) Object.assign(metaCache, take); // 已被首次合并初始化：只增补，绝不重建
+    else metaCache = {...base, ...take};
     scheduleMeta();
   }).catch(() => {});
 }
@@ -101,18 +113,57 @@ function scheduleMeta() {
   clearTimeout(metaTimer);
   metaTimer = setTimeout(() => { writeMetaNow(); }, 400);
 }
+// 数组类附属数据（闪念箱 / 手动空分类）的合并：本地为本会话的权威值，盘上多出来的条目
+// （另一台机器在本会话期间新增的）补进来；本会话删掉的（在 metaBase 里）不复活。
+function mergeMetaList(local, disk, base) {
+  const arr = Array.isArray(local) ? local.slice() : [];
+  if (!Array.isArray(disk)) return arr;
+  const keyOf = x => (x && typeof x === 'object' ? String(x.id ?? JSON.stringify(x)) : String(x));
+  const localKeys = new Set(arr.map(keyOf));
+  const baseKeys = new Set((Array.isArray(base) ? base : []).map(keyOf));
+  for (const x of disk) {
+    const k = keyOf(x);
+    if (localKeys.has(k) || baseKeys.has(k)) continue;
+    arr.push(x);
+  }
+  return arr;
+}
+const META_LIST_KEYS = new Set(['inbox', 'folders', 'readFolders']);
 export async function writeMetaNow() {
   clearTimeout(metaTimer);
   metaTimer = null;
   const v = api();
   const root = getRoot();
   if (!v?.metaWrite || !root || !metaCache) return false;
+  const gen = metaGen;
   const snapshot = metaCache;
+  let payload = snapshot;
+  // 写前重读一次盘上 meta：长驻会话持有的 metaCache 是启动时的快照，直接整对象覆盖会把
+  // 另一台机器在这期间的改动整块抹掉。只让本会话改过的键（metaDirty）覆盖盘上值，其余以盘上为准。
+  if (v.metaRead) {
+    try {
+      const r = await v.metaRead(root);
+      if (gen !== metaGen || root !== getRoot()) return false; // 读盘期间换库：这份结果不作数
+      if (!r?.ok) return false; // 读不到就不写，绝不用不完整的对象覆盖盘上文件
+      const disk = r.data && typeof r.data === 'object' && !Array.isArray(r.data) ? r.data : {};
+      const base = metaBase || {};
+      payload = {...disk};
+      for (const k of Object.keys(snapshot)) {
+        if (!metaDirty.has(k)) { payload[k] = snapshot[k]; continue; }
+        payload[k] = META_LIST_KEYS.has(k) ? mergeMetaList(snapshot[k], disk[k], base[k]) : snapshot[k];
+      }
+    } catch { return false; }
+  }
   try {
-    const r = await v.metaWrite(root, snapshot);
+    const r = await v.metaWrite(root, payload);
     const ok = !!(r && r.ok);
+    if (ok) {
+      Object.assign(metaCache, payload); // 保持对象身份：写盘期间的新 patchMeta 不会丢
+      metaBase = {...metaCache};
+      metaDirty.clear();
+    }
     // 写盘成功才广播：conceptStore 据此更新三向合并的 shadow（写失败不更新，shadow 不撒谎）
-    if (ok && typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('deepnotes-meta-written', {detail: snapshot}));
+    if (ok && typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('deepnotes-meta-written', {detail: payload}));
     return ok;
   }
   catch { return false; }
@@ -160,8 +211,21 @@ export function pathOf(kind, item) {
 // （每组第一条保持原名）。notes 用自身 path 由调用方保证唯一，不参与。
 const shortId = id => String(id || '').replace(/[^a-zA-Z0-9]/g, '').slice(-6) || 'x';
 export {shortId};
+
+// 方法笔记路径分配：同一相对路径只能属于一条笔记——否则队列同键覆盖、写盘只落一份，正文静默丢失。
+// taken: Map<rel, id>（由当前 notes 构造）；excludeId 是正在改名 / 移动的这一条（改到自己不算冲突）。
+export function uniqueNotePath(base, taken, excludeId) {
+  const rel = String(base || '').replace(/\\/g, '/');
+  const free = r => !taken || !taken.has(r) || (!!excludeId && taken.get(r) === excludeId);
+  if (free(rel)) return rel;
+  const withId = rel.replace(/\.md$/i, `--${shortId(excludeId)}.md`);
+  if (free(withId)) return withId;
+  let n = 1, next = withId;
+  do { next = rel.replace(/\.md$/i, `-${++n}.md`); } while (!free(next));
+  return next;
+}
 export function resolveRels(kind, items) {
-  if (kind === 'notes') return new Map(items.filter(x => x?.id).map(x => [x.id, pathOf(kind, x)]));
+  // notes 的 path 由调用方保证唯一，这里仍走同一条消歧兜底：万一撞车，也不会两条笔记写同一个文件
   const seen = new Set();
   const map = new Map();
   for (const x of items) {
@@ -228,9 +292,28 @@ let timer = null;
 const opKey = op => op.move ? 'm:' + op.from : op.trash ? 't:' + op.rel : 'w:' + op.rel;
 
 function enqueue(op) {
-  queue.set(opKey(op), op);
+  // 同键仲裁（全局规则）：较新的编辑可以覆盖较旧的排队操作；旧值永远不反向顶掉新值。
+  // 留底（_retry）里的旧 body 只能填进空位，不能盖掉本会话排队的更新版本。
+  const k = opKey(op);
+  const cur = queue.get(k);
+  if (cur && cur._retry && !op._retry) queue.set(k, op); // 新编辑顶掉旧重试：以最新内容为准
+  else if (cur && !cur._retry && op._retry) return;        // 旧回填不得覆盖队列里的新编辑
+  else queue.set(k, op);
   clearTimeout(timer);
   timer = setTimeout(flush, 800);
+}
+
+// 把留底里的旧操作填进队列：只填空位（队列里已有本会话的新编辑就跳过，旧内容绝不顶替新内容）
+function fillPending(list) {
+  let filled = 0;
+  for (const op of list) {
+    const k = opKey(op);
+    const cur = queue.get(k);
+    if (cur && !cur._retry) continue;
+    queue.set(k, {...op, _retry: true});
+    filled += 1;
+  }
+  return filled;
 }
 
 // —— 挂起写记录：写盘重试仍失败的操作持久留底 ——
@@ -319,7 +402,8 @@ export async function retryPending() {
   if (!v || !list.length) return 0; // 没有桌面 API 时更不能清留底（清了就真丢），原样保留
   retryingPending = true;
   try {
-    for (const op of list) queue.set(opKey(op), {...op, _retry: true});
+    // 只填空位：队列里可能已有本会话对同一文件的更新编辑，留底里的旧 body 不得顶掉它
+    fillPending(list);
     const failed = (await flush()) || [];
     const failedKeys = new Set(failed.map(opKey));
     for (const op of list) if (!op.root) failedKeys.add(opKey(op)); // root 丢失写不了：视为仍失败，保留留底
@@ -401,12 +485,15 @@ const SNAP_MAX_ALL = 800; // 全局上限，防止存储无限膨胀
 let snapList = []; // 内存为唯一事实源：{key:'kind:id', kind, id, title, ts, item(字段子集)}
 const snapIdbGet = () => idbRun('readonly', st => st.get('snapshots')).then(r => Array.isArray(r) ? r : []).catch(() => []);
 const snapIdbPut = list => idbRun('readwrite', st => st.put(list, 'snapshots'));
+let snapReadyResolve;
+// 应用内快照读回完成：恢复界面先等这个 Promise，避免「启动后立刻打开」看到空白列表
+export const snapReady = new Promise(r => { snapReadyResolve = r; });
 snapIdbGet().then(list => { // 启动读回：按 key+ts 合并去重，按时间新的在前
   if (!list.length) return;
   const seen = new Set(snapList.map(s => s.key + '@' + s.ts));
   snapList = snapList.concat(list.filter(s => s && !seen.has(s.key + '@' + s.ts)));
   snapList.sort((a, b) => b.ts - a.ts);
-}).catch(() => {});
+}).catch(() => {}).finally(() => { snapReadyResolve(); });
 export const listSnapshots = () => snapList.slice();
 export function recordSnapshots(entries) {
   for (const e of entries) {
@@ -478,7 +565,7 @@ export function flushSyncNow() {
   // 先写后清，与 retryPending 同口径——同步通道执行期间进程被强杀时，留底还在盘上，
   // 下次启动照常重试，不会出现「留底已清、盘上未成」的窗口）。
   const pend = loadPending();
-  if (pend.length) for (const op of pend) queue.set(opKey(op), {...op, _retry: true});
+  if (pend.length) fillPending(pend); // 只填空位：队列里的新编辑优先于留底里的旧内容
   if (!queue.size) return;
   const ops = [...queue.values()].map(op => ({...op, root: op.root || getRoot()}));
   queue.clear();

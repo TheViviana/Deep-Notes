@@ -58,7 +58,9 @@ function check(m, label) {
   if (new Set(m.posts.map(p => p.id)).size !== m.posts.length) errs.push('作品 id 有重复');
   // path 收紧：必须是「05-方法库 methods/<子目录…>/<非空文件名>.md」，至少一级子目录、以 .md 结尾
   for (const n of m.notes) if (!/^05-方法库 methods\/[^/]+(\/[^/]+)+\.md$/.test(n.path || '')) errs.push(`笔记 path 格式不对：${n.title}`);
-  for (const i of m.seedIdeas) if (typeof i.id !== 'number' || !['待写', '待扩展', '已转草稿'].includes(i.status)) errs.push(`选题 id 须为数字、status 须为 待写/待扩展/已转草稿：${i.title}`);
+  // 选题 id：示例数据用数字，导入的 .md 用「idea-<散列>」字符串（同一选题增删文件后不再漂移），两者都合法
+  for (const i of m.seedIdeas) if (!(typeof i.id === 'number' || (typeof i.id === 'string' && i.id)) || !['待写', '待扩展', '已转草稿'].includes(i.status)) errs.push(`选题须有 id（数字或字符串）、status 须为 待写/待扩展/已转草稿：${i.title}`);
+  if (new Set(m.seedIdeas.map(i => i.id)).size !== m.seedIdeas.length) errs.push('选题 id 有重复');
   for (const d of m.seedDrafts) if (d.source != null && !m.seedIdeas.some(i => i.id === d.source)) errs.push(`草稿的来源选题不存在：${d.title}`);
   for (const c of m.concepts) if (!Array.isArray(c) || typeof c[0] !== 'string' || !Array.isArray(c[1])) errs.push('concepts 格式应为 [概念名, [关键词…]]');
   for (const a of m.seedArchives || []) if (!a.id || !a.title || !/^\d{4}-\d{2}-\d{2}/.test(a.date || '')) errs.push(`档案须有 id/title/date：${a.title}`);

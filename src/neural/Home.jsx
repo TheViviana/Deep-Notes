@@ -492,7 +492,7 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
   };
   const node = sel ? graph.index.get(sel) : null;
   const m = MODULES.find(x => x.id === mod);
-  const s = stats(graph);
+  const s = useMemo(() => stats(graph), [graph]);
   // 主视图改名 + 模块直达菜单（任一级可跳任一级）
   const [renaming, setRenaming] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);

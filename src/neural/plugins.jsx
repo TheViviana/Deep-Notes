@@ -598,7 +598,14 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
       })}
       {btn('插图：选一张图片，压缩后存进正文（也可直接粘贴截图）', 'Insert image', '🖼', () => imgPick.current?.click())}
       <input ref={imgPick} type="file" accept="image/*" hidden aria-hidden="true"
-        onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (!f) return; fileToDataUrl(f).then(url => insert(`![图片](${url})`)).catch(() => {}); }}/>
+        onChange={e => {
+          const f = e.target.files?.[0]; e.target.value = '';
+          if (!f) return;
+          // accept 只是选择器提示，拦不住把任意文件拖进来：与粘贴路径同等校验 MIME，并限制体积
+          if (!f.type.startsWith('image/')) { window.alert('只能插入图片文件 · Images only'); return; }
+          if (f.size > 20 * 1024 * 1024) { window.alert('图片过大，上限 20MB · Image too large (max 20MB)'); return; }
+          fileToDataUrl(f).then(url => insert(`![图片](${url})`)).catch(() => {});
+        }}/>
       <span className="tpl-wrap">
         <button className="fmt-btn" disabled={!aiReady} aria-expanded={!!aiSug}
           title={aiReady ? 'AI 双链建议 AI link suggestions' : '需要打开联网开关并启用 AI 助手插件 Needs the network switch + AI plugin'}

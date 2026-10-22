@@ -704,7 +704,7 @@ export function Concepts({graph, onGo, onJumpContent}) {
   const rows = graph.nodes.filter(n => n.kind === 'concept' && (!q || n.title.toLowerCase().includes(q.toLowerCase())))
     .sort((a, b) => (b.in || 0) - (a.in || 0) || a.title.localeCompare(b.title, 'zh-CN'));
   const paraRows = useMemo(() => Object.values(pcs)
-    .filter(c => !q || c.text.toLowerCase().includes(q.toLowerCase()) || (c.source || '').toLowerCase().includes(q.toLowerCase()))
+    .filter(c => !q || String(c.text || '').toLowerCase().includes(q.toLowerCase()) || (c.source || '').toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => b.ts - a.ts), [pcs, q]);
   const now = Date.now();
   const dueKey = tab === 'concept' ? (c => review[c.title]?.due || 0) : (c => prev[c.id]?.due || 0);
@@ -830,18 +830,18 @@ export function Concepts({graph, onGo, onJumpContent}) {
             <span>{rev.i + 1} / {rev.queue.length} · 到期优先 <em>due first</em></span>
             <button className="icon-btn" aria-label="结束复习 End review" onClick={() => setRev(null)}><Icon name="close" size={14}/></button>
           </header>
-          <button className={`review-face${rev.flipped ? ' back' : ''}`} onClick={() => setRev(r => ({...r, flipped: !r.flipped}))}
+          <button className={`review-face${rev.flipped ? ' back' : ''}`} onClick={() => setRev(r => (r ? {...r, flipped: !r.flipped} : null))}
             aria-label={rev.flipped ? '点击回到正面 Flip back' : '点击翻面看答案 Reveal answer'}>
             {rev.flipped
               ? <>
                 <span className="rev-hint">来自「{card.source || '未命名'}」 <em>from</em></span>
                 <p className="rev-para">{card.text}</p>
-                {to && <span className="rev-links as-link" role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setRev(null); (onJumpContent || onGo)(to); } }} onMouseDown={e => e.stopPropagation()} onClick={() => { setRev(null); (onJumpContent || onGo)(to); }}>打开原文 <em>Open source</em></span>}
+                {to && <span className="rev-links as-link" role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setRev(null); (onJumpContent || onGo)(to); } }} onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setRev(null); (onJumpContent || onGo)(to); }}>打开原文 <em>Open source</em></span>}
               </>
               : <>
                 <span className="rev-hint">回想这段内容 <em>Recall this passage</em></span>
                 <span className="rev-title">{card.source || '未命名'}</span>
-                <span className="rev-para rev-cue">{card.text.slice(0, 60)}{card.text.length > 60 ? '…' : ''}</span>
+                <span className="rev-para rev-cue">{String(card.text || '').slice(0, 60)}{String(card.text || '').length > 60 ? '…' : ''}</span>
                 <span className="rev-tip">点击卡片显示全文 <em>Click to reveal</em></span>
               </>}
           </button>
@@ -863,7 +863,7 @@ export function Concepts({graph, onGo, onJumpContent}) {
             <span>{rev.i + 1} / {rev.queue.length} · 到期优先 <em>due first</em></span>
             <button className="icon-btn" aria-label="结束复习 End review" onClick={() => setRev(null)}><Icon name="close" size={14}/></button>
           </header>
-          <button className={`review-face${rev.flipped ? ' back' : ''}`} onClick={() => setRev(r => ({...r, flipped: !r.flipped}))}
+          <button className={`review-face${rev.flipped ? ' back' : ''}`} onClick={() => setRev(r => (r ? {...r, flipped: !r.flipped} : null))}
             aria-label={rev.flipped ? '点击回到正面 Flip back' : '点击翻面看答案 Reveal answer'}>
             {rev.flipped
               ? <>

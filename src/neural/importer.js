@@ -63,7 +63,10 @@ export function pickMdFiles() {
 // —— 主入口：File 列表 → 看板数据（works / ideas / drafts / snapshot / concepts） ——
 // target：'auto' 按文件夹名自动分类；也可指定 'works' | 'methods' | 'ideas' | 'drafts' | 'readings' | 'archives'，把全部文件归入所选模块
 export async function parseVault(fileList, target = 'auto') {
-  const all = fileList.filter(f => f && isMd(f.name) && !f.name.startsWith('.'));
+  // 跳过目录里的 .md 同样不导入：桌面版有主进程 SKIP 兜底，网页版没有——
+  // 不过滤的话 .trash 里已删除的笔记会整体复活，.obsidian / .git 里的说明文件也会混进来
+  const skipped = p => p.split('/').some(seg => seg.startsWith('.') || SKIP_DIRS.has(seg));
+  const all = fileList.filter(f => f && isMd(f.name) && !skipped(f.webkitRelativePath || f.name));
   const files = all.map(f => {
     // webkitRelativePath 形如「仓库名/子目录/文件.md」；第一段是所选文件夹名，分类时跳过
     const parts = (f.webkitRelativePath || f.name).split('/');
@@ -123,15 +126,17 @@ export async function parseVault(fileList, target = 'auto') {
     return {fm: x.fm, rel: x.rel, title: x.title, path: notePath(rootName, rest, x.file.name), body: clean(x.body),
       updatedAt: String(pick(x.fm, ['updated']) || '') || undefined, keep: keepOf(x.fm, 'notes')};
   });
-  settleIds(notes, 'n');
-  for (const n of notes) delete n.rel;
+  settleIds(notes, 'n'); // rel 保留：含 iCloud 占位文件的同步要按真实路径匹配条目（main.jsx keepOld）
 
-  const ideas = bucket.ideas.map((x, i) => {
+  // 选题 id 与其余五个模块同口径：优先 frontmatter 的 deepnotes-id，缺失时按标题散列补号。
+  // 旧的「数组下标 + 1」会在增删一个 .md 后整体移位，草稿的 source 指向错误选题、图谱连线错乱。
+  const ideas = bucket.ideas.map(x => {
     const status = String(pick(x.fm, ['status', '状态']) || '待写');
     // platform 默认值与 CLI / 应用内「新建选题」一致（小红书）
-    return {id: i + 1, title: x.title, platform: String(pick(x.fm, ['platform', '平台']) || '小红书'), priority: ['高', '中', '低'].includes(String(pick(x.fm, ['priority', '优先级']))) ? String(pick(x.fm, ['priority', '优先级'])) : '中',
+    return {fm: x.fm, title: x.title, platform: String(pick(x.fm, ['platform', '平台']) || '小红书'), priority: ['高', '中', '低'].includes(String(pick(x.fm, ['priority', '优先级']))) ? String(pick(x.fm, ['priority', '优先级'])) : '中',
       status: ['待写', '待扩展', '已转草稿'].includes(status) ? status : '待写', note: String(pick(x.fm, ['note', '备注', 'description', '简介']) || clean(x.body).replace(/^#.*\n/, '').trim().slice(0, 120)), keep: keepOf(x.fm, 'ideas')};
   });
+  settleIds(ideas, 'idea-'); // 选题池常合并成一个 .md：以标题做稳定散列，顺序变化也不漂移
 
   const drafts = bucket.drafts.map(x => {
     const src = String(pick(x.fm, ['source', '来源选题', '选题']) || '');
@@ -140,7 +145,6 @@ export async function parseVault(fileList, target = 'auto') {
       updatedAt: String(pick(x.fm, ['updated']) || '') || undefined, keep: keepOf(x.fm, 'drafts')};
   });
   settleIds(drafts, 'draft-');
-  for (const d of drafts) delete d.rel;
 
   // 阅读区：别人写好的内容（作者 / 来源 / 分类可选，写在 frontmatter 里）。
   // folder 是应用内的左侧分类：落盘在每篇 .md 的 frontmatter 里，导入 / 自动同步都不会丢。
@@ -154,7 +158,6 @@ export async function parseVault(fileList, target = 'auto') {
     updatedAt: String(pick(x.fm, ['updated']) || '') || undefined, keep: keepOf(x.fm, 'readings')
   }));
   settleIds(readings, 'reading-');
-  for (const r of readings) delete r.rel;
   readings.sort((a, b) => b.date.localeCompare(a.date));
 
   // 档案区：创作者自己的个人档案（简介、回顾、清单等），同样参与双链与图谱。
@@ -165,7 +168,6 @@ export async function parseVault(fileList, target = 'auto') {
     updatedAt: String(pick(x.fm, ['updated']) || '') || undefined, keep: keepOf(x.fm, 'archives')
   }));
   settleIds(archives, 'archive-');
-  for (const a of archives) delete a.rel;
   archives.sort((a, b) => b.date.localeCompare(a.date));
 
   // 概念词：内容里出现的全部话题标签（不设数量上限），出现越多在概念网络里越靠前。

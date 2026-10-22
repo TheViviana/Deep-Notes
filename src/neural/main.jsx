@@ -3,7 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, seedReadings, seedArchives, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
 import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags, WORKS_KEY} from './worksStore';
 import {pickVaultFolder, pickMdFiles, parseVault} from './importer';
-import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushAll, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, hasPendingWrites, retryPending, clearPendingWrites, pendingReady, snapshotBeforeAdopt, readFileSnapshot, loadMeta, patchMeta, VAULT_MODE} from './fileStore';
+import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushAll, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, uniqueNotePath, hasPendingWrites, retryPending, clearPendingWrites, pendingReady, snapshotBeforeAdopt, readFileSnapshot, loadMeta, patchMeta, VAULT_MODE} from './fileStore';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
@@ -598,8 +598,11 @@ function App() {
   }
   function flashToNote(id) {
     const it = inbox.find(x => x.id === id); if (!it) return;
-    const t = (it.text.split('\n')[0] || '闪念笔记').slice(0, 24).replace(/[/\\]/g, '·');
-    setNotes(ns => [{id: 'note-' + Date.now(), title: t, path: `05-方法库 methods/闪念/${t}.md`, body: `${it.text}\n`}, ...ns]);
+    const t = (String(it.text || '').split('\n')[0] || '闪念笔记').slice(0, 24).replace(/[/\\]/g, '·');
+    const nid = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
+    const base = `05-方法库 methods/闪念/${t}.md`;
+    const path = uniqueNotePath(base, noteTaken(notes, nid), nid);
+    setNotes(ns => [{id: nid, title: t, path, body: `${it.text}\n`}, ...ns]);
     setInbox(list => list.filter(x => x.id !== id));
     setToast('已转入方法笔记 · Saved to methods');
   }
@@ -614,32 +617,49 @@ function App() {
   function linkifyMentions(name) {
     const t = String(name || '').trim();
     if (t.length < 2) { setToast('名称太短，不做替换 · Too short to link'); return; }
+    // 计数在渲染期一次算完再提交（写进惰性 updater 会被 React 提前求值 / StrictMode 双调用打乱）
     let n = 0;
     const conv = body => String(body || '').split(/(\[\[[^\]]*\]\])/g).map(seg => seg.startsWith('[[') ? seg
-      : seg.replace(new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), () => { n++; return `[[${t}]]`; })).join('');
-    setWorks(ws => ws.map(x => x.title !== t ? {...x, body: conv(x.body)} : x));
-    setNotes(ns => ns.map(x => x.title !== t ? {...x, body: conv(x.body)} : x));
-    setDrafts(ds => ds.map(x => x.title !== t ? {...x, body: conv(x.body)} : x));
-    setReadings(rs => rs.map(x => x.title !== t ? {...x, body: conv(x.body)} : x));
-    setArchives(as => as.map(x => x.title !== t ? {...x, body: conv(x.body)} : x));
+      : seg.replace(new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), () => { n++; return `[[${t}]]` })).join('');
+    const next = {
+      works: works.map(x => x.title !== t ? {...x, body: conv(x.body)} : x),
+      notes: notes.map(x => x.title !== t ? {...x, body: conv(x.body)} : x),
+      drafts: drafts.map(x => x.title !== t ? {...x, body: conv(x.body)} : x),
+      readings: readings.map(x => x.title !== t ? {...x, body: conv(x.body)} : x),
+      archives: archives.map(x => x.title !== t ? {...x, body: conv(x.body)} : x),
+    };
+    setWorks(next.works); setNotes(next.notes); setDrafts(next.drafts);
+    setReadings(next.readings); setArchives(next.archives);
     setToast(n ? `已在正文中接通 ${n} 处 [[${t}]] · Linked` : '没有找到可转换的提及 · No plain mentions');
   }
   // —— 方法笔记 CRUD：重命名同步 path 文件名；新建/删除都只影响本浏览器 ——
+  // 方法笔记 path 分配：同一相对路径只属于一条笔记（否则写盘同键覆盖、正文静默丢失）。
+  // 统一走 fileStore.uniqueNotePath：有冲突时追加 id 短码，再不行递增 -2.md。
+  const noteTaken = (list, excludeId) => new Map(list.filter(x => x.id !== excludeId && x.path).map(x => [x.path, x.id]));
   function updateNote(id, patch) {
+    let notePath = null;
+    if (patch.title != null) {
+      const cur = notes.find(n => n.id === id);
+      if (cur) {
+        const safe = (String(patch.title).trim() || '未命名').replace(/[/\\]/g, '·').slice(0, 60);
+        const base = String(cur.path || '').replace(/[^/]+\.md$/, `${safe}.md`);
+        notePath = uniqueNotePath(base, noteTaken(notes, id), id);
+      }
+    }
     setNotes(ns => ns.map(n => {
       if (n.id !== id) return n;
       const next = {...n, ...patch};
-      if (patch.title != null) {
-        const safe = (patch.title.trim() || '未命名').replace(/[/\\]/g, '·').slice(0, 60);
-        next.path = String(n.path || '').replace(/[^/]+\.md$/, `${safe}.md`);
-      }
+      if (patch.title != null) next.path = notePath || String(n.path || '').replace(/[^/]+\.md$/, `${String(patch.title).replace(/[/\\]/g, '·')}.md`);
       return next;
     }));
   }
   function addNote() {
-    const id = 'note-' + Date.now();
     const t = '新建方法笔记';
-    setNotes(ns => [{id, title: t, path: `05-方法库 methods/新建/${t}.md`, body: `# ${t}\n\n`}, ...ns]);
+    const taken = new Set(notes.map(n => String(n.path || '')).filter(Boolean));
+    let name = t, n = 1;
+    while (taken.has(`05-方法库 methods/新建/${name}.md`)) name = `${t} ${++n}`; // 连点多次各占一个文件
+    const id = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5); // 同毫秒点击也不撞 id
+    setNotes(ns => [{id, title: name, path: `05-方法库 methods/新建/${name}.md`, body: `# ${name}\n\n`}, ...ns]);
     setMethSel(id); setPage('methods');
     setToast('方法笔记已创建，保存在此浏览器 · Note created');
   }
@@ -669,7 +689,8 @@ function App() {
     const n = notes.find(x => x.id === id);
     if (!n || subOf(n) === folder) return; // 同分类重复投放：原地不动
     const src = subOf(n);
-    setNotes(ns => ns.map(x => x.id === id ? {...x, path: notePathIn(x, folder)} : x));
+    const path = uniqueNotePath(notePathIn(n, folder), noteTaken(notes, id), id);
+    setNotes(ns => ns.map(x => x.id === id ? {...x, path} : x));
     // 原分类因此空了就自动移除，不留空分类
     if (!notes.some(x => x.id !== id && subOf(x) === src) && folders.includes(src)) setFolders(fs => fs.filter(f => f !== src));
     setToast(`已移入「${folder}」 · Moved to ${folder}`);
@@ -683,7 +704,15 @@ function App() {
   function renameFolder(from, name) {
     const t = String(name || '').trim().replace(/[/\\]/g, '·').slice(0, 24);
     if (!t || t === from) return;
-    setNotes(ns => ns.map(n => subOf(n) === from ? {...n, path: notePathIn(n, t)} : n));
+    setNotes(ns => {
+      const taken = new Map(ns.filter(n => subOf(n) !== from && n.path).map(n => [n.path, n.id]));
+      return ns.map(n => {
+        if (subOf(n) !== from) return n;
+        const path = uniqueNotePath(notePathIn(n, t), taken, n.id);
+        taken.set(path, n.id); // 同批搬家也不能两条落同一个文件
+        return {...n, path};
+      });
+    });
     setFolders(fs => fs.map(f => f === from ? t : f));
     setToast(`分类已重命名为「${t}」 · Folder renamed`);
   }
@@ -694,7 +723,15 @@ function App() {
       ? window.confirm(`删除分类「${name}」？其中 ${count} 篇笔记将移入「${TRASH_FOLDER}」。`)
       : window.confirm(`删除空分类「${name}」？`);
     if (!ok) return;
-    setNotes(ns => ns.map(n => subOf(n) === name ? {...n, path: notePathIn(n, TRASH_FOLDER)} : n));
+    setNotes(ns => {
+      const taken = new Map(ns.filter(n => subOf(n) !== name && n.path).map(n => [n.path, n.id]));
+      return ns.map(n => {
+        if (subOf(n) !== name) return n;
+        const path = uniqueNotePath(notePathIn(n, TRASH_FOLDER), taken, n.id);
+        taken.set(path, n.id);
+        return {...n, path};
+      });
+    });
     setFolders(fs => fs.filter(f => f !== name));
     setToast(`分类「${name}」已删除 · Folder deleted`);
   }
@@ -790,40 +827,59 @@ function App() {
   }
   // —— 跨模块移动：文章 / 笔记 / 草稿 / 选题 / 阅读 / 档案 六类内容互通，标题与正文一起带走，可随时移回 ——
   // id 可能带图谱前缀（如 'note:xxx'，来自分析栏的节点），也可能是原始 id，统一剥掉前缀再查找
+  // 选题 id：优先沿用全数字（示例数据 / 旧库），同时避开已有的字符串 id
+  const nextIdeaId = list => {
+    const used = new Set(list.map(x => String(x.id)));
+    let n = Math.max(0, ...list.map(x => (/^\d+$/.test(String(x.id)) ? Number(x.id) : 0))) + 1;
+    while (used.has(String(n))) n++;
+    return n;
+  };
   function moveContent(fromKind, rawId, toKind) {
     if (fromKind === toKind) return;
     const raw = String(rawId || '');
     const id = raw.includes(':') ? raw.slice(raw.indexOf(':') + 1) : raw;
     const stamp = nowStamp();
     let moved = null;
+    // 来源选中态在 updater 外面清理（渲染期副作用会重复执行）：搬走的条目已不存在，界面不能停在它身上
+    let rest = null;
     if (fromKind === 'post') {
       const w = works.find(x => x.id === id); if (!w) return;
       moved = {title: w.title, body: w.body || '', tags: w.tags || []};
-      setWorks(ws => ws.filter(x => x.id !== id));
+      rest = works.filter(x => x.id !== id);
+      setWorks(rest);
+      setLibSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
+      setOpenArticle(a => a === id ? null : a);
     } else if (fromKind === 'note') {
       const n = notes.find(x => x.id === id); if (!n) return;
       moved = {title: n.title, body: n.body || ''};
       const src = subOf(n);
-      const rest = notes.filter(x => x.id !== id);
+      rest = notes.filter(x => x.id !== id);
       setNotes(rest);
+      setMethSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
       // 移走后原分类空了就自动移除，不留空分类
       if (!rest.some(x => subOf(x) === src) && folders.includes(src)) setFolders(fs => fs.filter(f => f !== src));
     } else if (fromKind === 'draft') {
       const d = drafts.find(x => x.id === id); if (!d) return;
       moved = {title: d.title, body: d.body || ''};
-      setDrafts(ds => { const rest = ds.filter(x => x.id !== id); setActive(a => a === id ? rest[0]?.id : a); return rest; });
+      rest = drafts.filter(x => x.id !== id);
+      setDrafts(rest);
+      setActive(a => a === id ? rest[0]?.id : a);
     } else if (fromKind === 'reading') {
       const r = readings.find(x => x.id === id); if (!r) return;
       moved = {title: r.title, body: r.body || ''};
       const src = readFolderOf(r);
-      const rest = readings.filter(x => x.id !== id);
+      rest = readings.filter(x => x.id !== id);
       setReadings(rest);
       if (!rest.some(x => readFolderOf(x) === src) && readFolders.includes(src)) setReadFolders(fs => fs.filter(f => f !== src));
+      setReadSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
       setReadOpen(o => o === id ? null : o);
     } else if (fromKind === 'archive') {
       const a = archives.find(x => x.id === id); if (!a) return;
       moved = {title: a.title, body: a.body || ''};
-      setArchives(as => { const rest = as.filter(x => x.id !== id); setArcOpen(o => o === id ? null : o); return rest; });
+      rest = archives.filter(x => x.id !== id);
+      setArchives(rest);
+      setArcSel(sel => sel === id ? (rest[0]?.id ?? null) : sel);
+      setArcOpen(o => o === id ? null : o);
     } else if (fromKind === 'idea') {
       const it = ideas.find(x => String(x.id) === String(id)); if (!it) return;
       moved = {title: it.title, body: it.note || ''};
@@ -831,9 +887,15 @@ function App() {
     }
     if (!moved) return;
     if (toKind === 'works') setWorks(ws => [normalizeWork({...moved, date: stamp, tags: moved.tags || []}), ...ws]);
-    else if (toKind === 'methods') setNotes(ns => [{id: 'note-' + Date.now(), title: moved.title, path: `05-方法库 methods/新建/${moved.title}.md`, body: moved.body}, ...ns]);
+    else if (toKind === 'methods') {
+      const nid = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
+      // 文件名安全化：标题里的 / 与 \ 不能进路径（否则写盘时会被当成子目录）
+      const safe = String(moved.title || '未命名').replace(/[/\\]/g, '·').slice(0, 60) || '未命名';
+      const path = uniqueNotePath(`05-方法库 methods/新建/${safe}.md`, noteTaken(notes, nid), nid);
+      setNotes(ns => [{id: nid, title: moved.title, path, body: moved.body}, ...ns]);
+    }
     else if (toKind === 'drafts') setDrafts(ds => [{id: 'draft-' + Date.now(), title: moved.title, body: moved.body, source: null}, ...ds]);
-    else if (toKind === 'ideas') setIdeas(is => [...is, {id: Math.max(0, ...is.map(x => Number(x.id) || 0)) + 1, title: moved.title, platform: '', priority: '中', status: '待写', note: moved.body.slice(0, 120)}]);
+    else if (toKind === 'ideas') setIdeas(is => [...is, {id: nextIdeaId(is), title: moved.title, platform: '', priority: '中', status: '待写', note: (moved.body || '').slice(0, 120)}]);
     else if (toKind === 'readings') setReadings(rs => [{id: 'reading-' + Date.now(), title: moved.title, author: '', source: '', date: stamp.slice(0, 10), body: moved.body}, ...rs]);
     else if (toKind === 'archives') setArchives(as => [{id: 'archive-' + Date.now(), title: moved.title, date: stamp.slice(0, 10), body: moved.body}, ...as]);
     setModal(null);
@@ -916,7 +978,9 @@ function App() {
       const a = {id: 'archive-' + Date.now(), title, date: nowStamp().slice(0, 10), body: text};
       setArchives(as => [a, ...as]); setArcSel(a.id); setPage('archives');
     } else {
-      const n = {id: 'note-' + Date.now(), title, path: `05-方法库 methods/恢复/${title.replace(/[/\\]/g, '·')}.md`, body: text};
+      const id = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
+      const path = uniqueNotePath(`05-方法库 methods/恢复/${title.replace(/[/\\]/g, '·')}.md`, noteTaken(notes, id), id);
+      const n = {id, title, path, body: text};
       setNotes(ns => [n, ...ns]); setMethSel(n.id); setPage('methods');
     }
     setModal(null);
@@ -937,9 +1001,10 @@ function App() {
       const t = String(a.title || '').trim();
       if (!t) return;
       if (a.kind === 'note') {
-        const id = 'note-' + Date.now();
+        const id = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
         const safe = t.replace(/[/\\]/g, '·');
-        setNotes(ns => [{id, title: t, path: `05-方法库 methods/新建/${safe}.md`, body: `# ${t}\n`}, ...ns]);
+        const path = uniqueNotePath(`05-方法库 methods/新建/${safe}.md`, noteTaken(notes, id), id);
+        setNotes(ns => [{id, title: t, path, body: `# ${t}\n`}, ...ns]);
         setFocus({mod: 'methods', sel: 'note:' + id}); setPage('home');
         setToast('方法笔记已创建，双链已接通 · Note created');
       } else {
@@ -957,7 +1022,11 @@ function App() {
   function onNoteTitle(gid, title) {
     const t = title.trim().replace(/[/\\]/g, '·'); // 文件名安全化，与 updateNote 一致
     if (!t) return;
-    setNotes(ns => ns.map(n => 'note:' + n.id === gid ? {...n, title: t, path: n.path.replace(/[^/]+$/, t + '.md')} : n));
+    setNotes(ns => ns.map(n => {
+      if ('note:' + n.id !== gid) return n;
+      const base = String(n.path || `05-方法库 methods/笔记/${t}.md`).replace(/[^/]+$/, t + '.md');
+      return {...n, title: t, path: uniqueNotePath(base, new Map(ns.filter(x => x.id !== n.id && x.path).map(x => [x.path, x.id])), n.id)};
+    }));
     setToast('笔记标题已更新 · Note renamed');
   }
   function onConcept(name, patch) {
@@ -994,8 +1063,9 @@ function App() {
       return {id: 'post:' + w.id, title: t};
     }
     if (kind === 'note') {
-      const id = 'note-' + Date.now(); const safe = t.replace(/[/\\]/g, '·');
-      setNotes(ns => [{id, title: t, path: `05-方法库 methods/AI/${safe}.md`, body: body || `# ${t}\n`}, ...ns]);
+      const id = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5); const safe = t.replace(/[/\\]/g, '·');
+      const path = uniqueNotePath(`05-方法库 methods/AI/${safe}.md`, noteTaken(notes, id), id);
+      setNotes(ns => [{id, title: t, path, body: body || `# ${t}\n`}, ...ns]);
       setToast(`AI 新建了方法笔记「${t}」 · AI created a note`);
       return {id: 'note:' + id, title: t};
     }
@@ -1024,7 +1094,13 @@ function App() {
     }
     if (kind === 'note') {
       const safeTitle = patch.title ? patch.title.trim().replace(/[/\\]/g, '·') : patch.title; // 文件名安全化
-      setNotes(ns => ns.map(x => x.id === id ? {...x, ...patch, ...(safeTitle && x.path ? {path: x.path.replace(/[^/]+$/, safeTitle + '.md')} : {})} : x)); // path 缺失时只改内容不改路径（审计 v2-⑤）
+      const curNote = notes.find(x => x.id === id);
+      let renamedPath = null;
+      if (safeTitle && curNote?.path) {
+        const base = curNote.path.replace(/[^/]+$/, safeTitle + '.md');
+        renamedPath = uniqueNotePath(base, noteTaken(notes, id), id);
+      }
+      setNotes(ns => ns.map(x => x.id === id ? {...x, ...patch, ...(renamedPath ? {path: renamedPath} : {})} : x)); // path 缺失时只改内容不改路径（审计 v2-⑤）
       return {ok: true, title: patch.title};
     }
     return {error: '未知类型 ' + kind};
@@ -1224,8 +1300,9 @@ function App() {
       const base = notes.reduce((m, n) => Math.max(m, Number(String(n.id).match(/^n(?:ote-)?(\d+)$/)?.[1]) || 0), 0);
       setNotes(mergeByTitle(notes, fresh.map(rePath), (x, i) => ({...x, id: 'n' + (base + fresh.length + i + 1)}), ['title', 'body']));
     } else if (target === 'ideas') {
-      const base = ideas.reduce((m, x) => Math.max(m, Number(x.id) || 0), 0);
-      setIdeas(mergeByTitle(ideas, fresh, (x, i) => ({...x, id: base + fresh.length + i + 1}), ['title', 'platform', 'priority', 'status', 'note']));
+      // 导入的选题 id 可能是字符串（frontmatter deepnotes-id / 稳定散列），新增条目改用带时间戳的 id，避免与数字 id 撞车
+      const stamp = 'idea-' + Date.now();
+      setIdeas(mergeByTitle(ideas, fresh, (x, i) => ({...x, id: `${stamp}-${i}`}), ['title', 'platform', 'priority', 'status', 'note']));
     } else if (target === 'drafts') {
       setDrafts(mergeByTitle(drafts, fresh, (x, i) => ({...x, id: 'draft-' + Date.now() + '-' + i}), ['title', 'body']));
     } else if (target === 'readings') {
@@ -1361,7 +1438,8 @@ function App() {
     let keepOld = null;
     if (unreadable.length) {
       const ghost = new Set(unreadable);
-      const relOfItem = (kind, x) => pathOf(kind, x) || '';
+      // 真实磁盘路径优先：pathOf 是按标题反推的，标题 ≠ 文件名（外部导入的 .md 很常见）时匹配不上占位文件
+      const relOfItem = (kind, x) => x.rel || pathOf(kind, x) || '';
       const cur = {works, notes, drafts, readings, archives};
       keepOld = {};
       for (const kind of Object.keys(cur)) {
@@ -1454,7 +1532,7 @@ function App() {
     {group: '新建 New', icon: 'works', zh: '新建文章', en: 'New article', run: () => newWork()},
     {group: '新建 New', icon: 'methods', zh: '新建方法笔记', en: 'New note', run: addNote},
     {group: '新建 New', icon: 'draft', zh: '新建草稿', en: 'New draft', run: () => newDraft()},
-    {group: '新建 New', icon: 'idea', zh: '添加选题', en: 'New idea', run: () => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})},
+    {group: '新建 New', icon: 'idea', zh: '添加选题', en: 'New idea', run: () => editIdea({id: nextIdeaId(ideas), title: '', platform: '小红书', priority: '中', status: '待写', note: ''})},
     {group: '新建 New', icon: 'book', zh: '新建阅读条目', en: 'New reading', run: newReading},
     {group: '新建 New', icon: 'archive', zh: '新建档案', en: 'New archive', run: newArchive},
     ...navs.map(([id, zh, en]) => ({group: '跳转 Go', icon: MODULE_ICON[id], zh: `打开${zh}`, en: `Go to ${en}`, run: () => setPage(id)})),
@@ -1517,7 +1595,7 @@ function App() {
       {page === 'library' && <Library graph={graph} works={works} selected={libSel} setSelected={setLibSel} openArticle={openArticle} setOpenArticle={setOpenArticle} onNewWork={newWork} onUpdateWork={updateWork} onDeleteWork={deleteWork} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions}/>}
       {page === 'methods' && <Methods graph={graph} notes={notes} setNotes={setNotes} selected={methSel} setSelected={setMethSel} onGo={openInGraph} onJumpContent={openContent} onNew={addNote} onDelete={deleteNote} onUpdate={updateNote} onMove={id => setModal({move: {kind: 'note', id}})} folders={folders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveNoteToFolder} onCreateFolder={createFolder} onRenameFolder={renameFolder} onDeleteFolder={deleteFolder}/>}
       {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onGo={openInGraph} onJumpContent={openContent} works={works} notes={notes} onMove={id => setModal({move: {kind: 'draft', id}})} inbox={inbox} setInbox={setInbox} onFlashToDraft={flashToDraft} onFlashToNote={flashToNote} onDaily={openDaily}/>}
-      {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onNew={() => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
+      {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onNew={() => editIdea({id: nextIdeaId(ideas), title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
       {page === 'readings' && <Readings graph={graph} readings={readings} selected={readSel} setSelected={setReadSel} openReading={readOpen} setOpenReading={setReadOpen} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onNew={newReading} onUpdate={updateReading} onDelete={deleteReading} readFolders={readFolders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveReadingToFolder} onCreateFolder={createReadingFolder} onRenameFolder={renameReadingFolder} onDeleteFolder={deleteReadingFolder} onLinkify={linkifyMentions} onImportFiles={importReadingItems}/>}
       {page === 'archives' && <Archives graph={graph} archives={archives} selected={arcSel} setSelected={setArcSel} openArchive={arcOpen} setOpenArchive={setArcOpen} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onNew={newArchive} onUpdate={updateArchive} onDelete={deleteArchive} onLinkify={linkifyMentions}/>}
       {page === 'concepts' && <Concepts graph={graph} onGo={openInGraph} onJumpContent={openContent}/>}
@@ -1545,8 +1623,8 @@ function App() {
         <div className="form-actions">
           <button className="pill primary" onClick={() => setModal('import')}><Icon name="file" size={14}/>导入知识库文件夹 <em>Import vault</em></button>
           <button className="pill" onClick={() => setModal('import-files')}><Icon name="outlink" size={14}/>导入选定内容 <em>Import files</em></button>
-          <button className="pill" disabled={!curItem} title={curItem ? `导出《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentMd}><Icon name="save" size={14}/>导出当前 · Markdown <em>MD</em></button>
-          <button className="pill" disabled={!curItem} title={curItem ? `打印 / 另存 PDF《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentPdf}><Icon name="outlink" size={14}/>导出当前 · PDF <em>Print</em></button>
+          <button className="pill" disabled={!curItem?.item} title={curItem?.item ? `导出《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentMd}><Icon name="save" size={14}/>导出当前 · Markdown <em>MD</em></button>
+          <button className="pill" disabled={!curItem?.item} title={curItem?.item ? `打印 / 另存 PDF《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentPdf}><Icon name="outlink" size={14}/>导出当前 · PDF <em>Print</em></button>
           <button className="pill" onClick={() => setModal('recovery')}><Icon name="replay" size={14}/>文件恢复 <em>Recovery</em></button>
           <button className="pill ghost" onClick={resetToSample}>切回示例数据 <em>Reset</em></button>
         </div>

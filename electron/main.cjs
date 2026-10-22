@@ -182,9 +182,13 @@ async function pruneSnapshots(dir, now, isRoot = true) { // 超期清理 + 空�
     try { const remain = await fsp.readdir(dir); if (remain.length === 0) await fsp.rmdir(dir); } catch {}
   }
 }
+// 快照文件名后缀是毫秒时间戳（同毫秒再追加 -1/-2）：按解析出的数值排序，
+// 不能按字符串排——「-」排在「.」前面会把 stem_123-1.md 当成比 stem_123.md 更旧/更新。
+const snapNum = n => { const m = n.match(/_(\d{13,})(?:-(\d+))?\.md$/); return m ? [+m[1], +(m[2] || 0)] : [0, 0]; };
+const sortSnapNames = names => names.sort((a, b) => { const [ta, ia] = snapNum(a), [tb, ib] = snapNum(b); return ta - tb || ia - ib; });
 async function capSnapshots(dir) { // 单个文件的快照超额删最旧（文件名带毫秒时间戳前缀，天然可排序）
   let names = [];
-  try { names = (await fsp.readdir(dir)).filter(n => n.endsWith('.md')).sort(); } catch { return; }
+  try { names = sortSnapNames((await fsp.readdir(dir)).filter(n => n.endsWith('.md'))); } catch { return; }
   if (names.length <= SNAP_KEEP) return;
   for (const n of names.slice(0, names.length - SNAP_KEEP)) await fsp.rm(path.join(dir, n), { force: true }).catch(() => {});
 }
@@ -209,7 +213,7 @@ async function snapshotBeforeWrite(root, full, body) {
     // 内容去重：与本文件最新一份快照相同就跳过（连续保存只留真正变化过的版本）
     const stem = path.basename(dest).replace(/_\d{13,}(?:-\d+)?\.md$/, '');
     let names = [];
-    try { names = (await fsp.readdir(path.dirname(dest))).filter(n => n.startsWith(stem + '_') && n.endsWith('.md')).sort(); } catch {}
+    try { names = sortSnapNames((await fsp.readdir(path.dirname(dest))).filter(n => n.startsWith(stem + '_') && n.endsWith('.md'))); } catch {}
     if (names.length) {
       try { if ((await fsp.readFile(path.join(path.dirname(dest), names[names.length - 1]), 'utf8')) === String(old)) return; } catch {}
     }
@@ -233,7 +237,7 @@ function snapshotBeforeWriteSync(root, full, body) { // 退出同步通道用：
     // 内容去重：同步版直接读最新快照文件对比（取目录里排序最末一份）
     const stem = path.basename(dest).replace(/_\d{13,}(?:-\d+)?\.md$/, '');
     try {
-      const names = fs.readdirSync(path.dirname(dest)).filter(n => n.startsWith(stem + '_') && n.endsWith('.md')).sort();
+      const names = sortSnapNames(fs.readdirSync(path.dirname(dest)).filter(n => n.startsWith(stem + '_') && n.endsWith('.md')));
       if (names.length && fs.readFileSync(path.join(path.dirname(dest), names[names.length - 1]), 'utf8') === String(old)) return;
     } catch {}
     fs.writeFileSync(dest, String(old), 'utf8');
@@ -482,14 +486,15 @@ ipcMain.handle('vault:snapshots', async (_e, { root }) => {
         const p = path.join(dir, e.name);
         if (e.isDirectory()) { await walk(p); continue; }
         if (!e.isFile() || !e.name.endsWith('.md')) continue;
-        const m = e.name.match(/_(\d{13})\.md$/);
+        // 同毫秒的多份快照带 -1/-2 后缀：一并列出，rel 去掉整个后缀（否则会显示成 xxx-1.md）
+        const m = e.name.match(/_(\d{13,})(?:-(\d+))?\.md$/);
         if (!m) continue;
         const file = path.relative(base, p).split(path.sep).join('/');
-        list.push({ file, ts: Number(m[1]), rel: file.replace(/_(\d{13})\.md$/, '.md') });
+        list.push({ file, ts: Number(m[1]), seq: Number(m[2] || 0), rel: file.replace(/_\d{13,}(?:-\d+)?\.md$/, '.md') });
       }
     }
     await walk(base);
-    list.sort((a, b) => b.ts - a.ts); // 新的在前
+    list.sort((a, b) => b.ts - a.ts || b.seq - a.seq); // 新的在前
     return { ok: true, list: list.slice(0, SNAP_LIST_MAX) };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });

@@ -37,8 +37,17 @@ function chunk(text) {
   return parts;
 }
 
+// 单次请求超时（12s）：免费接口偶发挂起，没有超时会让整段翻译一直卡在「进行中」
+const TIMEOUT = 12000;
+async function fetchWithTimeout(url) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), TIMEOUT);
+  try { return await fetch(url, {signal: ctrl.signal}); }
+  finally { clearTimeout(t); }
+}
+
 async function viaMyMemory(text) {
-  const r = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|zh-CN`);
+  const r = await fetchWithTimeout(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|zh-CN`);
   if (!r.ok) throw new Error('mymemory ' + r.status);
   const d = await r.json();
   const out = d?.responseData?.translatedText;
@@ -47,7 +56,7 @@ async function viaMyMemory(text) {
 }
 
 async function viaGoogle(text) {
-  const r = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(text)}`);
+  const r = await fetchWithTimeout(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(text)}`);
   if (!r.ok) throw new Error('google ' + r.status);
   const j = await r.json();
   const out = (j?.[0] || []).map(x => x?.[0] || '').join('');
@@ -67,13 +76,26 @@ const translateChunk = async text => {
   return viaChannel(viaGoogle, text);
 };
 
-// 翻译一段原文（自动切块、调用方限并发、内存缓存）
+// 翻译一段原文（自动切块、2 路并发、内存缓存）
+// 单个分块失败时回落原文而不是整体 reject：整段可用，只有失败的那几句保持原文；
+// 结果照常写缓存，避免同一段反复重试形成请求风暴。
+const CONCURRENCY = 2;
 export async function translateText(text) {
   const src = String(text || '').trim();
   if (!src) return '';
   const hit = cacheGet(src);
   if (hit !== undefined) return hit;
-  const out = (await Promise.all(chunk(src).map(translateChunk))).join('');
-  cacheSet(src, out);
-  return out;
+  const parts = chunk(src);
+  const out = new Array(parts.length);
+  let i = 0;
+  const worker = async () => {
+    while (i < parts.length) {
+      const k = i++;
+      out[k] = await translateChunk(parts[k]).catch(() => parts[k]);
+    }
+  };
+  await Promise.all(Array.from({length: Math.min(CONCURRENCY, parts.length)}, worker));
+  const res = out.join('');
+  cacheSet(src, res);
+  return res;
 }

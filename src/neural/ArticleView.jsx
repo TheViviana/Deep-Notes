@@ -17,6 +17,10 @@ marked.setOptions({gfm: true, breaks: true});
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 // 源码层已把 < 转成 &lt;；注入点还原后走完整 esc()，避免二次转义把实体显示成文字（esc(原文本) 幂等）
 const unescLt = s => String(s).replace(/&lt;/g, '<');
+// 公式占位符（\u0000M{n}E\u0000）：解析之后会整段替换成 KaTeX 生成的 HTML，只能出现在文本节点里。
+// 一旦被拼进 data-target / data-asset / alt / title 等属性，后置还原就会把 < 与引号写进属性值，
+// 截断属性并注入真实 DOM 节点——所有拼属性的地方都必须先拦下它。
+const PH_RE = /\u0000M\d+E\u0000/;
 
 // —— 极简语法高亮（零依赖）：颜色值 / 字符串 / 注释 / 关键字 / 数字 / 属性 / HTML 标签 ——
 // 单遍 tokenize：命中区间染色、未命中区间转义，避免「先转义再匹配」的实体污染。
@@ -75,17 +79,21 @@ const TRUSTED_HTML = new RegExp('^<(?:'
 // 视频播放器标签：src 由 resolveVaultVideo 回填（桌面版经 deepnotes-asset:// 流式读盘，
 // 网页版保持虚线占位）。属性顺序固定，TRUSTED_HTML 才能按形状放行。
 const videoTag = (ref, width = 0) =>
-  `<video class="md-embed-video" data-asset="${esc(ref)}"${width > 0 ? ` style="width:${width}px"` : ''} controls preload="metadata" playsinline></video>`;
+  PH_RE.test(String(ref || '')) ? esc(ref) // 占位符不得进 data-asset（还原时会注入 KaTeX HTML）
+    : `<video class="md-embed-video" data-asset="${esc(ref)}"${width > 0 ? ` style="width:${width}px"` : ''} controls preload="metadata" playsinline></video>`;
 marked.use({renderer: {
   // 代码段在源码层也做了 < 转义（与正文同等防护），渲染前先还原再交给 hiCode 转义上色，
   // 否则 hiCode 的 esc() 会把 &lt; 二次转义成 &amp;lt; 显示成实体文字
   code({text, lang}) { return `<pre><code class="hl">${hiCode(unescLt(text), lang)}</code></pre>`; },
   codespan({text}) { return `<code class="hl">${hiCode(unescLt(text), '')}</code>`; },
-  html({text}) { const t = String(text ?? ''); return TRUSTED_HTML.test(t) ? t : esc(t); },
+  // 占位符只应出现在文本节点：出现在 html token 里说明被拼进了属性，整段按纯文本显示（不还原成 DOM）
+  html({text}) { const t = String(text ?? ''); if (PH_RE.test(t)) return esc(t); return TRUSTED_HTML.test(t) ? t : esc(t); },
   link({href, title, tokens}) {
     const h = String(href || '').trim();
     const inner = this.parser.parseInline(tokens);
-    const tt = title ? ` title="${esc(title)}"` : '';
+    if (PH_RE.test(h)) return inner; // 地址里出现占位符：不生成属性，只保留链接文字
+    // 标题携带公式占位符时丢弃 title：解析后的还原会把 KaTeX HTML 打进属性值
+    const tt = title && !PH_RE.test(String(title)) ? ` title="${esc(title)}"` : '';
     // 无 scheme 的相对视频引用（Obsidian 表格里常见的 [文件名](x.mp4)）：渲染成可点击的视频
     // 入口，点击由 useVaultImages 的全局委托打开灯箱播放——直接塞播放器会撑破表格单元格
     if (isVideoRef(h) && !/^[a-z][a-z0-9+.-]*:/i.test(h)) {
@@ -95,6 +103,8 @@ marked.use({renderer: {
   },
   image({href, title, text}) {
     const h = String(href || '').trim();
+    // 占位符进 src / alt / title 都会在还原时被打穿属性：整个图片退化成纯文本
+    if (PH_RE.test(h) || PH_RE.test(String(text || ''))) return esc(text || h);
     // 视频引用（![](x.mp4)）直接渲染成播放器；网页版无本地访问权限时保持虚线占位
     if (isVideoRef(h) && !/^[a-z][a-z0-9+.-]*:/i.test(h)) return videoTag(h);
     // 除白名单协议外，无 URL scheme 的相对引用（裸文件名 / images/foo.jpg）也放行：
@@ -103,7 +113,7 @@ marked.use({renderer: {
     // 带 scheme 又不在白名单里的（javascript: 等）一律丢弃，维持协议白名单防护。
     const isSafe = /^(https?:|data:image\/|\/|\.\/|\.\.\/)/i.test(h) || !/^[a-z][a-z0-9+.-]*:/i.test(h);
     if (!isSafe) return esc(text || '');
-    const tt = title ? ` title="${esc(title)}"` : '';
+    const tt = title && !PH_RE.test(String(title)) ? ` title="${esc(title)}"` : '';
     return `<img src="${esc(h)}" alt="${esc(text || '')}"${tt} loading="lazy"/>`;
   },
 }});
@@ -165,6 +175,7 @@ export function renderMarkdown(md) {
       .replace(/!\[\[([^\]\n]+)\]\]/g, (_, t) => {
         const [name, size] = t.split('|');
         const n = unescLt((name || '').trim());
+        if (PH_RE.test(n)) return esc(n); // 公式占位符不得拼进 data-asset / alt：退化为纯文本
         const w = parseInt(size, 10);
         if (isVideoRef(n)) return videoTag(n, w);
         return `<img class="md-embed" data-asset="${esc(n)}" alt="${esc(n)}"${w > 0 ? ` style="width:${w}px"` : ''}/>`;
@@ -172,6 +183,7 @@ export function renderMarkdown(md) {
       .replace(/\[\[([^\]\n]+)\]\]/g, (_, t) => {
         const [target, alias] = t.split('|');
         const raw = unescLt((target || '').trim());
+        if (PH_RE.test(raw)) return esc(raw); // data-target 里出现占位符：不生成链接，按纯文本显示
         const [name, anchor] = raw.split('#');
         // 块引用 [[笔记#小节]] 显示为「笔记 › 小节」；别名优先
         const label = unescLt((alias || '').trim())
@@ -741,6 +753,10 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
   const [trans, setTrans] = useState({phase: 'idle', done: 0, total: 0}); // idle | running | done
   const [hint, setHint] = useState('');
   const immersive = pluginOn('immersive');
+  // 卸载后仍在跑的异步任务（翻译两路 worker / 导出提示定时器）必须先判存活，不能再 setState
+  const alive = useRef(true);
+  const hintTimer = useRef(null);
+  useEffect(() => () => { alive.current = false; clearTimeout(hintTimer.current); }, []);
   useEffect(() => { if (mode !== 'preview') { setTrans({phase: 'idle', done: 0, total: 0}); setHint(''); } }, [mode]);
   const runTranslate = async () => {
     if (!net) { setHint('先打开顶栏联网开关 · Turn on the network switch in the top bar first'); return; }
@@ -759,14 +775,17 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     const worker = async () => {
       while (queue.length) {
+        if (!alive.current) return; // 视图已关闭：停止取任务、不再 setState
         const el = queue.shift();
         try { out.push([el, await translateText(el.textContent)]); } catch { out.push([el, null]); failed += 1; }
         done += 1;
+        if (!alive.current) return; // await 期间被卸载：跳过本轮 setState 与后续请求
         setTrans(t => ({...t, done}));
         if (queue.length) await sleep(120);
       }
     };
     await Promise.all([worker(), worker()]);
+    if (!alive.current) return; // 卸载后 out 里的 DOM 节点已失效，不能再写
     for (const [el, text] of out) {
       if (!text || !el.isConnected || el.querySelector('.md-trans')) continue;
       const span = document.createElement('span');
@@ -803,9 +822,11 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
       const dirMap = {works: '02-作品库', drafts: '03-创作台/正在写', readings: '06-阅读区', archives: '07-档案区'};
       const rel = `${dirMap[exportKind] || '02-作品库'}/${safeName(work.title)}.md`;
       const where = await exportFiles([{rel, body: serialize(exportKind, work)}]);
+      if (!alive.current) return;
       setExpHint(where === 'download' ? '已下载 Exported' : where ? `已导出到「${where.replace(/\/+$/, '').split('/').pop()}」` : '');
-    } catch { setExpHint('导出失败 Export failed'); }
-    setTimeout(() => setExpHint(''), 2600);
+    } catch { if (alive.current) setExpHint('导出失败 Export failed'); }
+    clearTimeout(hintTimer.current);
+    hintTimer.current = setTimeout(() => { if (alive.current) setExpHint(''); }, 2600);
   };
   return <section className={`article-view glass${focusMode ? ' focused' : ''}`} role="region" aria-label={eyebrow[1]}>
     {focusMode && <button className="icon-btn av-unfocus" onClick={() => setFocusMode(false)} title="退出专注 Exit focus" aria-label="退出专注模式"><Icon name="close" size={14}/></button>}
@@ -813,7 +834,7 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
       <div className="av-title">
         <p className="eyebrow">{eyebrow[0]} <span>{eyebrow[1]}</span></p>
         <h2>{work.title}</h2>
-        <p className="av-meta">{work.metaLine || `${work.date.slice(0, 10)} 首发 · 编辑于 ${work.updatedAt || work.date}${work.direction ? ` · ${work.direction}` : ''} · ${work.tags.length} 个标签`}</p>
+        <p className="av-meta">{work.metaLine || `${String(work.date || '').slice(0, 10)} 首发 · 编辑于 ${work.updatedAt || work.date || ''}${work.direction ? ` · ${work.direction}` : ''} · ${(work.tags || []).length} 个标签`}</p>
       </div>
       <div className="av-actions">
         <div className="seg" role="group" aria-label="编辑或预览">
@@ -850,7 +871,7 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
       {fx.toc}
     </div> : <article className="md-preview" ref={previewRef} onClick={onPreviewClick} dangerouslySetInnerHTML={{__html: html}}/>}
     <footer className="av-foot">
-      <span>{work.body.length} 字 <em>chars</em> · {wikiCount} 个双链 <em>wikilinks</em>{fx.badges(work.body).map((b, i) => <React.Fragment key={i}> · {b.zh} <em>{b.en}</em></React.Fragment>)} · 已保存到此浏览器 <em>Saved locally</em></span>
+      <span>{String(work.body || '').length} 字 <em>chars</em> · {wikiCount} 个双链 <em>wikilinks</em>{fx.badges(work.body).map((b, i) => <React.Fragment key={i}> · {b.zh} <em>{b.en}</em></React.Fragment>)} · 已保存到此浏览器 <em>Saved locally</em></span>
       <span className="av-hint"><Icon name="pulse" size={12}/>双链与标签会自动汇入图谱 <em>Links feed the graph</em></span>
     </footer>
   </section>;

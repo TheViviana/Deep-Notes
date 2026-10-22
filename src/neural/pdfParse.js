@@ -25,10 +25,15 @@ export async function pdfToMarkdown(file) {
     const pages = [];
     for (let i = 1; i <= Math.min(total, MAX_PDF_PAGES); i++) {
       const page = await pdf.getPage(i);
-      const tc = await page.getTextContent();
-      let out = '';
-      for (const it of tc.items) out += it.str + (it.hasEOL ? '\n' : '');
-      pages.push(out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim());
+      try {
+        const tc = await page.getTextContent();
+        let out = '';
+        for (const it of tc.items) out += it.str + (it.hasEOL ? '\n' : '');
+        pages.push(out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim());
+      } finally {
+        // 每页取完立即释放：500 页的页面资源不再累积到 pdf.destroy()
+        await page.cleanup().catch(() => {});
+      }
     }
     const title = String(meta?.info?.Title || '').trim();
     const head = title ? `# ${title}\n\n` : '';

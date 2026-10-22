@@ -31,6 +31,8 @@ export function normalizeWork(w = {}) {
     body: String(w.body || ''),
     media: w.media || null,
     cover: w.cover || null,
+    ...(w.rel ? {rel: w.rel} : {}), // 磁盘真实路径（导入时带上）：iCloud 占位文件的同步按它匹配条目，不写进 frontmatter
+
     ...Object.fromEntries(METRIC_KEYS.map(k => [k, w[k] ?? (k === 'views' ? 0 : null)])),
     ...(w.keep && Object.keys(w.keep).length ? {keep: w.keep} : {})
   };

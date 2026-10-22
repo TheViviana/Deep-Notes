@@ -3,7 +3,7 @@
 // 磁盘唯一事实源：连库时同一份数据另存进库根 .deepnotes/meta.json（fileStore 的 patchMeta），
 // 换机 / 重装后随知识库带走；localStorage 只作本机兜底。
 import {useEffect, useState} from 'react';
-import {CONFIG} from '../config';
+import {CONFIG, readVaultRoot} from '../config';
 
 let sink = null;      // 连库时由 main.jsx 注入：把改动合并进知识库 meta
 let hydrating = false; // 灌入盘上数据期间不回写，避免「读盘 → 写盘」空转
@@ -13,7 +13,9 @@ export function setConceptSink(fn) { sink = fn; }
 // shadow 记录「本机已确认与盘上一致的最后一版」（hydrate 完成、或 meta 写盘成功后更新）。
 // 双机来回编辑时据此判断每个键是哪边改的：本地没动用盘上、盘上没动用本地、两边都动取盘上
 // （多台机器收敛到同一份）。没有 shadow（老用户首次升级）时退化为本地优先，与旧行为一致。
-const SHADOW_KEY = () => CONFIG.storagePrefix + '-concept-meta-shadow-v1';
+// 影子副本按知识库隔离：两套库（示例 / 不同文件夹）的盘上版本互不相干，
+// 共用一个 shadow 会让「换库后首次读盘」把本地改动误判成盘上已删除而抹掉。
+const SHADOW_KEY = () => CONFIG.storagePrefix + '-concept-meta-shadow-v1:' + (readVaultRoot() || 'local');
 const readShadow = () => { try { return JSON.parse(localStorage.getItem(SHADOW_KEY())) || null; } catch { return {}; } };
 const writeShadow = obj => { try { localStorage.setItem(SHADOW_KEY(), JSON.stringify(obj)); } catch {} };
 // meta 写盘成功（含换库后另一边的成功写入）时同步 shadow；patchMeta 写失败不会派发，shadow 不撒谎
@@ -140,7 +142,7 @@ export function hydrateConceptMeta(meta) {
       const local = store.get();
       const merged = hasShadow && shadow[key] ? merge3(local, incoming, shadow[key]) : {...incoming, ...local};
       store.write(merged);
-      newShadow[key] = merged;
+      newShadow[key] = incoming; // shadow 只记录「盘上真值」：merge 结果里本地独有部分尚未落盘，不能当作已同步
     }
     writeShadow(newShadow);
   } finally { hydrating = false; }
