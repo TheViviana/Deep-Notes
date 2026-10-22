@@ -297,7 +297,29 @@ test('flushSyncNow：部分失败时留底收敛为仍失败的（写成功的�
   clearPendingWrites();
 });
 
-// —— N1 回归：uniqueNotePath 传入无 .md 后缀且已占用的路径时必须立即返回，绝不死循环 ——
+// —— 队列时序回归：防抖窗口内「写→删→再写同名」必须按时间序执行 ——
+// Map 同键 set 不移到队尾，若 enqueue 不先 delete 再 set，
+// 第二个 write 会留在原位，flush 执行成「写新→删」，新内容落盘即进回收站。
+// （同键 write 本就会合并只留最新 body，所以正确执行序是先 trash 后 write 最新版）
+test('enqueue：同路径 写→删→写 按时间序 flush，新内容不被自己的删除吞掉', async () => {
+  const calls = [];
+  window.deepnotes = {vault: {
+    write: async (root, rel, body) => { calls.push(['write', rel, body]); return {ok: true}; },
+    trash: async (root, rel) => { calls.push(['trash', rel]); return {ok: true}; },
+  }};
+  store.set(VAULT_ROOT_KEY, '/tmp/vault');
+  const item = {id: 'd40', title: '来回', body: 'v1'};
+  const relMap = () => resolveRels('drafts', [item]);
+  queueSync('drafts', item, null, relMap());                    // w:来回.md
+  queueSync('drafts', null, item, relMap());                    // t:来回.md
+  queueSync('drafts', {...item, body: 'v2'}, null, relMap());   // w:来回.md（再写，合并为最新 body）
+  await flush();
+  assert.deepEqual(calls.map(c => c[0]), ['trash', 'write'], '先删旧再写新，新内容不被吞');
+  assert.match(calls[1][2], /v2/, '落盘的是最新一版内容');
+  clearPendingWrites();
+});
+
+
 test('uniqueNotePath：无 .md 且冲突时补扩展名立即返回，循环有界不空转', () => {
   const taken = new Map([['05-方法库 methods/新建/甲', 'other']]);
   const got = uniqueNotePath('05-方法库 methods/新建/甲', taken, 'self');

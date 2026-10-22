@@ -312,9 +312,11 @@ function enqueue(op) {
   // 留底（_retry）里的旧 body 只能填进空位，不能盖掉本会话排队的更新版本。
   const k = opKey(op);
   const cur = queue.get(k);
-  if (cur && cur._retry && !op._retry) queue.set(k, op); // 新编辑顶掉旧重试：以最新内容为准
-  else if (cur && !cur._retry && op._retry) return;        // 旧回填不得覆盖队列里的新编辑
-  else queue.set(k, op);
+  if (cur && !cur._retry && op._retry) return; // 旧回填不得覆盖队列里的新编辑
+  // Map 同键 set 不改变插入顺序：先 delete 再 set 把键移到队尾，
+  // 否则「写→删→写」会执行成「写（新）→删」，新内容落盘即进回收站。
+  if (cur) queue.delete(k);
+  queue.set(k, op);
   clearTimeout(timer);
   timer = setTimeout(flush, 800);
 }

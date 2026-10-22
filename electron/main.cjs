@@ -128,15 +128,20 @@ async function atomicWrite(full, body) {
   const tmp = path.join(path.dirname(full), '.' + path.basename(full) + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8));
   // open + sync + close：数据落盘后才 rename（断电也不会出现「rename 完成但内容还在页缓存」的空文件）；
   // close 放 finally——写失败也不能漏关句柄，fd 泄漏积多了进程再也打不开文件
-  const fh = await fsp.open(tmp, 'w');
   try {
-    await fh.writeFile(String(body ?? ''), 'utf8');
-    await fh.sync();
-  } finally {
-    await fh.close().catch(() => {});
+    const fh = await fsp.open(tmp, 'w');
+    try {
+      await fh.writeFile(String(body ?? ''), 'utf8');
+      await fh.sync();
+    } finally {
+      await fh.close().catch(() => {});
+    }
+    await fsp.rename(tmp, full);
+  } catch (err) {
+    // 任何一步失败都要清掉临时文件：写失败 / fsync 失败 / rename 失败都不在库里留残渣
+    await fsp.unlink(tmp).catch(() => {});
+    throw err;
   }
-  try { await fsp.rename(tmp, full); }
-  catch (err) { await fsp.unlink(tmp).catch(() => {}); throw err; }
 }
 
 // —— 拒绝不完整覆盖：空内容不允许覆盖已有文件 ——
@@ -386,7 +391,9 @@ async function pruneTrash(root) {
     const p = path.join(trashDir, e.name);
     try {
       const st = await fsp.stat(p);
-      if (now - (st.mtimeMs || st.ctimeMs) > TRASH_TTL) {
+      // rename 进回收站不刷新 mtime：老文件刚被删时 mtime 仍是数周前，按 mtime 判定会被当场物理清除。
+      // 取 mtime 与 ctime 的较新者——ctime 会被 rename 刷新，回收期从「进回收站那一刻」起算。
+      if (now - Math.max(st.mtimeMs || 0, st.ctimeMs || 0) > TRASH_TTL) {
         await fsp.rm(p, { recursive: true, force: true });
         // 清理留痕：误删找回的最后一点线索（文件名与被清时间）
         await fsp.appendFile(path.join(trashDir, '.cleanup.log'),
@@ -459,11 +466,13 @@ ipcMain.on('vault:flush-sync', (e, ops) => {
         snapshotBeforeWriteSync(op.root, full, op.body); // 退出写盘前的最后一道快照
         fs.mkdirSync(path.dirname(full), { recursive: true });
         const tmp = path.join(path.dirname(full), '.' + path.basename(full) + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8));
-        // 与 atomicWrite 同一套落盘纪律：fsync 后 rename，句柄 finally 关闭
-        const fd = fs.openSync(tmp, 'w');
-        try { fs.writeSync(fd, String(op.body ?? ''), null, 'utf8'); fs.fsyncSync(fd); }
-        finally { try { fs.closeSync(fd); } catch {} }
-        fs.renameSync(tmp, full);
+        // 与 atomicWrite 同一套落盘纪律：fsync 后 rename，句柄 finally 关闭；任何一步失败都要清掉临时文件
+        try {
+          const fd = fs.openSync(tmp, 'w');
+          try { fs.writeSync(fd, String(op.body ?? ''), null, 'utf8'); fs.fsyncSync(fd); }
+          finally { try { fs.closeSync(fd); } catch {} }
+          fs.renameSync(tmp, full);
+        } catch (err) { try { fs.unlinkSync(tmp); } catch {} throw err; }
       }
     } catch { failed.push(rel); }
   }
@@ -725,7 +734,12 @@ ipcMain.handle('vault:meta-read', async (_e, root) => {
     const full = path.join(path.resolve(root), META_REL);
     if (!inside(root, full)) return {ok: false, error: '越界'};
     try { return {ok: true, data: JSON.parse(await fsp.readFile(full, 'utf8'))}; }
-    catch { return {ok: true, data: null}; } // 还没有 meta 文件 / 内容损坏：视为空
+    catch (err) {
+      if (err?.code === 'ENOENT') return {ok: true, data: null}; // 还没有 meta 文件：视为空
+      // JSON 损坏必须如实报错：渲染层据此设 metaBlocked 绝不覆盖盘上文件；
+      // 若静默当空返回，损坏的文件会被后续 patchMeta 用内存版本直接盖掉，盘上内容彻底丢失
+      return {ok: false, error: 'meta.json 解析失败（文件可能已损坏）'};
+    }
   } catch (err) { return {ok: false, error: String(err?.message || err)}; }
 });
 ipcMain.handle('vault:meta-write', async (_e, {root, data}) => {
@@ -847,8 +861,19 @@ ipcMain.handle('ai-fetch', async (_event, { url, headers, body }) => {
     });
     const len = Number(res.headers.get('content-length') || 0);
     if (len > MAX_AI_BODY) return { ok: false, status: res.status, error: '响应体超过 10MB，已拒绝' };
-    const buf = await res.arrayBuffer();
-    if (buf.byteLength > MAX_AI_BODY) return { ok: false, status: res.status, error: '响应体超过 10MB，已拒绝' };
+    // 流式读取并累计计数：chunked/gzip 响应没有 content-length，整体 arrayBuffer 会先把超大响应读进内存
+    const reader = res.body?.getReader();
+    if (!reader) return { ok: false, status: res.status, error: '响应体不可读' };
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_AI_BODY) { await reader.cancel().catch(() => {}); return { ok: false, status: res.status, error: '响应体超过 10MB，已拒绝' }; }
+      chunks.push(value);
+    }
+    const buf = Buffer.concat(chunks.map(c => Buffer.from(c)));
     let data = null;
     try { data = JSON.parse(new TextDecoder().decode(buf)); } catch { /* 非 JSON 响应（如纯文本报错）按 null 处理 */ }
     return { ok: res.ok, status: res.status, data };
