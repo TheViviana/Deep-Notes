@@ -232,7 +232,7 @@ function printArticle({title, meta, html}) {
 // 「阅读全文」弹窗：默认渲染成阅读视图（双链可点击跳转），右上角可切回 Markdown 原文查看符号。
 // 大纲目录（toc 插件开启时）悬浮在右侧：点击滚动到对应标题。
 // 沉浸式翻译（immersive 插件 + 顶栏联网开关，二者都打开才发请求）与文章预览同一套交互。
-function ReadFull({r, graph, onClose, onGo}) {
+function ReadFull({r, graph, onClose, onGo, onOpenContent}) {
   const [src, setSrc] = useState(false);
   const box = useRef(null);
   const {disabled} = usePlugins();
@@ -266,7 +266,9 @@ function ReadFull({r, graph, onClose, onGo}) {
     const {id, anchor} = resolveTarget(byName, a.dataset.target);
     if (!id) return;
     if (anchor && id === r.id) { scrollToAnchor(box.current, anchor); return; }
-    onGo(id);
+    // 双链就地打开目标内容（与 ArticleView 一致）；跳到别篇后关掉弹窗，避免页面在弹窗背后切换
+    (onOpenContent || onGo)(id);
+    if (onOpenContent) onClose();
   };
   const runTranslate = async () => {
     if (!net) { setHint('先打开顶栏联网开关 · Turn on the network switch in the top bar first'); return; }
@@ -1754,7 +1756,7 @@ function App() {
     {modal === 'plugins' && <Modal title="插件管理" en="Plug-ins" onClose={close}>
       <PluginList/>
     </Modal>}
-    {modal?.read && <ReadFull r={modal.read} graph={graph} onClose={close} onGo={openInGraph}/>}
+    {modal?.read && <ReadFull r={modal.read} graph={graph} onClose={close} onGo={openInGraph} onOpenContent={openContent}/>}
     {/* 跨模块移动：把文章 / 笔记 / 草稿 / 选题 移到另一个模块，标题正文一起带走 */}
     {modal?.move && (() => {
       const {kind, id} = modal.move, cur = HOME_OF[kind];
