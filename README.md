@@ -96,7 +96,7 @@ npm run dev
 
 ### macOS 桌面版（免安装 .dmg）
 
-到 [Releases](https://github.com/TheViviana/Deep-Notes/releases) 下载对应芯片的安装包：`Deep Notes-0.2.4-arm64.dmg`（Apple Silicon，M 系列）或 `Deep Notes-0.2.4-x64.dmg`（Intel）。打开后把「Deep Notes」拖进「应用程序」。安装包未做 Apple 开发者签名（仅 ad-hoc 签名），首次打开：
+到 [Releases](https://github.com/TheViviana/Deep-Notes/releases) 下载对应芯片的安装包：`Deep Notes-0.2.2-arm64.dmg`（Apple Silicon，M 系列）或 `Deep Notes-0.2.2-x64.dmg`（Intel）。打开后把「Deep Notes」拖进「应用程序」。安装包未做 Apple 开发者签名（仅 ad-hoc 签名），首次打开：
 
 - 若提示「无法验证开发者」：**右键 → 打开**，或在「系统设置 → 隐私与安全性」里点「仍要打开」；
 - 若提示「"Deep Notes"已损坏，无法打开」：这是 macOS 对未公证应用的拦截，打开「终端」执行下面命令后即可正常打开（本应用完全开源，可自行从源码构建验证）：
