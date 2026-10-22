@@ -4,6 +4,7 @@
 import {useEffect, useState} from 'react';
 import {posts as samplePosts, postContent} from '../data';
 import {CONFIG} from '../config';
+import {VAULT_MODE} from './fileStore';
 
 export const WORKS_KEY = CONFIG.storagePrefix + '-works-v1';
 const METRIC_KEYS = ['views', 'likes', 'comments', 'saves', 'follows', 'shares', 'impressions', 'ctr', 'duration'];
@@ -54,10 +55,13 @@ export function loadWorks() {
 
 // 文章列表状态：localStorage 持久化（写入防抖 300ms：大库 + 粘贴图后全量序列化很重，逐键同步写会卡顿）。
 // 防抖窗口内的待写数据登记进 pendingWorks，退出前同步补写；写失败 console 留痕不再静默。
+// 磁盘唯一事实源：已连接知识库（VAULT_MODE）时不落 localStorage——作品从盘上 frontmatter
+// 读回（serialize 落盘的 观看/点赞 等指标 importer 全部认得），启动由 main.jsx 读盘灌入。
 let pendingWorks = null;
 export function useWorks() {
-  const [works, setWorks] = useState(loadWorks);
+  const [works, setWorks] = useState(VAULT_MODE ? () => [] : loadWorks);
   useEffect(() => {
+    if (VAULT_MODE) return; // 内容只写知识库 .md，localStorage 不再保存（退出落盘由 flushSyncNow 负责）
     pendingWorks = works;
     const t = setTimeout(() => {
       pendingWorks = null;

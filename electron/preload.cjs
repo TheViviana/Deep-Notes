@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld('deepnotes', {
     prepareCopy: srcRoot => ipcRenderer.invoke('vault:prepare-copy', srcRoot),
     exportMany: (root, files) => ipcRenderer.invoke('vault:export', { root, files }),
     asset: (root, ref) => ipcRenderer.invoke('vault:asset', { root, ref }),
+    // 应用级附属数据（闪念箱 / 概念定义 / 段落闪卡）：库根下 .deepnotes/meta.json，随库走
+    metaRead: root => ipcRenderer.invoke('vault:meta-read', root),
+    metaWrite: (root, data) => ipcRenderer.invoke('vault:meta-write', {root, data}),
     // 文件恢复：列出写前快照 / 读取某份快照内容（恢复界面数据源）
     snapshots: root => ipcRenderer.invoke('vault:snapshots', { root }),
     snapshotRead: (root, file) => ipcRenderer.invoke('vault:snapshot-read', { root, file }),

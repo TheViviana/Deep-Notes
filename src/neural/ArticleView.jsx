@@ -7,6 +7,7 @@ import 'katex/dist/katex.min.css';
 import {CONTENT} from './graph';
 import {Icon} from './icons';
 import {useWikiComplete, WikiSuggest, resolveTarget, scrollToAnchor, headingMap} from './wiki';
+import {isVideoRef} from './images';
 import {useEditorEnhancers, usePlugins, useNetwork} from './plugins';
 import {isTranslatable, translateText} from './translate';
 import {serialize, exportFiles, safeName} from './fileStore';
@@ -64,7 +65,16 @@ const TRUSTED_HTML = new RegExp('^<(?:'
   + '|a href="#fn-\\d+">'
   + '|sup class="md-fn" id="fnref-\\d+">'
   + '|img class="md-embed" data-asset="[^"]*" alt="[^"]*"(?: style="width:\\d+px")?\\s*/?>'
+  // 视频（![[x.mp4]] 注入的受信标签）：整块或分开的起止标签都放行
+  + '|video class="md-embed-video" data-asset="[^"]*"(?: style="width:\\d+px")? controls preload="metadata" playsinline></video>'
+  + '|video class="md-embed-video" data-asset="[^"]*"(?: style="width:\\d+px")? controls preload="metadata" playsinline>'
+  + '|/video>'
   + ')\\s*$');
+
+// 视频播放器标签：src 由 resolveVaultVideo 回填（桌面版经 deepnotes-asset:// 流式读盘，
+// 网页版保持虚线占位）。属性顺序固定，TRUSTED_HTML 才能按形状放行。
+const videoTag = (ref, width = 0) =>
+  `<video class="md-embed-video" data-asset="${esc(ref)}"${width > 0 ? ` style="width:${width}px"` : ''} controls preload="metadata" playsinline></video>`;
 marked.use({renderer: {
   // 代码段在源码层也做了 < 转义（与正文同等防护），渲染前先还原再交给 hiCode 转义上色，
   // 否则 hiCode 的 esc() 会把 &lt; 二次转义成 &amp;lt; 显示成实体文字
@@ -75,11 +85,23 @@ marked.use({renderer: {
     const h = String(href || '').trim();
     const inner = this.parser.parseInline(tokens);
     const tt = title ? ` title="${esc(title)}"` : '';
+    // 无 scheme 的相对视频引用（Obsidian 表格里常见的 [文件名](x.mp4)）：渲染成可点击的视频
+    // 入口，点击由 useVaultImages 的全局委托打开灯箱播放——直接塞播放器会撑破表格单元格
+    if (isVideoRef(h) && !/^[a-z][a-z0-9+.-]*:/i.test(h)) {
+      return `<a class="md-video-link" data-asset="${esc(h)}"${tt}>${inner}</a>`;
+    }
     return /^(https?:|mailto:|\/|#|\.\/|\.\.\/)/i.test(h) ? `<a href="${esc(h)}"${tt}>${inner}</a>` : `<a${tt}>${inner}</a>`;
   },
   image({href, title, text}) {
     const h = String(href || '').trim();
-    if (!/^(https?:|data:image\/|\/|\.\/|\.\.\/)/i.test(h)) return esc(text || '');
+    // 视频引用（![](x.mp4)）直接渲染成播放器；网页版无本地访问权限时保持虚线占位
+    if (isVideoRef(h) && !/^[a-z][a-z0-9+.-]*:/i.test(h)) return videoTag(h);
+    // 除白名单协议外，无 URL scheme 的相对引用（裸文件名 / images/foo.jpg）也放行：
+    // Obsidian 等导出的笔记常用 ![](图.jpg) 短引用，图片实际在子目录里，
+    // 桌面版渲染后由 resolveVaultImg → vault:asset 回填（先按路径直找、找不到按文件名全库搜）；
+    // 带 scheme 又不在白名单里的（javascript: 等）一律丢弃，维持协议白名单防护。
+    const isSafe = /^(https?:|data:image\/|\/|\.\/|\.\.\/)/i.test(h) || !/^[a-z][a-z0-9+.-]*:/i.test(h);
+    if (!isSafe) return esc(text || '');
     const tt = title ? ` title="${esc(title)}"` : '';
     return `<img src="${esc(h)}" alt="${esc(text || '')}"${tt} loading="lazy"/>`;
   },
@@ -138,11 +160,12 @@ export function renderMarkdown(md) {
       // ==高亮==：内容先还原 / 转义再包 <mark>（必须在双链 / 嵌入图之前替换，转义才不会破坏它们注入的标签）
       .replace(/==([^=\n]+)==/g, (_, t) => '<mark>' + esc(unescLt(t)) + '</mark>')
       // ![[图片.png]] / ![[图.png|300]] 嵌入图（Obsidian 语法）→ <img data-asset>；
-      // 桌面版经 vault:asset 从知识库读文件回填，网页版显示占位。
+      // 视频（![[课程.mp4|480]]）→ <video>，统一由桌面版读盘回填（网页版显示占位）。
       .replace(/!\[\[([^\]\n]+)\]\]/g, (_, t) => {
         const [name, size] = t.split('|');
         const n = unescLt((name || '').trim());
         const w = parseInt(size, 10);
+        if (isVideoRef(n)) return videoTag(n, w);
         return `<img class="md-embed" data-asset="${esc(n)}" alt="${esc(n)}"${w > 0 ? ` style="width:${w}px"` : ''}/>`;
       })
       .replace(/\[\[([^\]\n]+)\]\]/g, (_, t) => {

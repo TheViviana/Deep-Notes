@@ -92,3 +92,37 @@ test('空输入返回空串而不是抛错', () => {
   assert.equal(renderMarkdown(''), '');
   assert.equal(renderMarkdown(null), '');
 });
+
+test('裸文件名相对引用的图片放行（Obsidian 短引用），由 vault:asset 回填', () => {
+  const html = renderMarkdown('![](abc123.jpg) ![说明](images/图.png)');
+  assert.ok(html.includes('<img src="abc123.jpg"'), '裸文件名应渲染成 img');
+  assert.ok(html.includes('src="images/图.png"'), '带目录的相对路径应渲染成 img');
+  assert.ok(html.includes('alt="说明"'), 'alt 文本保留');
+});
+
+test('危险协议与未知 scheme 的图片引用仍被丢弃', () => {
+  const html = renderMarkdown('![](javascript:alert(1)) ![x](data:text/html;base64,PHNjcmlwdD4=) ![y](vbscript:x)');
+  assert.ok(!html.includes('<img'), '任何非图片 src 不得渲染成 img');
+  assert.ok(!html.includes('javascript:'), 'javascript: 不得出现在输出里');
+  assert.ok(!html.includes('vbscript:'), 'vbscript: 不得出现在输出里');
+});
+
+test('本地视频：![](x.mp4) 渲染播放器，![[x.mp4|480]] 带宽度', () => {
+  const html = renderMarkdown('![](learn-to-build/01.mp4)\n\n![[02.mp4|480]]');
+  assert.ok(html.includes('class="md-embed-video"'), '视频渲染成 video 标签');
+  assert.ok(html.includes('data-asset="learn-to-build/01.mp4"'), '相对路径视频');
+  assert.ok(html.includes('data-asset="02.mp4"'), 'Obsidian 嵌入语法');
+  assert.ok(html.includes('style="width:480px"'), '|宽度 生效');
+  assert.ok(html.includes('controls'), '带播放控件');
+});
+
+test('本地视频：表格里的 [文件名](x.mp4) 变成灯箱入口，不内联撑破表格', () => {
+  const html = renderMarkdown('| [01.mp4](01.mp4) | 3h |');
+  assert.ok(html.includes('class="md-video-link"'), '渲染成视频链接');
+  assert.ok(html.includes('data-asset="01.mp4"'), '带引用地址');
+  assert.ok(!html.includes('<video'), '表格单元格里不内联播放器');
+  // 危险协议仍按普通文本处理，不会变成视频入口
+  const bad = renderMarkdown('[x](javascript:alert(1).mp4)');
+  assert.ok(!bad.includes('md-video-link'), '带 scheme 的引用不得进视频灯箱');
+  assert.ok(!bad.includes('javascript:'), 'javascript: 不进输出');
+});

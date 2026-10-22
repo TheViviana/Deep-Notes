@@ -1,9 +1,19 @@
-const { app, BrowserWindow, shell, ipcMain, net, dialog, safeStorage } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, net, dialog, safeStorage, protocol } = require('electron');
+const { Readable } = require('node:stream');
 const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
 const dns = require('dns');
 const crypto = require('crypto');
+
+// 视频等大体积资源走自定义流式协议 deepnotes-asset://：图片用 vault:asset 返回 base64 足够，
+// 但一部课程视频动辄数百 MB，base64 会把内存撑爆、也无法拖动进度条。协议直接把库内文件
+// 以流的方式交给 <video>（支持 Range，seek 正常）。scheme 必须在 app ready 之前声明为
+// 特权协议（standard + stream），否则渲染层拿不到可用的 URL 与响应体。
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'deepnotes-asset',
+  privileges: {standard: true, secure: true, supportFetchAPI: true, stream: true},
+}]);
 
 // —— 文件夹知识库（桌面版）：渲染层经 preload 暴露的 window.deepnotes.vault 调用 ——
 // 所有写操作都限制在所选根目录（root）内，路径越界一律拒绝。
@@ -490,7 +500,9 @@ ipcMain.handle('key-decrypt', (_e, b64) => {
 
 // 在原知识库旁新建「<原名> - Deep Notes」副本目录，原库内容不动；重名自动加序号。
 // 文件夹本身已带「 - Deep Notes」后缀（Deep Notes 专属库）：直接作为工作库使用，不再复制副本。
-// 副本同时带走图片等资源文件（.md 正文里的 ![[图片]] 引用才能正常显示）。
+// 副本只带走图片 / PDF 等小体积资源（.md 正文里的 ![[图片]] 引用才能正常显示）；
+// 视频不复制——课程视频动辄数百 MB，复制进 iCloud 副本等于整库体积翻倍，
+// 播放时由 findAsset 回退到原始库只读读取（见下方 sourceRootOf）。
 const ASSET_RE = /\.(png|jpe?g|gif|webp|svg|bmp|avif|pdf)$/i;
 async function copyAssets(src, dest) {
   let entries;
@@ -528,38 +540,156 @@ ipcMain.handle('vault:prepare-copy', async (_e, srcRoot) => {
 // 读知识库内的图片等资源 → base64（阅读视图渲染 ![[名字]] 与相对路径引用图）。
 // ref 可以是相对路径，也可以只是文件名（Obsidian 的 ![[文件名]] 不带路径）：找不到就按文件名全库搜。
 const MIME = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
-  '.webp': 'image/webp', '.svg': 'image/svg+xml', '.bmp': 'image/bmp', '.avif': 'image/avif'};
+  '.webp': 'image/webp', '.svg': 'image/svg+xml', '.bmp': 'image/bmp', '.avif': 'image/avif',
+  '.pdf': 'application/pdf',
+  '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
+  '.ogv': 'video/ogg', '.ogg': 'video/ogg'};
+
+// 「<原名> - Deep Notes」工作库对应的原始库：导入时用户亲自选过的那个目录。
+// 视频不随副本复制，播放时回退到这里只读读取；名字必须精确对应，符号链接目录一律不认。
+function sourceRootOf(root) {
+  const abs = path.resolve(String(root || ''));
+  const m = path.basename(abs).match(/^(.*) - Deep Notes$/);
+  if (!m || !m[1]) return null;
+  const sib = path.join(path.dirname(abs), m[1]);
+  try {
+    const st = fs.lstatSync(sib); // lstat：符号链接不跟随
+    if (st.isDirectory()) return sib;
+  } catch {}
+  return null;
+}
+
+// 按文件名全库搜（跳过隐藏文件与应用目录）。目录读不到（iCloud 未下载等）静默跳过。
+async function walkByName(dir, base) {
+  let entries;
+  try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return null; }
+  for (const e of entries) {
+    if (e.name.startsWith('.') || SKIP.has(e.name)) continue;
+    const f = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      const r = await walkByName(f, base);
+      if (r) return r;
+    } else if (e.isFile() && e.name.toLowerCase() === base) return f;
+  }
+  return null;
+}
+
+// 解析一个资源引用：先按相对路径直找，再按文件名全库搜；工作库找不到时回退原始库。
+// 命中结果缓存在 ASSET_CACHE（键 = 工作库 + 引用），命中后仍校验文件存在，失效自动重找。
+const ASSET_CACHE = new Map();
+async function findAsset(root, ref) {
+  const clean = String(ref || '').replace(/^\.?\//, '');
+  if (!root || !clean) return null;
+  const roots = [path.resolve(root)];
+  const src = sourceRootOf(root);
+  if (src && src !== roots[0]) roots.push(src);
+  const key = roots[0] + '|' + clean;
+  const cached = ASSET_CACHE.get(key);
+  if (cached) {
+    try { if (fs.statSync(cached).isFile()) return cached; } catch {}
+    ASSET_CACHE.delete(key);
+  }
+  const base = path.basename(clean).toLowerCase();
+  for (const r of roots) {
+    const direct = path.resolve(r, clean);
+    try {
+      if (fs.statSync(direct).isFile() && inside(r, direct)) { ASSET_CACHE.set(key, direct); return direct; }
+    } catch { /* 不存在或读不到，继续按文件名搜 */ }
+    const found = await walkByName(r, base);
+    if (found && inside(r, found)) { ASSET_CACHE.set(key, found); return found; }
+  }
+  return null;
+}
+
+// Range 解析：视频 seek 靠它。bytes=a-b / bytes=a- / bytes=-n；非法返回 'invalid'。
+function parseByteRange(header, size) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(header || '').trim());
+  if (!m || (m[1] === '' && m[2] === '')) return null;
+  let start, end;
+  if (m[1] === '') {
+    const n = Number(m[2]);
+    if (!Number.isFinite(n) || n <= 0) return 'invalid';
+    start = Math.max(0, size - n); end = size - 1;
+  } else {
+    start = Number(m[1]);
+    end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1);
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) return 'invalid';
+  return {start, end};
+}
+
+// deepnotes-asset://asset/?root=<库根>&ref=<引用>：只读、只认已授权根目录，
+// 工作库与原始库都经 inside 校验；返回流式响应（不把整个文件读进内存）。
+async function streamAsset(req) {
+  try {
+    const u = new URL(req.url);
+    const root = u.searchParams.get('root') || '';
+    const ref = u.searchParams.get('ref') || '';
+    // 协议请求没有 UI 上下文，不能弹授权框：只认已授权目录（导入时已登记）
+    if (!rootAuthorized(root)) return new Response('', {status: 403});
+    const full = await findAsset(root, ref);
+    if (!full) return new Response('', {status: 404});
+    // 只放行白名单里的资源类型：协议是渲染层可直达的入口，不能顺手把 .js / .json 之类
+    // 库内任意文件也当资源吐出去（虽然本应用自己不会请求，但注入面越小越好）
+    const mime = MIME[path.extname(full).toLowerCase()];
+    if (!mime) return new Response('', {status: 415});
+    const st = await fsp.stat(full);
+    const headers = {'Content-Type': mime, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache'};
+    const range = parseByteRange(req.headers.get('range'), st.size);
+    if (range === 'invalid') return new Response('', {status: 416, headers: {'Content-Range': `bytes */${st.size}`}});
+    if (range) {
+      return new Response(Readable.toWeb(fs.createReadStream(full, {start: range.start, end: range.end})), {
+        status: 206,
+        headers: {...headers, 'Content-Length': String(range.end - range.start + 1),
+          'Content-Range': `bytes ${range.start}-${range.end}/${st.size}`},
+      });
+    }
+    return new Response(Readable.toWeb(fs.createReadStream(full)), {
+      status: 200, headers: {...headers, 'Content-Length': String(st.size)},
+    });
+  } catch { return new Response('', {status: 500}); }
+}
+
 ipcMain.handle('vault:asset', async (_e, { root, ref }) => {
   try {
     if (!root || !ref) return { ok: false, error: '参数错误' };
     if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
-    const clean = String(ref).replace(/^\.?\//, '');
-    let full = path.resolve(root, clean);
-    if (!fs.existsSync(full) || !fs.statSync(full).isFile()) {
-      const base = path.basename(clean).toLowerCase();
-      let found = null;
-      async function walk(dir) {
-        if (found) return;
-        let entries;
-        try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
-        for (const e of entries) {
-          if (found) return;
-          if (e.name.startsWith('.') || SKIP.has(e.name)) continue;
-          const f = path.join(dir, e.name);
-          if (e.isDirectory()) await walk(f);
-          else if (e.isFile() && e.name.toLowerCase() === base) { found = f; return; }
-        }
-      }
-      await walk(root);
-      if (!found) return { ok: false, error: '找不到资源' };
-      full = found;
-    }
-    if (!inside(root, full)) return { ok: false, error: '路径越界' };
+    const full = await findAsset(root, ref);
+    if (!full) return { ok: false, error: '找不到资源' };
     const mime = MIME[path.extname(full).toLowerCase()];
     if (!mime) return { ok: false, error: '不支持的格式' };
+    // 视频走 deepnotes-asset:// 流式通道：base64 一部视频就几百 MB，绝不能走 IPC
+    if (mime.startsWith('video/')) return { ok: false, error: '视频请走流式通道' };
     const buf = await fsp.readFile(full);
     return { ok: true, mime, data: buf.toString('base64') };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
+
+// —— 应用级附属数据（闪念箱 / 概念定义 / 段落闪卡）：单个隐藏 JSON 文件随库走 ——
+// 这些是用户手写的内容，但结构不适合写成普通 .md 笔记（会被导入成方法笔记），
+// 所以放进库根下的 .deepnotes/meta.json：隐藏目录，readMd 与 Obsidian 都不会当成笔记读，
+// 换机 / 重装后随知识库文件夹一起带走（localStorage 仍保留一份作为本地兜底）。
+const META_REL = path.join('.deepnotes', 'meta.json');
+ipcMain.handle('vault:meta-read', async (_e, root) => {
+  try {
+    if (!root) return {ok: false, error: '参数错误'};
+    if (!(await ensureAuthorized(root))) return {ok: false, error: '知识库文件夹未授权 · Vault root not authorized'};
+    const full = path.join(path.resolve(root), META_REL);
+    if (!inside(root, full)) return {ok: false, error: '越界'};
+    try { return {ok: true, data: JSON.parse(await fsp.readFile(full, 'utf8'))}; }
+    catch { return {ok: true, data: null}; } // 还没有 meta 文件 / 内容损坏：视为空
+  } catch (err) { return {ok: false, error: String(err?.message || err)}; }
+});
+ipcMain.handle('vault:meta-write', async (_e, {root, data}) => {
+  try {
+    if (!root || !data) return {ok: false, error: '参数错误'};
+    if (!(await ensureAuthorized(root))) return {ok: false, error: '知识库文件夹未授权 · Vault root not authorized'};
+    const full = path.join(path.resolve(root), META_REL);
+    if (!inside(root, full)) return {ok: false, error: '越界'};
+    await fsp.mkdir(path.dirname(full), {recursive: true});
+    await atomicWrite(full, JSON.stringify(data)); // 原子写：不会留下半截 JSON
+    return {ok: true};
+  } catch (err) { return {ok: false, error: String(err?.message || err)}; }
 });
 
 // —— 知识库文件监听：外部改动（Obsidian / 网盘回捞等）2s 防抖后通知渲染层跑一次同步比对
@@ -740,6 +870,8 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // 视频流式协议：只读、限授权根目录（见 streamAsset）
+  protocol.handle('deepnotes-asset', streamAsset);
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -6,10 +6,11 @@
     <link rel="icon" type="image/svg+xml" href="/avatar.svg"/>
     <meta name="theme-color" content="#0d0e0e"/>
     <!-- 纵深防御：正文渲染已在源码层转义 HTML、链接走协议白名单，这里再兜底限制资源来源
-         （KaTeX 内联样式 / dataURL 粘贴图 / pdfjs blob worker / dev HMR ws 均已在白名单内）。
+         （KaTeX 内联样式 / dataURL 粘贴图 / pdfjs blob worker / dev HMR ws 均已在白名单内；
+         deepnotes-asset: 是桌面版播放知识库大视频的只读流式协议，由主进程校验授权根目录）。
          script 不放行 unsafe-inline（无内联脚本，防注入执行）；connect 不放行明文 http
          （仅本机回环例外：本地 Ollama），AI 域名与翻译接口走 https。 -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src 'self' data: blob: file:; font-src 'self' data:; connect-src 'self' https: http://127.0.0.1:* http://localhost:* http://[::1]:* ws://localhost:* ws://127.0.0.1:* ws://[::1]:*; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"/>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file: deepnotes-asset:; media-src 'self' data: blob: file: deepnotes-asset:; font-src 'self' data:; connect-src 'self' https: http://127.0.0.1:* http://localhost:* ws://localhost:* ws://127.0.0.1:*; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"/>
     <title>Deep Notes · 深度笔记</title>
   </head>
   <body>

@@ -75,20 +75,86 @@ export function resolveAllInDoc(doc) {
   return Promise.all([...doc.querySelectorAll('img[data-asset], img[src]')].map(resolveVaultImg));
 }
 
-// 全局挂一次：所有 .md-preview 里新出现的图片自动解析（双链弹窗、阅读模式、对照分屏、文章预览共用）
+// —— 视频：知识库里的视频不复制进副本（课程视频动辄数百 MB），由 deepnotes-asset://
+// 只读流式协议按 Range 读取（见 electron/main.cjs 的 streamAsset），<video> 可直接 seek ——
+const VIDEO_RE = /\.(mp4|m4v|webm|mov|ogv|ogg)$/i;
+export const isVideoRef = r => VIDEO_RE.test(String(r || '').trim().split(/[?#]/)[0]);
+
+export function vaultAssetUrl(ref) {
+  const v = window.deepnotes?.vault;
+  const root = readRoot();
+  if (!v || !root || !ref) return '';
+  return `deepnotes-asset://asset/?root=${encodeURIComponent(root)}&ref=${encodeURIComponent(ref)}`;
+}
+
+// 回填一个 <video data-asset>；网页版没有本地访问权限，保持虚线占位
+export function resolveVaultVideo(el) {
+  if (!el || el.dataset.vaultDone) return;
+  const url = vaultAssetUrl(el.dataset.asset);
+  if (!url) return;
+  el.dataset.vaultDone = '1';
+  el.src = url;
+}
+
+// 视频灯箱：正文 / 表格里的 [文件名](x.mp4) 点击后在浮层播放，不离开当前视图。
+// 用纯 DOM 而非 React：.md-preview 是 innerHTML 渲染的，文章页 / 各内页 / 对照分屏各自独立，
+// 全局挂一次点击委托即可覆盖所有入口（与 useVaultImages 同一个 hook）。
+export function openVideoLightbox(ref, label = '') {
+  document.getElementById('video-lightbox')?.remove();
+  const url = vaultAssetUrl(ref);
+  const box = document.createElement('div');
+  box.id = 'video-lightbox';
+  box.className = 'video-lightbox';
+  box.setAttribute('role', 'dialog');
+  box.setAttribute('aria-modal', 'true');
+  if (!url) {
+    box.innerHTML = '<div class="vl-body vl-empty"><p>本地视频只在桌面版可播放<br><small>Local video plays in the desktop app only</small></p>'
+      + '<button class="vl-close" aria-label="关闭 Close">×</button></div>';
+  } else {
+    box.innerHTML = '<div class="vl-body"><header class="vl-head"><span class="vl-name"></span>'
+      + '<button class="vl-close" aria-label="关闭 Close">×</button></header>'
+      + '<video controls autoplay playsinline></video></div>';
+    box.querySelector('.vl-name').textContent = label || String(ref).split('/').pop();
+    box.querySelector('video').src = url;
+  }
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  const close = () => {
+    try { box.querySelector('video')?.pause(); } catch {}
+    box.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  box.addEventListener('click', e => { if (e.target === box || e.target.closest('.vl-close')) close(); });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(box);
+  return true;
+}
+
+// 全局挂一次：所有 .md-preview 里新出现的图片 / 视频自动解析（双链弹窗、阅读模式、对照分屏共用），
+// 以及视频链接的点击委托（网页版也会挂，点开提示仅桌面版可播放）
 export function useVaultImages() {
   useEffect(() => {
-    if (!window.deepnotes?.vault) return undefined;
-    const scan = () => document.querySelectorAll('.md-preview img').forEach(resolveVaultImg);
+    const onClick = e => {
+      const a = e.target.closest?.('.md-video-link');
+      if (!a) return;
+      e.preventDefault();
+      openVideoLightbox(a.dataset.asset || '', a.textContent?.trim() || '');
+    };
+    document.addEventListener('click', onClick);
+    if (!window.deepnotes?.vault) return () => document.removeEventListener('click', onClick);
+    const scan = () => {
+      document.querySelectorAll('.md-preview img').forEach(resolveVaultImg);
+      document.querySelectorAll('.md-preview video[data-asset]').forEach(resolveVaultVideo);
+    };
     scan();
     const mo = new MutationObserver(muts => {
       for (const m of muts) for (const n of m.addedNodes) {
         if (n.nodeType !== 1) continue;
         if (n.matches?.('.md-preview') || n.querySelector?.('.md-preview')) scan();
         else if (n.matches?.('img')) resolveVaultImg(n);
+        else if (n.matches?.('video')) resolveVaultVideo(n);
       }
     });
     mo.observe(document.body, {childList: true, subtree: true});
-    return () => mo.disconnect();
+    return () => { mo.disconnect(); document.removeEventListener('click', onClick); };
   }, []);
 }

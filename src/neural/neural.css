@@ -761,6 +761,22 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .md-preview li > input[type=checkbox] { margin-right: 6px; accent-color: #d4b483; vertical-align: -1px; }
 /* 知识库引用图 ![[名字]]：桌面版经 vault:asset 回填；未解析/网页版显示 alt 占位 */
 .md-preview img.md-embed { display: block; max-width: 100%; border-radius: 10px; border: 1px dashed var(--line-2); background: rgba(255, 255, 255, .04); min-height: 40px; }
+/* 知识库视频 ![[课程.mp4]] / ![](课程.mp4)：桌面版经 deepnotes-asset:// 流式回填 src；
+   未解析（网页版）保持虚线空框，不撑破版面 */
+.md-preview video.md-embed-video { display: block; width: min(100%, 760px); max-width: 100%; margin: 12px 0; border-radius: 10px; border: 1px dashed var(--line-2); background: rgba(255, 255, 255, .04); min-height: 140px; }
+/* 正文 / 表格里的 [文件名](x.mp4)：点击打开灯箱播放 */
+.md-preview a.md-video-link { color: var(--cyan); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.md-preview a.md-video-link::before { content: "▶ "; font-size: .8em; opacity: .85; }
+/* 视频灯箱（纯 DOM 浮层，见 images.js openVideoLightbox） */
+.video-lightbox { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; padding: 4vmin; background: rgba(6, 8, 10, .78); backdrop-filter: blur(6px); }
+.video-lightbox .vl-body { position: relative; display: flex; flex-direction: column; gap: 10px; width: min(1100px, 92vw); padding: 12px 14px 14px; border-radius: 14px; border: 1px solid var(--line); background: #101214; box-shadow: 0 24px 80px rgba(0, 0, 0, .6); }
+.video-lightbox .vl-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text-2); font-size: 12.5px; }
+.video-lightbox .vl-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.video-lightbox video { width: 100%; max-height: 74vh; border-radius: 10px; background: #000; }
+.video-lightbox .vl-close { flex: none; width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--text-2); font-size: 16px; line-height: 1; cursor: pointer; }
+.video-lightbox .vl-close:hover { border-color: var(--line-2); color: var(--text); }
+.video-lightbox .vl-empty { max-width: 380px; text-align: center; color: var(--text-2); font-size: 13px; line-height: 1.7; }
+.video-lightbox .vl-empty small { color: var(--muted); }
 /* 编辑器镜像层：dataURL 图片直接渲染成缩略图（base64 不进正文排版） */
 .line-mirror img.lm-img { max-height: 150px; max-width: min(70%, 420px); border-radius: 8px; vertical-align: top; margin: 2px 0; border: 1px solid var(--line-2); }
 .md-wikilink { display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; margin: 0 1px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--mint, #ace0cf) 38%, transparent); background: color-mix(in srgb, var(--mint, #ace0cf) 10%, transparent); color: var(--text); font-size: .92em; line-height: 1.6; cursor: pointer; text-decoration: none; }

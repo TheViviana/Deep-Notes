@@ -8,6 +8,12 @@ const TARGET_KEY = CONFIG.storagePrefix + '-vault-target-v1';
 const api = () => window.deepnotes?.vault || null;
 export const capable = () => !!api();
 
+// 磁盘唯一事实源（Obsidian 化）：桌面版已连接知识库时，内容只以盘上 .md 为准——
+// 启动直接读盘构建界面（main.jsx），编辑经 diff 队列写盘（write-through），localStorage
+// 不再保存内容键（设置类键除外）。模块加载时判定一次：本会话内首次导入知识库仍走
+// 「双写」过渡（diff 写盘 + localStorage 各一份），下次启动起进入纯盘模式。
+export const VAULT_MODE = typeof window !== 'undefined' && capable() && !!getRoot();
+
 // 根目录路径存固定键（config.js 的 readVaultRoot 负责旧前缀键的迁移），换品牌不丢连接
 export function getRoot() {
   return readVaultRoot();
@@ -29,6 +35,14 @@ export function setErrorHandler(fn) { errorHandler = fn; }
 // 这样 800ms 防抖窗口内的编辑不会丢，也不会写进新库。
 export async function setRoot(dir) {
   await flush();
+  await writeMetaNow();  // 换库前把附属数据落到旧库（防抖窗口内的改动不能跟着根目录走丢）
+  metaGen++;             // 作废仍在途的旧库读盘结果
+  metaCache = null;      // 换库：附属数据要重新读新库的 meta，不能把旧库的写过去
+  metaBlocked = false;
+  pendingMeta = {};
+  metaLoading = null;
+  clearTimeout(metaTimer);
+  metaTimer = null;
   try {
     if (dir) localStorage.setItem(VAULT_ROOT_KEY, dir);
     else localStorage.removeItem(VAULT_ROOT_KEY);
@@ -37,6 +51,65 @@ export async function setRoot(dir) {
   clearTimeout(timer);
   timer = null;
   queue.clear();
+}
+
+// —— 应用级附属数据（闪念箱 / 概念定义 / 段落闪卡）：库根下 .deepnotes/meta.json，随库走 ——
+// 这些是用户手写的内容，但结构不适合写成普通 .md（会被导入成方法笔记），所以单独一个隐藏 JSON。
+// localStorage 仍是本机兜底（网页版 / 未连库只走它）；连库时读盘合并、改动防抖写回。
+let metaCache = null;     // null = 未读过；{} = 读过但没有
+let metaBlocked = false;  // 读盘失败：不写（避免用不完整的对象覆盖盘上其他键）
+let pendingMeta = {};     // 读盘完成前的改动先攒着
+let metaTimer = null;
+let metaLoading = null;
+let metaGen = 0;          // 换库代数：旧库的读盘结果回来时代数已变，直接作废
+export async function loadMeta() {
+  if (metaCache) return metaCache;
+  if (metaBlocked) return null;
+  const v = api();
+  const root = getRoot();
+  if (!v?.metaRead || !root) { metaCache = {}; return metaCache; }
+  if (!metaLoading) {
+    const gen = metaGen;
+    const p = (async () => {
+      try {
+        const r = await v.metaRead(root);
+        if (gen !== metaGen) return null; // 读盘期间换了库：这份结果不属于新库
+        if (r?.ok) metaCache = r.data && typeof r.data === 'object' && !Array.isArray(r.data) ? r.data : {};
+        else metaBlocked = true;
+      } catch { if (gen === metaGen) metaBlocked = true; }
+      return metaCache;
+    })();
+    metaLoading = p;
+    p.finally(() => { if (metaLoading === p) metaLoading = null; });
+  }
+  return metaLoading;
+}
+// 合并写：只覆盖本次给的键；metaCache 还没读出来时先读盘再合并，绝不整体覆盖
+export function patchMeta(patch) {
+  if (!capable() || !getRoot() || !patch) return;
+  if (metaCache) { Object.assign(metaCache, patch); scheduleMeta(); return; }
+  const gen = metaGen;
+  Object.assign(pendingMeta, patch);
+  loadMeta().then(base => {
+    if (!base || gen !== metaGen) return; // 读不到 / 已换库就不写，改动仍在本机 localStorage
+    metaCache = {...base, ...pendingMeta};
+    pendingMeta = {};
+    scheduleMeta();
+  }).catch(() => {});
+}
+function scheduleMeta() {
+  clearTimeout(metaTimer);
+  metaTimer = setTimeout(() => { writeMetaNow(); }, 400);
+}
+export async function writeMetaNow() {
+  clearTimeout(metaTimer);
+  metaTimer = null;
+  const v = api();
+  const root = getRoot();
+  if (!v?.metaWrite || !root || !metaCache) return false;
+  const snapshot = metaCache;
+  try { const r = await v.metaWrite(root, snapshot); return !!(r && r.ok); }
+  catch { return false; }
 }
 
 // 各模块内容落盘的默认目录；方法笔记直接使用自身 path（形如 05-方法库 methods/<子目录>/<文件名>.md）。

@@ -1,9 +1,9 @@
 import React, {useCallback, useDeferredValue, useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, seedReadings, seedArchives, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
-import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags} from './worksStore';
+import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags, WORKS_KEY} from './worksStore';
 import {pickVaultFolder, pickMdFiles, parseVault} from './importer';
-import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushAll, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, hasPendingWrites, retryPending, clearPendingWrites, pendingReady, snapshotBeforeAdopt, readFileSnapshot} from './fileStore';
+import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushAll, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, hasPendingWrites, retryPending, clearPendingWrites, pendingReady, snapshotBeforeAdopt, readFileSnapshot, loadMeta, patchMeta, VAULT_MODE} from './fileStore';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
@@ -17,17 +17,22 @@ import {isTranslatable, translateText} from './translate';
 import {aiRuntime, AiFab} from './ai';
 import {CommandPalette} from './CommandPalette';
 import {RecoveryModal} from './recovery';
-import {conceptExtras} from './conceptStore';
+import {conceptExtras, setConceptSink, hydrateConceptMeta} from './conceptStore';
 import {useVaultImages, resolveAllInDoc} from './images';
 import {resolveTarget, scrollToAnchor} from './wiki';
 import {T} from './theme';
 import './neural.css';
 
-// 选题、草稿与目标保存在当前浏览器（localStorage）。
+// 选题、草稿与目标保存在当前浏览器（localStorage）——仅网页版 / 未连接知识库时如此。
+// 磁盘唯一事实源（Obsidian 化）：桌面版已连接知识库时，内容只以盘上 .md 为准，localStorage
+// 不再保存内容（VAULT_CONTENT_KEYS，编辑直接走 diff 队列写盘），启动直接读盘构建界面。
 // 写入防抖：打字等高频变更若每次都同步序列化全量数据（大库 + 粘贴图后可达数 MB）会卡顿，
 // 静默 300ms 后再写，UI 保持跟手；窗口关闭前的最后一次输入由 flushPendingSaves 同步补写。
 // 防抖窗口内的待写数据登记进 pendingSaves，写失败不再静默（全局提示条 + console 留痕可排查）。
 const pendingSaves = new Map(); // key -> 防抖窗口内尚未落盘的值
+// 连接知识库时跳过 localStorage 的内容键。设置与纯界面状态键（写作目标、工作区名、闪念箱、
+// 手动空分类）不在列表里，照常存 localStorage。
+const VAULT_CONTENT_KEYS = new Set(['-ideas-v1', '-drafts-v1', '-notes-v1', '-readings-v1', '-archives-v1', '-concepts-v1', '-snapshot-v1'].map(k => CONFIG.storagePrefix + k));
 const STORAGE_ERR = '本地存储写入失败（空间可能已满），近期修改也许没有保存 · localStorage write failed';
 // —— localStorage 水位检测与写满降级（审计 H2）——
 // 配额各浏览器不同（一般 5–10MB），按多数下限保守估成 5MB 字符数。全量快照（-data-backup-v1）
@@ -70,15 +75,22 @@ function flushPendingSaves() {
   pendingSaves.clear();
 }
 function useSaved(key, fallback) {
-  const [v, set] = useState(() => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } });
+  // 磁盘唯一事实源：连接知识库时内容键跳过 localStorage（读写都不做），初始值用调用方给的
+  // 空数组/空值占位，真正的内容在启动时从知识库扫描灌入（adoptData）。网页版 / 未连库时不变。
+  const diskMode = VAULT_MODE && VAULT_CONTENT_KEYS.has(key);
+  const [v, set] = useState(() => {
+    if (diskMode) return fallback;
+    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+  });
   useEffect(() => {
+    if (diskMode) return;
     pendingSaves.set(key, v);
     const t = setTimeout(() => {
       pendingSaves.delete(key);
       trySaveLocal(key, JSON.stringify(v));
     }, 300);
     return () => clearTimeout(t);
-  }, [key, v]);
+  }, [key, v, diskMode]);
   return [v, set];
 }
 
@@ -175,6 +187,9 @@ function Modal({title, en, onClose, children, wide}) {
 // 全程本地渲染，不新增联网出口；Electron 桌面版与浏览器通用 ——
 function printArticle({title, meta, html}) {
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+  // 视频播放器在打印版里无法播放，只会留下黑框：换成可读的引用说明（文件名保留，方便事后查找）
+  const printable = String(html).replace(/<video[^>]*data-asset="([^"]*)"[^>]*>\s*<\/video>/g,
+    (_, ref) => `<p class="video-ref">▶ 本地视频（请回到 Deep Notes 播放）：${esc(ref)}</p>`);
   const iframe = document.createElement('iframe');
   // 审计 M4：禁脚本沙箱——iframe 只承担排版打印，不执行任何 JS；同源访问保留给
   // doc.write 与 resolveAllInDoc（引用图解析），allow-modals 放行 win.print() 调系统打印
@@ -196,7 +211,9 @@ function printArticle({title, meta, html}) {
     + '.md a{color:#4a6fa5;text-decoration:none;}.md img{max-width:100%;}'
     + '.md table{border-collapse:collapse;}.md th,.md td{border:1px solid #ccc;padding:4px 8px;}'
     + '.md hr{border:0;border-top:1px solid #ddd;margin:1.4em 0;}'
-    + '</style></head><body><h1>' + esc(title) + '</h1><p class="meta">' + esc(meta) + ' · Deep Notes</p><div class="md">' + html + '</div></body></html>');
+    + '.video-ref{color:#666;font-size:12px;background:#f5f5f2;border-left:3px solid #bbb;padding:6px 10px;margin:.8em 0;}'
+    + '.md a.md-video-link{color:#4a6fa5;}.md a.md-video-link::after{content:"（本地视频）";color:#999;font-size:11px;}'
+    + '</style></head><body><h1>' + esc(title) + '</h1><p class="meta">' + esc(meta) + ' · Deep Notes</p><div class="md">' + printable + '</div></body></html>');
   doc.close();
   const win = iframe.contentWindow;
   let done = false;
@@ -359,6 +376,15 @@ function Snapshot({goal, onGoal, ideas, drafts, works, notes, onIdea, onDraft, o
   </section>;
 }
 
+// 闪念箱合并（盘上 meta ∪ 本机）：按 id 去重，本机优先，按时间倒序——换机拿到全部、
+// 同机不丢最新一条；两条来源都在时不会互相覆盖出重复。
+const mergeInbox = (incoming, local) => {
+  const map = new Map();
+  for (const x of (Array.isArray(incoming) ? incoming : [])) if (x?.id) map.set(x.id, x);
+  for (const x of (Array.isArray(local) ? local : [])) if (x?.id) map.set(x.id, x);
+  return [...map.values()].sort((a, b) => (b.ts || 0) - (a.ts || 0));
+};
+
 function App() {
   // 知识库引用图（![[名字]] / 相对路径）：所有 .md-preview 里新出现的 <img> 自动经 vault:asset 回填
   useVaultImages();
@@ -366,18 +392,29 @@ function App() {
   const [goal, setGoal] = useSaved(CONFIG.storagePrefix + '-goal-v1', 8);
   const [works, setWorks] = useWorks();
   const [wsName, setWsName] = useSaved(CONFIG.storagePrefix + '-workspace-v1', CONFIG.workspace);
-  const [ideas, setIdeas] = useSaved(CONFIG.storagePrefix + '-ideas-v1', seedIdeas);
-  const [drafts, setDrafts] = useSaved(CONFIG.storagePrefix + '-drafts-v1', seedDrafts);
+  const [ideas, setIdeas] = useSaved(CONFIG.storagePrefix + '-ideas-v1', VAULT_MODE ? [] : seedIdeas);
+  const [drafts, setDrafts] = useSaved(CONFIG.storagePrefix + '-drafts-v1', VAULT_MODE ? [] : seedDrafts);
   const [snap, setSnap] = useSaved(CONFIG.storagePrefix + '-snapshot-v1', snapshot);
-  const [kbConcepts, setKbConcepts] = useSaved(CONFIG.storagePrefix + '-concepts-v1', CONCEPTS);
-  const [notes, setNotes] = useSaved(CONFIG.storagePrefix + '-notes-v1', SEED_NOTES);
+  const [kbConcepts, setKbConcepts] = useSaved(CONFIG.storagePrefix + '-concepts-v1', VAULT_MODE ? [] : CONCEPTS);
+  const [notes, setNotes] = useSaved(CONFIG.storagePrefix + '-notes-v1', VAULT_MODE ? [] : SEED_NOTES);
   const [inbox, setInbox] = useSaved(CONFIG.storagePrefix + '-inbox-v1', []); // 闪念箱：随手记的想法
-  const [readings, setReadings] = useSaved(CONFIG.storagePrefix + '-readings-v1', seedReadings);
-  const [archives, setArchives] = useSaved(CONFIG.storagePrefix + '-archives-v1', seedArchives);
+  const [readings, setReadings] = useSaved(CONFIG.storagePrefix + '-readings-v1', VAULT_MODE ? [] : seedReadings);
+  const [archives, setArchives] = useSaved(CONFIG.storagePrefix + '-archives-v1', VAULT_MODE ? [] : seedArchives);
   // 方法库二级分类：path 第二段推导 + 手动新建的空分类（-folders-v1 只存空分类，导入/切回示例时清空）
   const [folders, setFolders] = useSaved(CONFIG.storagePrefix + '-folders-v1', []);
   // 阅读区左侧分类：reading.folder 推导 + 手动新建的空分类（-read-folders-v1 只存空分类，导入/切回示例时清空）
   const [readFolders, setReadFolders] = useSaved(CONFIG.storagePrefix + '-read-folders-v1', []);
+  // 闪念箱随库走：启动灌入 meta 完成后的改动才回写（避免用初始空数组覆盖盘上的旧闪念）；
+  // 概念定义 / 段落闪卡的写入口在 conceptStore，这里注入同一个 meta 落盘器。
+  const inboxMetaReady = useRef(false);
+  useEffect(() => {
+    setConceptSink((key, val) => patchMeta({[key]: val}));
+    return () => setConceptSink(null);
+  }, []);
+  useEffect(() => {
+    if (!inboxMetaReady.current) return;
+    patchMeta({inbox});
+  }, [inbox]);
   // 方法库列表拖拽中的内容（分类间平移 + 拖到顶栏导航跨模块移动）
   const [dragging, setDragging] = useState(null);
   const [dragNav, setDragNav] = useState(null);
@@ -428,10 +465,15 @@ function App() {
   // —— 桌面版文件夹知识库：内容变化全局 diff 后写回 .md（导入时已在原库旁建好副本并 setRoot） ——
   // 不侵入各处 CRUD：每次渲染对比上一份快照，新增/修改 → 写文件，删除 → 移入 .trash。
   const prevContent = useRef(null);
+  // adoptThrough：adoptData 整体替换后的第一轮 diff 是否写透盘。导入 / 恢复快照 = true
+  // （新副本要靠这轮全量写盘生成内容）；启动读盘与外部改动同步 = false——内存刚被盘上
+  // 内容灌满，照常 diff 会把全库每个文件重写一遍（mtime 全变、iCloud 全量重传），必须抑制。
+  const adoptThrough = useRef(true);
   useEffect(() => {
     const cur = {works, notes, drafts, readings, archives, ideas};
     const prev = prevContent.current;
     prevContent.current = cur;
+    if (!adoptThrough.current) { adoptThrough.current = true; return; } // adopt 灌入不算编辑
     if (!capable() || !getRoot()) return;
     if (!prev) return; // 首次渲染只记录快照；导入流程会主动全量写入
     for (const kind of ['works', 'notes', 'drafts', 'readings', 'archives', 'ideas']) {
@@ -469,6 +511,9 @@ function App() {
   // —— 挂起写：上次会话有重试后仍失败的写盘操作 ——
   // 此刻自动同步会用旧文件夹内容覆盖浏览器里更新的数据，必须先由用户裁决（重试 / 放弃）
   const [pendingWrites, setPendingWrites] = useState(() => capable() && !!getRoot() && hasPendingWrites());
+  // 读盘门：磁盘唯一事实源模式下，首次读盘完成前界面不渲染——内存此时还是空占位，
+  // 提前露出会让用户在假空库里误编辑（把示例/空内容写进真知识库）。Intro 开屏动画正好覆盖常规加载耗时。
+  const [vaultReady, setVaultReady] = useState(!VAULT_MODE);
   // 挂起记录随写盘结果实时增减（本轮写盘失败留底 / 成功补写或重试成功清除），横幅状态跟随
   useEffect(() => {
     const sync = () => setPendingWrites(capable() && !!getRoot() && hasPendingWrites());
@@ -996,6 +1041,9 @@ function App() {
   // 完整存一份快照到 localStorage，⌘K「恢复数据快照」可随时回退；快照超限则跳过（尽力而为）。
   const FILES_KEY = CONFIG.storagePrefix + '-vault-files-v1'; // 上次同步/导入时的知识库文件数，用于拒绝不完整覆盖
   const saveSnapshot = () => {
+    // 磁盘唯一事实源：连接知识库时内容快照缺位——盘上 .md 本身就是事实源，另有主进程写前
+    // 快照与应用内 IndexedDB 快照网兜底，localStorage 全量快照（5MB 配额高危户）不再需要
+    if (VAULT_MODE) return;
     // 审计 H2：写满降级——空间紧张（storageStrapped）时暂停快照，正文键永远优先；
     // 快照只是回滚手段，空间缓解（重启后自动重试）即恢复
     if (storageStrapped) return;
@@ -1016,7 +1064,10 @@ function App() {
       showGlobalNotice('数据快照保存失败（本地存储空间不足），⌘K「恢复数据快照」将不可用 · Snapshot save failed');
     }
   };
-  function adoptData(data, msg, keepFolders = false) {
+  // through（写透开关）：这次整体替换后的第一轮 diff 要不要写盘。导入（新副本要生成全部
+  // 文件）与恢复快照（备份要写回知识库）= true；启动读盘 / 外部改动同步 = false——内容刚
+  // 从盘上灌进内存，写透会把全库重写一遍。见 diff-writer 里的 adoptThrough。
+  function adoptData(data, msg, keepFolders = false, through = true) {
     // 概念词表合并而非覆盖：应用内改过的关键词与手动增删的概念（current）优先，
     // 词表里没有的（导入 / 同步带回的新词）补进来。直接覆盖会抹掉用户在概念内页的全部修改。
     // 代价（v1 接受）：应用内删除 / 改名的概念会在下次同步时被词表带回。
@@ -1025,6 +1076,7 @@ function App() {
       for (const [n, t] of (Array.isArray(incoming) ? incoming : [])) if (!map.has(n)) map.set(n, t);
       return [...map];
     };
+    adoptThrough.current = through;
     saveSnapshot();
     setWorks(data.works); setNotes(data.notes ?? SEED_NOTES); setIdeas(data.ideas); setDrafts(data.drafts);
     setReadings(data.readings ?? seedReadings);
@@ -1089,6 +1141,13 @@ function App() {
       const copy = await prepareCopy(srcDir);
       if (copy?.ok) {
         await setRoot(copy.dir); copyDir = copy.dir; // await：先把旧队列写进旧库再换根目录
+        // 新库的附属数据（闪念箱 / 概念定义 / 段落闪卡）与本机合并，再把本机版本写过去
+        const meta = await loadMeta();
+        if (meta) {
+          hydrateConceptMeta(meta);
+          if (Array.isArray(meta.inbox) && meta.inbox.length) setInbox(cur => mergeInbox(meta.inbox, cur));
+        }
+        inboxMetaReady.current = true;
         window.deepnotes?.vault?.watch?.(copy.dir); // 新库开始监听外部改动
       }
       else { await setRoot(null); window.deepnotes?.vault?.watch?.(null); setToast('无法创建知识库副本，本次导入只保存在浏览器 · Copy failed'); }
@@ -1163,6 +1222,11 @@ function App() {
     if (!window.confirm('切回虚构示例数据？当前浏览器里的文章、选题和草稿会被清空替换。')) return;
     await setRoot(null); // 桌面版停用文件夹写回（先把待写队列写进旧库）；盘上已有的知识库副本原样保留
     window.deepnotes?.vault?.watch?.(null); // 停止文件监听
+    // 磁盘唯一事实源：断开库后下次启动回到 localStorage 模式——内容键里若还躺着连库期间的
+    // 陈旧副本，重启会「复活」旧内容顶掉示例。断库即清，重启后干净地从种子数据开始。
+    if (VAULT_MODE) {
+      for (const k of [...VAULT_CONTENT_KEYS, WORKS_KEY]) { try { localStorage.removeItem(k); } catch {} }
+    }
     adoptData({works: seedWorks(), notes: SEED_NOTES, ideas: seedIdeas, drafts: seedDrafts, readings: seedReadings, archives: seedArchives, snapshot, concepts: CONCEPTS}, '已切回示例数据 · Sample data restored');
   }
 
@@ -1232,28 +1296,30 @@ function App() {
   // 每次渲染对齐的最新内容引用：同步流程用它检测「读文件期间又有编辑」（闭包值仍是调用瞬间的）
   const contentRef = useRef(null);
   contentRef.current = {works, notes, drafts, readings, archives, ideas};
-  const syncFromVault = useCallback(async () => {
-    if (!capable() || !getRoot()) return;
+  // 返回值：读到并解析成功的 data（含 counts），任何失败 / 跳过返回 null。启动首读据此提示「没读到内容」。
+  const syncFromVault = useCallback(async (opts) => {
+    const startup = !!opts?.startup; // 启动首读：内存还是空占位，没有任何可被覆盖的编辑
+    if (!capable() || !getRoot()) return null;
     await pendingReady; // IndexedDB 兜底的挂起写先灌回内存，再判定是否跳过同步（防覆盖）
-    if (hasPendingWrites()) { setToast('上次有未写盘的修改，已跳过自动同步以防覆盖 · Sync skipped'); return; }
+    if (!startup && hasPendingWrites()) { setToast('上次有未写盘的修改，已跳过自动同步以防覆盖 · Sync skipped'); return null; }
     await flushAll(); // 先把防抖队列里的编辑写尽再读文件，快照才包含用户最新编辑
-    if (hasPendingWrites()) return; // 写尽后仍有留底（磁盘故障等）：跳过同步防覆盖，横幅已弹出
+    if (!startup && hasPendingWrites()) return null; // 写尽后仍有留底（磁盘故障等）：跳过同步防覆盖，横幅已弹出
     const seq = ++syncSeq.current;
     const root = getRoot();
     let files, unreadable = [];
     try {
       const res = readVaultFiles(root, await window.deepnotes.vault.read(root));
       files = res.files; unreadable = res.unreadable;
-    } catch { return; }
+    } catch { return null; }
     let data;
-    try { data = await parseVault(files, getTarget()); } catch { return; }
-    if (seq !== syncSeq.current || !data.counts.all) return;
+    try { data = await parseVault(files, getTarget()); } catch { return null; }
+    if (seq !== syncSeq.current || !data.counts.all) return null;
     const lastCount = Math.max(Number(localStorage.getItem(FILES_KEY) || 0),
       works.length + notes.length + drafts.length + readings.length + archives.length + ideas.length);
     // 读不到的文件计入应读数：iCloud 占位不算「库被清空」
     if (data.counts.all + unreadable.length < lastCount * 0.7) {
       setToast(`知识库文件数量骤减（${lastCount} → ${data.counts.all}），已跳过自动同步以防误删；若确属有意删除，请重新导入一次该知识库 · Sync skipped`);
-      return;
+      return null;
     }
     const fp = (x, keys) => JSON.stringify(keys.map(k => x?.[k] ?? null));
     const eq = (a, b, keys) => a.length === b.length && a.every((x, i) => fp(x, keys) === fp(b[i], keys));
@@ -1270,7 +1336,7 @@ function App() {
       (data.concepts || []).every(([n]) => kbConcepts.some(([k]) => k === n));
     if (same) {
       if (unreadable.length) setToast(`知识库有 ${unreadable.length} 个文件暂时读不到（可能未从 iCloud 下载），相关内容保持原样 · Sync partial`);
-      return; // 文件夹没有变化就不打扰
+      return data; // 文件夹没有变化就不打扰
     }
     // iCloud 占位：读不到的文件不参与删除判定，对应内容原样保留（与当前 state 同引用，
     // diff 写回时不会重写它们），其余内容照常对齐。选题不保留：数字 id 与读回内容必然撞车，
@@ -1293,7 +1359,7 @@ function App() {
     if (latest && (latest.works !== works || latest.notes !== notes || latest.drafts !== drafts ||
         latest.readings !== readings || latest.archives !== archives || latest.ideas !== ideas)) {
       setTimeout(() => syncRef.current(), 1500);
-      return;
+      return null;
     }
     // 外部文件版本即将覆盖内存：先把内存里有差异的条目存进应用内恢复快照（IndexedDB，每条 15 份），
     // 即使这次 adopt 是误覆盖，内容也能从「文件恢复」（About 或 ⌘K）里找回
@@ -1307,23 +1373,45 @@ function App() {
       archives: keepOld ? [...(data.archives ?? seedArchives), ...keepOld.archives] : (data.archives ?? seedArchives),
       snapshot: data.snapshot, concepts: data.concepts,
     };
-    adoptData(next, `已同步知识库变更：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${unreadable.length ? `（另有 ${unreadable.length} 个文件暂时读不到，已保持原样）` : ''}`, true);
+    adoptData(next, `已同步知识库变更：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${unreadable.length ? `（另有 ${unreadable.length} 个文件暂时读不到，已保持原样）` : ''}`, true, false); // 内容来自盘上：灌入不写透，避免全库重写
     try { localStorage.setItem(FILES_KEY, String(data.counts.all + unreadable.length)); } catch {} // 文件数基线含占位文件
+    return data;
   }, [works, notes, ideas, drafts, readings, archives, kbConcepts, snap]);
-  // 挂载跑一次自动同步，并开始监听外部改动：主进程 fs.watch 防抖 2s → 渲染层再防抖 3s → 同一比对
-  // （应用自己写盘引发的回环只是多一次便宜的全量比对，无变化时静默，无害）
+  // 挂载跑一次启动首读，并开始监听外部改动：主进程 fs.watch 防抖 2s → 渲染层再防抖 3s → 同一比对
+  // （应用自己写盘引发的回环只是多一次便宜的全量比对，无变化时静默，无害）。
+  // 磁盘唯一事实源：启动先把上次没写成的挂起编辑补写进知识库（落盘才算数），再读盘灌入界面；
+  // 首读完成才抬「读盘门」渲染主界面，门内内存还是空占位，不能让用户在假空库里编辑。
   const syncRef = useRef(syncFromVault);
   syncRef.current = syncFromVault;
   useEffect(() => {
-    syncRef.current();
+    let alive = true, t = null;
+    (async () => {
+      try {
+        if (VAULT_MODE) {
+          await pendingReady; // IndexedDB 兜底的挂起写先灌回内存
+          await retryPending().catch(() => {}); // 补写上次失败的编辑：写成的随首读自然带回界面
+          // 附属数据（闪念箱 / 概念定义 / 段落闪卡）先与盘上 meta 合并，再允许回写；
+          // 读不到就保持本机 localStorage 版本，且不写盘（防覆盖）。
+          const meta = await loadMeta();
+          if (meta) {
+            hydrateConceptMeta(meta);
+            if (Array.isArray(meta.inbox) && meta.inbox.length) setInbox(cur => mergeInbox(meta.inbox, cur));
+          }
+          inboxMetaReady.current = true;
+        }
+        const data = await syncRef.current({startup: true});
+        // 首读没拿到内容：知识库文件夹可能被移动 / 改名 / 整库未下载，明确告诉用户而不是默默展示空库
+        if (alive && VAULT_MODE && (!data || !data.counts.all)) {
+          showGlobalNotice('已连接知识库但没有读到内容：确认知识库文件夹还在原位且已从 iCloud 下载完整，或 ⌘K 重新导入一次 · Vault appears empty');
+        }
+      } catch {} // 同步内部已吞错；这里兜底保证门一定会抬
+      finally { if (alive) setVaultReady(true); }
+    })();
     const v = window.deepnotes?.vault;
     const root = getRoot();
     if (v?.watch && root) v.watch(root); // 换库 / 断开由 importVault 与切示例流程重设
-    if (v?.onChanged) {
-      let t = null;
-      v.onChanged(() => { clearTimeout(t); t = setTimeout(() => syncRef.current(), 3000); });
-      return () => clearTimeout(t);
-    }
+    if (v?.onChanged) v.onChanged(() => { clearTimeout(t); t = setTimeout(() => syncRef.current(), 3000); });
+    return () => { alive = false; clearTimeout(t); };
   }, []);
 
   const openInGraph = id => { const n = graph.index.get(id); const mod = {post: 'works', note: 'methods', idea: 'ideas', draft: 'drafts', reading: 'readings', archive: 'archives', concept: 'concepts'}[n?.kind]; if (mod) { setFocus({mod, sel: id}); setPage('home'); } };
@@ -1359,6 +1447,14 @@ function App() {
     {group: '数据 Data', icon: 'replay', zh: '切回示例数据', en: 'Reset to sample', run: resetToSample},
   ];
   const s = stats(graph);
+
+  // 读盘门：磁盘唯一事实源模式下首读完成前不渲染主界面（内存还是空占位）。样式与整体深空底色一致。
+  if (!vaultReady) return <div role="status" style={{minHeight: '100vh', display: 'flex', flexDirection: 'column',
+    alignItems: 'center', justifyContent: 'center', gap: 10, background: '#101014', color: '#9aa3b2',
+    fontFamily: '-apple-system, "PingFang SC", sans-serif', fontSize: 13, letterSpacing: '0.06em'}}>
+    <span>正在读取知识库</span>
+    <span style={{opacity: 0.55, fontSize: 12}}>Loading vault…</span>
+  </div>;
 
   return <div className={`neural page-${page}`}>
     <header className="topbar">
