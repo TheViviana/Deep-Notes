@@ -679,7 +679,20 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
       if (e.isComposing) return;
       if (e.key === 'Escape' && askSel) { setAskSel(null); return; }
       const el = area.current;
+      // 双链补全菜单打开时，导航 / 确认键优先交给补全（Enter 选中、方向键移动、Esc 关闭），不触发列表续行 / 缩进
+      if (el && wiki?.suggest?.list?.length && ['Enter', 'ArrowDown', 'ArrowUp', 'Escape', 'Tab'].includes(e.key)) {
+        wiki.onKeyDown(e);
+        return;
+      }
       if (el) {
+        // 键入越过：光标后恰是要打的闭合符时只移动光标（避免 don't 打成 don't'、手动闭合 [[…]] 多一个 ]）
+        const CLOSERS = {'*': 1, '`': 1, '$': 1, '"': 1, "'": 1, ')': 1, '}': 1, ']': 1};
+        if (CLOSERS[e.key] && !e.ctrlKey && !e.metaKey && !e.altKey
+          && el.selectionStart === el.selectionEnd && el.value[el.selectionStart] === e.key) {
+          e.preventDefault();
+          el.setSelectionRange(el.selectionStart + 1, el.selectionStart + 1);
+          return;
+        }
         // 语法自动闭合（成对包裹 / 游标落在中间）
         const pairs = {'*': '*', '`': '`', '$': '$', '"': '"', "'": "'", '(': ')', '{': '}'};
         if (pairs[e.key] && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -695,7 +708,10 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
           const sel = v.slice(s, end);
           e.preventDefault();
           if (s > 0 && v[s - 1] === '[') {
-            mutate(v.slice(0, s - 1) + `[[${sel}]]` + v.slice(end), s + 1 + sel.length);
+            // 连续第二个 [：把前一个 [ 包成 [[…]]；若光标后恰是上一次自动闭合留下的 ]，一并吃掉避免多一个 ]
+            const tail = v.slice(end);
+            const skip = !sel && tail.startsWith(']') ? 1 : 0;
+            mutate(v.slice(0, s - 1) + `[[${sel}]]` + tail.slice(skip), s + 1 + sel.length);
           } else {
             mutate(v.slice(0, s) + `[${sel}]` + v.slice(end), s + 1 + sel.length);
           }

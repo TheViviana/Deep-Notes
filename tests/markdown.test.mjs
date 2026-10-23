@@ -42,6 +42,14 @@ A-->B
   assert.ok(html.includes('第二行'), '脚注多行续行');
 });
 
+test('上标不误伤未定义脚注引用；定义列表不吞并紧邻的下一段', () => {
+  const html = renderMarkdown('见 [^a][^b] 两处。\n\n术语\n: 定义\n下一段紧跟着');
+  assert.ok(html.includes('[^a][^b]'), '未定义脚注引用应原样保留');
+  assert.ok(!/<sup>a\]\[/.test(html), '相邻脚注引用不应被包成上标');
+  assert.ok(/<\/dl>/.test(html), '定义列表存在');
+  assert.ok(/<\/dl>[\s\S]*下一段紧跟着/.test(html), '定义列表后的段落不被吞并');
+});
+
 test('[[双链]] 转成带 data-target 的内联链接，支持别名', () => {
   const html = renderMarkdown('看 [[目标页|别名字]]');
   assert.ok(html.includes('data-target="目标页"'));

@@ -191,12 +191,14 @@ export function renderMarkdown(md) {
     s = s.replace(/^>[ \t]*\[!(note|tip|warning|info|important|caution)\][ \t]*([^\n]*)$/gim,
       (_, t, title) => title.trim() ? `> **${title.trim()}**` : '>');
     return s
-      // 定义列表：术语行 + 一至多行「: 定义」→ <dl>（GFM 没有，Obsidian 支持）
+      // 定义列表：术语行 + 一至多行「: 定义」→ <dl>（GFM 没有，Obsidian 支持）。
+      // 结尾补空行：marked 把 <dl> 当作 HTML 块时一路吃到空行为止，不补会把紧邻的下一段正文吞进块里
       .replace(/(^|\n)([^\n:][^\n]*)\n((?:[ \t]*: [^\n]+\n?)+)/g, (_, pre, term, defs) =>
-        `${pre}<dl><dt>${esc(term.trim())}</dt>${defs.trim().split('\n').map(l => `<dd>${esc(l.replace(/^[ \t]*: /, ''))}</dd>`).join('')}</dl>\n`)
-      // 下标 ~x~ / 上标 ^x^：两侧非 ~ / ^、非空白，避免误伤 GFM 删除线 ~~…~~ 与公式占位符
+        `${pre}<dl><dt>${esc(term.trim())}</dt>${defs.trim().split('\n').map(l => `<dd>${esc(l.replace(/^[ \t]*: /, ''))}</dd>`).join('')}</dl>\n\n`)
+      // 下标 ~x~ / 上标 ^x^：两侧非 ~ / ^、非空白，避免误伤 GFM 删除线 ~~…~~ 与公式占位符；
+      // ^ 前是 [ 时跳过（未定义的脚注引用 [^x] 原样保留，相邻两个 [^a][^b] 不被误包成上标）
       .replace(/(?<!~)~([^~\n\s]+)~(?!~)/g, '<sub>$1</sub>')
-      .replace(/(?<!\^)\^([^\^\n\s]+)\^(?!\^)/g, '<sup>$1</sup>')
+      .replace(/(?<![\^\[])\^([^\^\n\s]+)\^(?!\^)/g, '<sup>$1</sup>')
       // ==高亮==：内容先还原 / 转义再包 <mark>（必须在双链 / 嵌入图之前替换，转义才不会破坏它们注入的标签）
       .replace(/==([^=\n]+)==/g, (_, t) => '<mark>' + esc(unescLt(t)) + '</mark>')
       // ![[图片.png]] / ![[图.png|300]] 嵌入图（Obsidian 语法）→ <img data-asset>；

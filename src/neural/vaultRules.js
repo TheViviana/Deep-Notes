@@ -122,8 +122,9 @@ export function headingAt(lines, i) {
   const atx = ln.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
   if (atx) return {level: atx[1].length, text: atx[2].trim()};
   const next = String(lines?.[i + 1] ?? '');
-  if (/^=+\s*$/.test(next)) return {level: 1, text: ln.trim()};
-  if (/^-+\s*$/.test(next)) return {level: 2, text: ln.trim()};
+  // Setext 要求本行非空：空行 + --- 是分隔线（hr），不是标题
+  if (ln.trim() && /^=+\s*$/.test(next)) return {level: 1, text: ln.trim()};
+  if (ln.trim() && /^-+\s*$/.test(next)) return {level: 2, text: ln.trim()};
   return null;
 }
 

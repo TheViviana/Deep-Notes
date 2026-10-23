@@ -131,7 +131,7 @@ async function atomicWrite(full, body) {
   try {
     const fh = await fsp.open(tmp, 'w');
     try {
-      await fh.writeFile(String(body ?? ''), 'utf8');
+      await fh.writeFile(typeof body === 'string' ? String(body ?? '') : (body ?? Buffer.alloc(0)), typeof body === 'string' ? 'utf8' : undefined);
       await fh.sync();
     } finally {
       await fh.close().catch(() => {});
@@ -349,7 +349,7 @@ ipcMain.handle('vault:saveAsset', async (_e, { root, name, mime, data }) => {
     try { if (await fsp.stat(full)) return { ok: true, rel }; } catch {} // 已存在：直接复用
     const bin = Buffer.from(String(data || ''), 'base64');
     await fsp.mkdir(path.dirname(full), { recursive: true });
-    await fsp.writeFile(full, bin);
+    await atomicWrite(full, bin); // 与正文写盘同口径：原子写入，崩溃不留半截图片
     return { ok: true, rel };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
@@ -996,7 +996,14 @@ function createWindow() {
     ownDir = path.dirname(indexPath); // will-navigate 白名单：只放行本应用 dist 目录内的 file:// 导航
     mainWindow.loadFile(indexPath);
   }
-  // 全局快捷键：⌘/Ctrl+Shift+D 唤出主窗口（即使在别的应用里也能一键回到笔记）
+}
+
+app.whenReady().then(() => {
+  // 视频流式协议：只读、限授权根目录（见 streamAsset）
+  protocol.handle('deepnotes-asset', streamAsset);
+  createWindow();
+  // 全局快捷键：⌘/Ctrl+Shift+D 唤出主窗口（即使在别的应用里也能一键回到笔记）。
+  // 只注册一次：createWindow 在 macOS「点击 Dock 图标重新激活」时会再次执行，重复注册同一加速键会失败
   try {
     globalShortcut.register('CommandOrControl+Shift+D', () => {
       if (!mainWindow) return;
@@ -1005,12 +1012,6 @@ function createWindow() {
       mainWindow.focus();
     });
   } catch (_) { /* 快捷键被其他应用占用时静默失败，不影响启动 */ }
-}
-
-app.whenReady().then(() => {
-  // 视频流式协议：只读、限授权根目录（见 streamAsset）
-  protocol.handle('deepnotes-asset', streamAsset);
-  createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
