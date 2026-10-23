@@ -263,8 +263,9 @@ export function resolveRels(kind, items) {
 // 数组值（keep 里的列表）展开成「- 项」多行而不是压成逗号串——否则往返一次后列表会变形；
 // 空数组直接丢弃。多行展开仍在同一 frontmatter 块内，后续键不受影响。
 // 含 `: # " ' , [ ]` 或首尾空白的标量用双引号包裹并转义内部引号；块标量按 `|` 回写。
-// 只在真正会被 YAML 误解析时才加引号：冒号后接空格、空格后接 #、引号/方括号/逗号/换行、首尾空白
-const NEED_QUOTE = /:\s|\s#|["'`,\[\]\n]|^\s|\s$|^$/;
+// 只在真正会被 YAML 误解析时才加引号：冒号后接空格、空格后接 #、引号/方括号/逗号/换行、首尾空白、
+// 以及以 # 开头（YAML 里 `key: #foo` 的值会被当成注释吞掉）
+const NEED_QUOTE = /:\s|\s#|["'`,\[\]\n]|^\s|\s$|^$|^#/;
 function quoteVal(v) {
   const s = String(v);
   if (!NEED_QUOTE.test(s)) return s;

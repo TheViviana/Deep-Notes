@@ -1561,6 +1561,7 @@ function App() {
     {group: '数据 Data', icon: 'replay', zh: '恢复数据快照', en: 'Restore data snapshot', run: restoreSnapshot},
     {group: '数据 Data', icon: 'replay', zh: '文件恢复', en: 'File recovery', run: () => setModal('recovery')},
     {group: '数据 Data', icon: 'replay', zh: '校验知识库完整性', en: 'Verify vault integrity', run: async () => {
+      await flushAll(); // 先把防抖队列里的编辑写尽，否则未落盘的修改会被误报为「内容不一致」
       const r = await verifyIntegrity({works, notes, drafts, ideas, readings, archives});
       if (!r?.ok) { setToast(`校验失败：${r?.error || '未知错误'} · Verification failed`); return; }
       const {changed = [], missing = [], extra = [], total = 0} = r;

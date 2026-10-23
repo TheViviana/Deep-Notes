@@ -225,6 +225,7 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
   const imgPick = useRef(null);                // 「插图」按钮的文件选择
   const [curLine, setCurLine] = useState(-1);
   const live = useRef(null); live.current = {menu};
+  const pendSel = useRef(null); // mutate 目标选区（同帧连续按键时校正用）
 
   const tw = on('typewriter');
   // —— 粘贴处理：图片压缩存盘；富文本（HTML）转 Markdown；其余按纯文本 ——
@@ -285,9 +286,11 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
   // —— 格式应用：都走「改值 → onChange → 下一帧恢复光标」——
   // 恢复光标前先校验正文仍是 mutate 写入的那份：回调一旦迟到（重渲染卡顿、后台标签页挂起 rAF），
   // 用户往往已经开始在别处打字，这时再拽光标会让后续输入全部落到过期位置（如「空行打字跑到上一行」）。
-  const mutate = (next, selStart, selEnd) => {
+  const mutate = (next, selStart, selEnd = selStart) => { // selEnd 缺省 = 折叠光标：单参调用点不会把 undefined 写进 pendSel / setSelectionRange
+    pendSel.current = [selStart, selEnd]; // 记录目标选区：同帧内连续按键时 React 尚未重渲染，DOM 选区是旧值
     onChange(next);
     requestAnimationFrame(() => {
+      pendSel.current = null;
       const el = area.current;
       if (!el || el.value !== next) return;
       el.focus({preventScroll: true}); el.setSelectionRange(selStart, selEnd);
@@ -679,6 +682,8 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
       if (e.isComposing) return;
       if (e.key === 'Escape' && askSel) { setAskSel(null); return; }
       const el = area.current;
+      // 同帧连续按键：上一次 mutate 的选区还没经 rAF 恢复，先校正成本次目标选区再处理
+      if (el && pendSel.current) { el.setSelectionRange(pendSel.current[0], pendSel.current[1]); pendSel.current = null; }
       // 双链补全菜单打开时，导航 / 确认键优先交给补全（Enter 选中、方向键移动、Esc 关闭），不触发列表续行 / 缩进
       if (el && wiki?.suggest?.list?.length && ['Enter', 'ArrowDown', 'ArrowUp', 'Escape', 'Tab'].includes(e.key)) {
         wiki.onKeyDown(e);

@@ -32,7 +32,11 @@ export function parse(text) {
         const blk = fm[key];
         if (raw.length === 0) { blk.text += '\n'; continue; }
         const indent = raw.match(/^\s*/)[0].length;
-        if (indent > blk.indent) { blk.text += raw.slice(blk.indent + 2) + '\n'; continue; }
+        if (indent > blk.indent) {
+          // 首行内容锁死基准缩进，后续行按基准剥（更深保留相对缩进，更浅按实际缩进剥，不吃字符）
+          if (blk.contentIndent == null) blk.contentIndent = indent;
+          blk.text += raw.slice(Math.min(blk.contentIndent, indent)) + '\n'; continue;
+        }
         else { // 续行结束
           blk.text = blk.text.replace(/\n+$/, '');
           key = null;

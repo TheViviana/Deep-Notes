@@ -206,3 +206,11 @@ test('frontmatter：块标量多行值、含冒号引号值、列表值 往返�
   const keep = r2.notes[0].keep || {};
   assert.equal(keep.quote, 'a: b, c', '含冒号引号值二次解析正确');
 });
+
+test('frontmatter：块标量任意合法缩进不吃字符（1 空格 / 4 空格 / 混合加深）', async () => {
+  const {parse: fmParse, pick: fmPick} = await import('../src/neural/vaultRules.js');
+  const p1 = fmParse('---\nnote: |\n x\n y\n---\n正文');
+  assert.equal(fmPick(p1.fm, ['note']), 'x\ny', '1 空格缩进内容不丢字符');
+  const p4 = fmParse('---\nnote: |\n    a\n      b\n---\n正文');
+  assert.equal(fmPick(p4.fm, ['note']), 'a\n  b', '4 空格基准 + 更深行保留相对缩进');
+});
