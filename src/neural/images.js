@@ -27,6 +27,26 @@ export function fileToDataUrl(file) {
   }));
 }
 
+// 把 dataURL 落盘到知识库 attachments/ 下按内容 sha1 去重，返回 Obsidian 嵌入引用 `![[attachments/xx/sha1.ext]]`。
+// 同一内容反复粘贴只存一份，避免长文 .md 被 base64 撑爆。未连库或 IPC 失败时返回 null，
+// 调用方据此回退为原 dataURL 写法（网页版 / 未连库保持原有自包含行为）。
+const MIME_EXT = {'image/png':'png','image/jpeg':'jpg','image/jpg':'jpg','image/gif':'gif','image/webp':'webp','image/bmp':'bmp','image/svg+xml':'svg'};
+export async function saveAssetDataUrl(dataUrl) {
+  const v = window.deepnotes?.vault;
+  const root = readRoot();
+  if (!v || !root || !v.saveAsset) return null;
+  const m = String(dataUrl).match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+  if (!m) return null;
+  const ext = MIME_EXT[m[1]] || 'bin';
+  const bin = Uint8Array.from(atob(m[2]), c => c.charCodeAt(0));
+  const digest = await crypto.subtle.digest('SHA-1', bin);
+  const sha1 = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+  const name = `${sha1}.${ext}`;
+  const r = await v.saveAsset(root, name, m[1], m[2]);
+  if (!r?.ok) return null;
+  return `![[${r.rel || 'attachments/' + sha1.slice(0, 2) + '/' + name}]]`;
+}
+
 // 库根目录经 config.js 的 readVaultRoot 读取（固定键 + 旧键迁移），与 fileStore 保持同一份
 const readRoot = readVaultRoot;
 

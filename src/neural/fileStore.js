@@ -3,6 +3,7 @@
 // 每次导入都在原库旁新建「<原名> - Deep Notes」副本，原知识库文件夹内容不动。
 import {CONFIG, VAULT_ROOT_KEY, readVaultRoot} from '../config';
 import {clearAssetCache} from './images';
+import {isBlock} from './vaultRules';
 
 const TARGET_KEY = CONFIG.storagePrefix + '-vault-target-v1';
 const api = () => window.deepnotes?.vault || null;
@@ -261,10 +262,21 @@ export function resolveRels(kind, items) {
 // 序列化成带 frontmatter 的 Markdown；deepnotes-id 保证再次导入时不产生重复节点。
 // 数组值（keep 里的列表）展开成「- 项」多行而不是压成逗号串——否则往返一次后列表会变形；
 // 空数组直接丢弃。多行展开仍在同一 frontmatter 块内，后续键不受影响。
+// 含 `: # " ' , [ ]` 或首尾空白的标量用双引号包裹并转义内部引号；块标量按 `|` 回写。
+// 只在真正会被 YAML 误解析时才加引号：冒号后接空格、空格后接 #、引号/方括号/逗号/换行、首尾空白
+const NEED_QUOTE = /:\s|\s#|["'`,\[\]\n]|^\s|\s$|^$/;
+function quoteVal(v) {
+  const s = String(v);
+  if (!NEED_QUOTE.test(s)) return s;
+  return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+}
 function frontmatter(pairs) {
-  const render = ([k, v]) => Array.isArray(v)
-    ? (v.length ? `${k}:\n` + v.map(x => `  - ${String(x).replace(/\n/g, ' ')}`).join('\n') : null)
-    : `${k}: ${String(v).replace(/\n/g, ' ')}`;
+  const render = ([k, v]) => {
+    if (isBlock(v)) return `${k}: |\n` + v.text.split('\n').map(l => '  ' + l).join('\n');
+    if (Array.isArray(v))
+      return v.length ? `${k}:\n` + v.map(x => `  - ${quoteVal(String(x).replace(/\n/g, ' '))}`).join('\n') : null;
+    return `${k}: ${quoteVal(String(v).replace(/\n/g, ' '))}`;
+  };
   return '---\n' + pairs.filter(([, v]) => v != null && v !== '').map(render).filter(Boolean).join('\n') + '\n---\n';
 }
 export function serialize(kind, item) {
@@ -295,6 +307,28 @@ export function serialize(kind, item) {
       ['status', item.status || null], ['note', item.note || null]]);
   }
   return fm + '\n' + (item.body || '');
+}
+
+// —— 知识库完整性校验：把内存中全部内容按当前路径序列化，算 sha256，交主进程与盘上比对。
+// 只报告 changed / missing / extra，绝不自动覆盖盘上文件；疑似损坏由用户去「文件恢复」手动处理。
+export async function verifyIntegrity(state) {
+  const root = getRoot();
+  const v = api();
+  if (!root || !v || !v.verifyIntegrity) return {ok: false, error: '未连接知识库'};
+  const expected = {};
+  const enc = new TextEncoder();
+  for (const kind of ['works', 'notes', 'drafts', 'ideas', 'readings', 'archives']) {
+    const items = state?.[kind] || [];
+    const relMap = resolveRels(kind, items);
+    for (const it of items) {
+      const rel = relMap.get(it.id);
+      if (!rel) continue;
+      const md = serialize(kind, it);
+      const digest = await crypto.subtle.digest('SHA-256', enc.encode(md));
+      expected[rel] = {sha: [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')};
+    }
+  }
+  return v.verifyIntegrity(root, expected);
 }
 
 // —— 防抖写盘队列：多次编辑合并，800ms 静默后统一 flush ——

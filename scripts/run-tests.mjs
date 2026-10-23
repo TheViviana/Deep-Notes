@@ -22,7 +22,15 @@ try {
     define: {'import.meta.env': '{"BASE_URL":"/"}', '__TEST_ROOT__': JSON.stringify(ROOT)},
     // KaTeX 的 CSS 引用 woff/woff2/ttf 字体，node 测试环境不需要真字体
     loader: {'.css': 'empty', '.woff': 'empty', '.woff2': 'empty', '.ttf': 'empty'},
-    logLevel: 'warning'
+    logLevel: 'warning',
+    plugins: [{
+      name: 'stub-worker',
+      setup(build) {
+        // Vite 的 ?worker&inline 导入在 node 测试里不需要真 worker，桩成空默认导出
+        build.onResolve({filter: /\?worker(&inline)?$/}, args => ({path: args.path, namespace: 'stub-worker'}));
+        build.onLoad({filter: /.*/, namespace: 'stub-worker'}, () => ({contents: 'export default class {}', loader: 'js'}));
+      }
+    }]
   });
   const r = spawnSync(process.execPath, [out], {stdio: 'inherit'});
   process.exitCode = r.status ?? 1;

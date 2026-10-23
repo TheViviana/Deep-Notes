@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld('deepnotes', {
     prepareCopy: srcRoot => ipcRenderer.invoke('vault:prepare-copy', srcRoot),
     exportMany: (root, files) => ipcRenderer.invoke('vault:export', { root, files }),
     asset: (root, ref) => ipcRenderer.invoke('vault:asset', { root, ref }),
+    // 图片按内容 sha1 落盘到 attachments/，同图复用同一路径
+    saveAsset: (root, name, mime, data) => ipcRenderer.invoke('vault:saveAsset', { root, name, mime, data }),
+    verifyIntegrity: (root, expected) => ipcRenderer.invoke('vault:verifyIntegrity', { root, expected }),
     // 应用级附属数据（闪念箱 / 概念定义 / 段落闪卡）：库根下 .deepnotes/meta.json，随库走
     metaRead: root => ipcRenderer.invoke('vault:meta-read', root),
     metaWrite: (root, data) => ipcRenderer.invoke('vault:meta-write', {root, data}),

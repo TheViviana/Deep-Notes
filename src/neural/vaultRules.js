@@ -7,25 +7,69 @@
 
 // —— frontmatter：key: value（半角或全角冒号）、key: [a, b]、以及「- 项」列表 ——
 // 全角冒号同样识别：中文笔记手写「主题：xxx」很常见，此前静默丢失（已丢的从备份恢复）。
-export const unquote = s => String(s).trim().replace(/^['"]|['"]$/g, '');
+export const unquote = s => {
+  const t = String(s).trim();
+  if (t.length >= 2) {
+    const q = t[0];
+    if ((q === '"' || q === "'") && t[t.length - 1] === q) {
+      try { return q === '"' ? JSON.parse(t) : t.slice(1, -1).replace(/''/g, "'"); } catch { /* 引号不配对，按原样返回 */ }
+    }
+  }
+  return t;
+};
+// 块标量需要在 serialize 时按 `|` 形式回写，用一个标记包装以便 render 识别
+export const isBlock = v => v && typeof v === 'object' && v.__block === true;
 export function parse(text) {
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   const fm = {};
   if (m) {
+    const lines = m[1].split(/\r?\n/);
     let key = null;
-    for (const raw of m[1].split(/\r?\n/)) {
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i];
+      // —— 块标量续行：上一行以 `key: |` 或 `key: >` 结尾，吞掉后续所有缩进更深的行 ——
+      if (key && fm[key] && isBlock(fm[key])) {
+        const blk = fm[key];
+        if (raw.length === 0) { blk.text += '\n'; continue; }
+        const indent = raw.match(/^\s*/)[0].length;
+        if (indent > blk.indent) { blk.text += raw.slice(blk.indent + 2) + '\n'; continue; }
+        else { // 续行结束
+          blk.text = blk.text.replace(/\n+$/, '');
+          key = null;
+        }
+      }
       const item = raw.match(/^\s*-\s+(.*)$/);
       if (item && key) { if (!Array.isArray(fm[key])) fm[key] = []; fm[key].push(unquote(item[1])); continue; }
+      const block = raw.match(/^(\s*)([^:#：\s][^:：]*?)[:：]\s*([|>])([+-]?)\s*$/);
+      if (block) {
+        key = block[2].trim();
+        const indent = block[1].length;
+        fm[key] = {__block: true, style: block[3], chomp: block[4] || '', text: '', indent};
+        continue;
+      }
       const kv = raw.match(/^([^:#：][^:：]*)[:：]\s*(.*)$/);
       if (!kv) continue;
       key = kv[1].trim();
       const v = kv[2].trim();
-      fm[key] = v.startsWith('[') && v.endsWith(']') ? v.slice(1, -1).split(',').map(unquote).filter(Boolean) : v === '' ? '' : unquote(v);
+      fm[key] = v.startsWith('[') && v.endsWith(']')
+        ? v.slice(1, -1).split(',').map(unquote).filter(Boolean)
+        : v === '' ? '' : unquote(v);
     }
+    // 末尾收尾：最后一行若是块标量，去掉尾部多余换行
+    if (key && isBlock(fm[key])) fm[key].text = fm[key].text.replace(/\n+$/, '');
   }
   return {fm, body: m ? text.slice(m[0].length) : text};
 }
-export const pick = (fm, keys) => { for (const k of keys) for (const f of Object.keys(fm)) if (f.toLowerCase() === k.toLowerCase() && fm[f] !== '') return fm[f]; return undefined; };
+export const pick = (fm, keys) => {
+  for (const k of keys) for (const f of Object.keys(fm)) {
+    if (f.toLowerCase() !== k.toLowerCase()) continue;
+    const v = fm[f];
+    if (v === '' || v == null) continue;
+    if (isBlock(v)) return v.text;
+    return v;
+  }
+  return undefined;
+};
 
 // —— keep：frontmatter 里软件未消费的自定义键原样保留，写回时展开（如「主题: 类时纠缠」不再丢） ——
 // 各模块解析时实际消费的键（含中英别名，大小写不敏感）；没列进来的键进 keep 随内容走。
@@ -69,6 +113,18 @@ export function tagsOf(fm, body) {
   const list = Array.isArray(raw) ? raw : raw ? String(raw).split(/[,，\s]+/) : [];
   for (const m of body.matchAll(/(?:^|\s)#([^\s#，。,.!?！？、；;:：()（）[\]]+)/g)) list.push(m[1]);
   return [...new Set(list.map(t => t.replace(/^#/, '').trim()).filter(t => t && !/^\d+$/.test(t)))];
+}
+
+// —— 标题识别：同时支持 ATX（# 标题）与 Setext（标题文字\n=== / ---），大纲 / 镜像层 / 导入三处统一调用 ——
+// 返回 {level, text}；不是标题行返回 null。Setext 需看 i+1 行。
+export function headingAt(lines, i) {
+  const ln = String(lines?.[i] ?? '');
+  const atx = ln.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
+  if (atx) return {level: atx[1].length, text: atx[2].trim()};
+  const next = String(lines?.[i + 1] ?? '');
+  if (/^=+\s*$/.test(next)) return {level: 1, text: ln.trim()};
+  if (/^-+\s*$/.test(next)) return {level: 2, text: ln.trim()};
+  return null;
 }
 
 // —— 分类：作品 / 草稿 / 选题 / 方法笔记 / 阅读 / 档案，按文件夹名识别；未识别的全部作为方法笔记 ——

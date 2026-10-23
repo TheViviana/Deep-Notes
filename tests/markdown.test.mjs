@@ -9,6 +9,39 @@ test('标题与加粗正常渲染', () => {
   assert.ok(html.includes('<strong>'));
 });
 
+test('Setext 标题（=== / ---）、定义列表、上下标、Mermaid、脚注多行续行', () => {
+  const md = `Setext H1
+=========
+
+Setext H2
+---------
+
+术语
+: 定义一
+: 定义二
+
+H~2~O 与 E=mc^2^
+
+[^1]: 脚注第一行
+  第二行
+
+正文 [^1]。
+
+\`\`\`mermaid
+graph LR
+A-->B
+\`\`\`
+`;
+  const html = renderMarkdown(md);
+  assert.ok(/<h1[^>]*>Setext H1<\/h1>/.test(html), 'Setext H1');
+  assert.ok(/<h2[^>]*>Setext H2<\/h2>/.test(html), 'Setext H2');
+  assert.ok(/<dl><dt>术语<\/dt><dd>定义一<\/dd><dd>定义二<\/dd><\/dl>/.test(html), '定义列表');
+  assert.ok(/H<sub>2<\/sub>O/.test(html), '下标');
+  assert.ok(/mc<sup>2<\/sup>/.test(html), '上标');
+  assert.ok(/class="mermaid"/.test(html), 'Mermaid 块');
+  assert.ok(html.includes('第二行'), '脚注多行续行');
+});
+
 test('[[双链]] 转成带 data-target 的内联链接，支持别名', () => {
   const html = renderMarkdown('看 [[目标页|别名字]]');
   assert.ok(html.includes('data-target="目标页"'));

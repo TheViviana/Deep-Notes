@@ -504,6 +504,8 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .editor-area.hybrid textarea::selection, .editor-main.hybrid textarea::selection { color: transparent; background: transparent; }
 .editor-area.hybrid textarea::placeholder, .editor-main.hybrid textarea::placeholder { color: var(--muted); white-space: pre-wrap; }
 .line-mirror { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; z-index: 0; color: var(--text); cursor: text; user-select: none; -webkit-user-select: none; }
+.lm-degraded { position: sticky; top: 0; z-index: 2; padding: 4px 12px; font-size: 12px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+.lm-degraded em { margin-left: 8px; opacity: .6; font-style: normal; }
 .lm-inner { position: relative; }
 .lm-line { min-height: 1.9em; }
 .lm-z { display: inline; } /* 隐藏符号处的零宽锚点 */

@@ -1,5 +1,16 @@
 // —— 本地文档导入：PDF / HTML / Markdown / TXT → 阅读条目（全部离线解析，不经网络） ——
 // PDF 走 pdfParse.js（按需加载）；HTML 朴素转 Markdown；纯文本直接收录。
+import {headingAt} from './vaultRules';
+
+// 从纯文本中提取第一个标题（ATX 或 Setext），找不到返回 null
+function firstHeading(text) {
+  const lines = String(text || '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const h = headingAt(lines, i);
+    if (h) return h.text;
+  }
+  return null;
+}
 
 // HTML → Markdown：标题 / 段落 / 列表 / 引用 / 代码块 / 链接图片 / 加粗斜体 / 表格行
 export function htmlToMarkdown(html) {
@@ -40,8 +51,7 @@ export async function parseDocFile(file) {
   if (ext === 'pdf') {
     const {pdfToMarkdown} = await import('./pdfParse.js');
     const body = await pdfToMarkdown(file);
-    const m = body.match(/^# (.+)$/m);
-    return {title: m ? m[1].trim() : name, body, source: file.name};
+    return {title: firstHeading(body) || name, body, source: file.name};
   }
   if (ext === 'html' || ext === 'htm') {
     const html = await file.text();
@@ -52,8 +62,7 @@ export async function parseDocFile(file) {
   }
   if (ext === 'md' || ext === 'markdown' || ext === 'txt') {
     const text = await file.text();
-    const m = text.match(/^#\s+(.+)$/m);
-    return {title: m ? m[1].trim() : name, body: text, source: file.name};
+    return {title: firstHeading(text) || name, body: text, source: file.name};
   }
   throw new Error(`暂不支持 .${ext || '?'} 格式 · Unsupported file type`);
 }

@@ -5,7 +5,9 @@ import {Icon} from './icons';
 import {CONFIG} from '../config';
 import {aiChat, setAiDraft, openAiPanel} from './ai';
 import {saveParaCard} from './conceptStore';
-import {fileToDataUrl} from './images';
+import {fileToDataUrl, saveAssetDataUrl} from './images';
+import {headingAt} from './vaultRules';
+import {htmlToMarkdown} from './docImport';
 
 // —— 内置插件清单 ——
 export const BUILTIN_PLUGINS = [
@@ -178,15 +180,16 @@ const INK_COLORS = [
   ['#5b8fc9', '蓝'], ['#9a7fd1', '紫'], ['#d48fb0', '粉'], ['default', '默认'],
 ];
 
-// —— 大纲解析（toc 插件）：提取 H1–H4 标题行，跳过代码块 ——
+// —— 大纲解析（toc 插件）：提取 H1–H4 标题行（ATX + Setext），跳过代码块 ——
 export function parseOutline(text) {
   const out = [];
   let fence = false;
-  String(text || '').split('\n').forEach((line, i) => {
+  const lines = String(text || '').split('\n');
+  lines.forEach((line, i) => {
     if (/^\s*(```|~~~)/.test(line)) fence = !fence;
     if (!fence) {
-      const m = line.match(/^(#{1,4})\s+(.+?)\s*#*$/);
-      if (m) out.push({level: m[1].length, text: m[2].trim(), line: i});
+      const h = headingAt(lines, i);
+      if (h && h.level <= 4) out.push({level: h.level, text: h.text, line: i});
     }
   });
   return out;
@@ -224,20 +227,35 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
   const live = useRef(null); live.current = {menu};
 
   const tw = on('typewriter');
-  // —— 粘贴图片：压缩成 dataURL 存进正文（离线自包含，网页版也能显示） ——
+  // —— 粘贴处理：图片压缩存盘；富文本（HTML）转 Markdown；其余按纯文本 ——
   useEffect(() => {
     const el = area.current;
     if (!el) return undefined;
     const onPaste = e => {
-      const f = [...(e.clipboardData?.files || [])].find(x => x.type.startsWith('image/'));
-      if (!f) return;
-      e.preventDefault();
-      fileToDataUrl(f).then(url => {
+      const cd = e.clipboardData;
+      if (!cd) return;
+      // 1) 图片优先
+      const f = [...(cd.files || [])].find(x => x.type.startsWith('image/'));
+      if (f) {
+        e.preventDefault();
+        fileToDataUrl(f).then(async url => {
+          const cur = area.current; if (!cur) return;
+          const s = cur.selectionStart, end = cur.selectionEnd, v = cur.value;
+          const md = (await saveAssetDataUrl(url)) || `![图片](${url})`;
+          mutate(v.slice(0, s) + md + v.slice(end), s + md.length, s + md.length);
+        }).catch(() => {});
+        return;
+      }
+      // 2) 富文本 HTML → Markdown（Word / 网页复制的格式不再丢失）
+      const html = cd.getData('text/html');
+      if (html) {
+        e.preventDefault();
         const cur = area.current; if (!cur) return;
         const s = cur.selectionStart, end = cur.selectionEnd, v = cur.value;
-        const md = `![图片](${url})`;
+        const md = htmlToMarkdown(html);
         mutate(v.slice(0, s) + md + v.slice(end), s + md.length, s + md.length);
-      }).catch(() => {});
+      }
+      // 3) 无图片无 HTML：让浏览器按默认纯文本粘贴
     };
     el.addEventListener('paste', onPaste);
     return () => el.removeEventListener('paste', onPaste);
@@ -604,7 +622,7 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
           // accept 只是选择器提示，拦不住把任意文件拖进来：与粘贴路径同等校验 MIME，并限制体积
           if (!f.type.startsWith('image/')) { window.showGlobalNotice?.('只能插入图片文件 · Images only'); return; }
           if (f.size > 20 * 1024 * 1024) { window.showGlobalNotice?.('图片过大，上限 20MB · Image too large (max 20MB)'); return; }
-          fileToDataUrl(f).then(url => insert(`![图片](${url})`)).catch(() => {});
+          fileToDataUrl(f).then(async url => insert((await saveAssetDataUrl(url)) || `![图片](${url})`)).catch(() => {});
         }}/>
       <span className="tpl-wrap">
         <button className="fmt-btn" disabled={!aiReady} aria-expanded={!!aiSug}
@@ -647,9 +665,87 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
     </span>}
   </div>;
 
+  // —— 列表前缀识别 ——
+  const LIST_RE = /^(\s*)(?:(-|\*|\d+\.|>|[+])(\s+\[[ xX]\])?\s)(.*)$/;
+
+  const insertAt = (el, s, selEnd, replacement, cursor, selEnd2) => {
+    const v = el.value;
+    const nv = v.slice(0, s) + replacement + v.slice(selEnd);
+    mutate(nv, cursor, selEnd2 ?? cursor);
+  };
+
   return {
     onKeyDown: e => {
-      if (e.key === 'Escape' && !e.isComposing && askSel) { setAskSel(null); return; }
+      if (e.isComposing) return;
+      if (e.key === 'Escape' && askSel) { setAskSel(null); return; }
+      const el = area.current;
+      if (el) {
+        // 语法自动闭合（成对包裹 / 游标落在中间）
+        const pairs = {'*': '*', '`': '`', '$': '$', '"': '"', "'": "'", '(': ')', '{': '}'};
+        if (pairs[e.key] && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          const s = el.selectionStart, end = el.selectionEnd;
+          e.preventDefault();
+          const sel = el.value.slice(s, end);
+          insertAt(el, s, end, e.key + sel + pairs[e.key], s + 1 + sel.length);
+          return;
+        }
+        // 方括号：单个 [ → [] ；前一个字符已是 [ 则补全为 [[ ]] 双链
+        if (e.key === '[' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          const s = el.selectionStart, end = el.selectionEnd, v = el.value;
+          const sel = v.slice(s, end);
+          e.preventDefault();
+          if (s > 0 && v[s - 1] === '[') {
+            mutate(v.slice(0, s - 1) + `[[${sel}]]` + v.slice(end), s + 1 + sel.length);
+          } else {
+            mutate(v.slice(0, s) + `[${sel}]` + v.slice(end), s + 1 + sel.length);
+          }
+          return;
+        }
+        // Enter 列表续行 / 空行退出列表
+        if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+          const s = el.selectionStart, v = el.value;
+          const lineStart = v.lastIndexOf('\n', s - 1) + 1;
+          const line = v.slice(lineStart, s);
+          const m = line.match(LIST_RE);
+          if (m) {
+            const [, indent, marker, chk, rest] = m;
+            // 空列表行 → 删除前缀退出列表
+            if (!rest.trim()) {
+              e.preventDefault();
+              const newV = v.slice(0, lineStart) + v.slice(s);
+              mutate(newV, lineStart, lineStart);
+              return;
+            }
+            // 续行：保留缩进与标记，数字列表自增，复选框重置为空
+            e.preventDefault();
+            let nextMarker = marker;
+            if (/\d+\./.test(marker)) {
+              nextMarker = `${parseInt(marker, 10) + 1}.`;
+            }
+            const chkPart = chk ? ' [ ]' : '';
+            const prefix = `${indent}${nextMarker}${chkPart} `;
+            insertAt(el, s, s, `\n${prefix}`, s + 1 + prefix.length);
+            return;
+          }
+        }
+        // Tab / Shift+Tab：缩进 / 反缩进选区
+        if (e.key === 'Tab') {
+          const s = el.selectionStart, end = el.selectionEnd, v = el.value;
+          e.preventDefault();
+          const lineStart = v.lastIndexOf('\n', s - 1) + 1;
+          const lineEnd = v.indexOf('\n', end);
+          const le = lineEnd < 0 ? v.length : lineEnd;
+          const block = v.slice(lineStart, le);
+          if (e.shiftKey) {
+            const nb = block.split('\n').map(l => l.replace(/^(\s*)[ \t]/, '$1')).join('\n');
+            mutate(v.slice(0, lineStart) + nb + v.slice(le), s, end);
+          } else {
+            const nb = block.split('\n').map(l => '\t' + l).join('\n');
+            mutate(v.slice(0, lineStart) + nb + v.slice(le), lineStart + 1, le + 1);
+          }
+          return;
+        }
+      }
       if (on('slash') && slashKey(e)) return;
       wiki?.onKeyDown(e);
     },

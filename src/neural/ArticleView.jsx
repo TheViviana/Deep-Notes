@@ -1,6 +1,8 @@
 // 文章全文视图：在页面下方展开，Markdown 编辑 / 预览，[[ 双链自动汇入图谱。
 import React, {useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {marked} from 'marked';
+import mermaid from 'mermaid';
+mermaid.initialize({startOnLoad: false, securityLevel: 'loose', theme: 'dark'});
 import katex from 'katex';
 import 'katex/contrib/mhchem'; // 化学式 \ce{...}（注册进同一个 katex 实例）
 import 'katex/dist/katex.min.css';
@@ -8,11 +10,12 @@ import {CONTENT} from './graph';
 import {Icon} from './icons';
 import {useWikiComplete, WikiSuggest, resolveTarget, scrollToAnchor, headingMap} from './wiki';
 import {isVideoRef} from './images';
+import {headingAt} from './vaultRules';
 import {useEditorEnhancers, usePlugins, useNetwork} from './plugins';
 import {isTranslatable, translateText} from './translate';
 import {serialize, exportFiles, safeName} from './fileStore';
 
-marked.setOptions({gfm: true, breaks: true});
+marked.setOptions({gfm: true, breaks: false});
 
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 // 源码层已把 < 转成 &lt;；注入点还原后走完整 esc()，避免二次转义把实体显示成文字（esc(原文本) 幂等）
@@ -62,8 +65,8 @@ export function hiCode(code, lang = '', base = null) {
 // 原生 HTML 只剩 proc() 注入的受信标签；白名单只放行这几种固定形状，任何漏网的原生 HTML
 // （含未闭合围栏误开代码段等边界场景）一律转义成纯文本显示，绝不再原样输出。
 const TRUSTED_HTML = new RegExp('^<(?:'
-  + '/(?:mark|u|sup|a|span)>'
-  + '|mark>|u>'
+  + '/(?:mark|u|sub|sup|dl|dt|dd|a|span)>'
+  + '|mark>|u>|sub>|sup>|dl>|dt>|dd>'
   + '|span style="color:#[0-9a-fA-F]{3,8}">'
   // 审计 C1：属性值收紧为不含引号 / 尖括号 / 换行（此前 [^"]* 允许换行与 <，理论可夹带标签）
   + '|a class="md-wikilink" data-target="[^"<>\\n]*">'
@@ -84,10 +87,19 @@ const videoTag = (ref, width = 0) =>
 marked.use({renderer: {
   // 代码段在源码层也做了 < 转义（与正文同等防护），渲染前先还原再交给 hiCode 转义上色，
   // 否则 hiCode 的 esc() 会把 &lt; 二次转义成 &amp;lt; 显示成实体文字
-  code({text, lang}) { return `<pre><code class="hl">${hiCode(unescLt(text), lang)}</code></pre>`; },
+  code({text, lang}) {
+    if (lang === 'mermaid') return `<pre class="mermaid">${esc(unescLt(text))}</pre>`;
+    return `<pre><code class="hl">${hiCode(unescLt(text), lang)}</code></pre>`;
+  },
   codespan({text}) { return `<code class="hl">${hiCode(unescLt(text), '')}</code>`; },
   // 占位符只应出现在文本节点：出现在 html token 里说明被拼进了属性，整段按纯文本显示（不还原成 DOM）
-  html({text}) { const t = String(text ?? ''); if (PH_RE.test(t)) return esc(t); return TRUSTED_HTML.test(t) ? t : esc(t); },
+  html({text}) {
+    const t = String(text ?? '');
+    if (PH_RE.test(t)) return esc(t);
+    // 定义列表 <dl> 由 proc() 注入（用户源码里的 < 已在更外层转义，到不了这里），整块放行
+    if (/^<dl[\s>]/.test(t) && /<\/dl>\s*$/.test(t)) return t;
+    return TRUSTED_HTML.test(t) ? t : esc(t);
+  },
   link({href, title, tokens}) {
     const h = String(href || '').trim();
     const inner = this.parser.parseInline(tokens);
@@ -154,12 +166,23 @@ export function renderMarkdown(md) {
       // 只吃 <字母/!/? 开头的标签形结构，「a < b」这类普通文本不受影响；
       // 之后注入的受信 HTML（双链 <a>、嵌入图 <img> 等）在转义之后拼接，不会被转回去
       .replace(/<(?=[a-zA-Z!/?])/g, '&lt;');
-    // 脚注定义（行首 [^key]: 文本）；引用（未定义的 [^x] 原样保留）
-    s = s.replace(/^[ \t]*\[\^([^\]\s]+)\]:[ \t]*(.+?)[ \t]*$/gm, (_, k, v) => {
-      if (!footnotes.has(k)) fnOrder.push(k);
-      footnotes.set(k, v);
-      return '';
-    });
+    // 脚注定义（行首 [^key]: 文本）；支持多行续行（后续以 ≥2 空格或制表符开头的行，含中间空行）。
+    // 引用（未定义的 [^x] 原样保留）。
+    const lines = s.split('\n');
+    const out = [];
+    let cur = null; // {key, text:[]}
+    const flush = () => { if (cur) { if (!footnotes.has(cur.key)) fnOrder.push(cur.key); footnotes.set(cur.key, cur.text.join('\n').trim()); cur = null; } };
+    for (const ln of lines) {
+      const m = ln.match(/^[ \t]*\[\^([^\]\s]+)\]:[ \t]*(.*)$/);
+      if (m) { flush(); cur = {key: m[1], text: [m[2]]}; continue; }
+      if (cur) {
+        if (ln.length === 0 || /^[ \t]{2,}|\t/.test(ln)) { cur.text.push(ln.replace(/^[ \t]{2,}/, '').replace(/^\t/, '')); continue; }
+        else { flush(); }
+      }
+      out.push(ln);
+    }
+    flush();
+    s = out.join('\n');
     if (footnotes.size) s = s.replace(/\[\^([^\]\s]+)\]/g, (m, k) => {
       const i = fnOrder.indexOf(k);
       return i < 0 ? m : `<sup class="md-fn" id="fnref-${i + 1}"><a href="#fn-${i + 1}">${i + 1}</a></sup>`;
@@ -168,6 +191,12 @@ export function renderMarkdown(md) {
     s = s.replace(/^>[ \t]*\[!(note|tip|warning|info|important|caution)\][ \t]*([^\n]*)$/gim,
       (_, t, title) => title.trim() ? `> **${title.trim()}**` : '>');
     return s
+      // 定义列表：术语行 + 一至多行「: 定义」→ <dl>（GFM 没有，Obsidian 支持）
+      .replace(/(^|\n)([^\n:][^\n]*)\n((?:[ \t]*: [^\n]+\n?)+)/g, (_, pre, term, defs) =>
+        `${pre}<dl><dt>${esc(term.trim())}</dt>${defs.trim().split('\n').map(l => `<dd>${esc(l.replace(/^[ \t]*: /, ''))}</dd>`).join('')}</dl>\n`)
+      // 下标 ~x~ / 上标 ^x^：两侧非 ~ / ^、非空白，避免误伤 GFM 删除线 ~~…~~ 与公式占位符
+      .replace(/(?<!~)~([^~\n\s]+)~(?!~)/g, '<sub>$1</sub>')
+      .replace(/(?<!\^)\^([^\^\n\s]+)\^(?!\^)/g, '<sup>$1</sup>')
       // ==高亮==：内容先还原 / 转义再包 <mark>（必须在双链 / 嵌入图之前替换，转义才不会破坏它们注入的标签）
       .replace(/==([^=\n]+)==/g, (_, t) => '<mark>' + esc(unescLt(t)) + '</mark>')
       // ![[图片.png]] / ![[图.png|300]] 嵌入图（Obsidian 语法）→ <img data-asset>；
@@ -424,6 +453,7 @@ function wordRangeAt(src, o) {
 export function LineMirror({text, taRef}) {
   const [sel, setSel] = useState([0, 0, 0]); // [光标行号, 选区起点, 选区终点]
   const [focused, setFocused] = useState(false);
+  const degraded = String(text || '').length > MIRROR_DEGRADE_LIMIT;
   const box = useRef(null), inner = useRef(null), caretEl = useRef(null), selBox = useRef(null);
   const api = useRef({}).current; // 挂到 textarea 上的镜像层 API（打字机 / 大纲目录经它取镜像坐标）
   const html = useMemo(() => buildMirrorHtml(text, sel), [text, sel]);
@@ -588,6 +618,7 @@ export function LineMirror({text, taRef}) {
   }, [taRef]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <div className="line-mirror" ref={box}>
+    {degraded && <div className="lm-degraded" role="status">已切换为纯文本模式（正文过长，保证打字流畅）<em>Plain text mode for long text</em></div>}
     <div className="lm-inner" ref={inner} aria-hidden="true" dangerouslySetInnerHTML={{__html: html}}/>
     <div className="lm-selbox" ref={selBox} aria-hidden="true"/>
     <i className="lm-caret" ref={caretEl} aria-hidden="true"/>
@@ -600,6 +631,9 @@ export function LineMirror({text, taRef}) {
 const LM_CACHE = new Map();
 const LM_CACHE_MAX = 12000;
 
+// 镜像层降级阈值：超过此长度的正文切换为纯文本映射模式（无语法高亮，保证打字流畅）
+const MIRROR_DEGRADE_LIMIT = 200_000;
+
 // 镜像层 HTML 生成（纯函数，便于离线校验）：sel = [光标行号, 选区起点, 选区终点]。
 // 隐藏符号不进 DOM（零宽锚点占位，宽度真正回收）；每个可见段带 data-s、行盒带 data-s0/data-ln 供坐标映射。
 export function buildMirrorHtml(text, sel) {
@@ -607,7 +641,7 @@ export function buildMirrorHtml(text, sel) {
   const src = String(text || '');
   // 超长正文降级：跳过词法（每次按键全篇正则扫描是数千行长文掉帧的根因），
   // 只保留逐行映射锚点——光标 / 点击 / 拖选仍可用，只是没有语法高亮与行内富显示
-  if (src.length > 200_000) {
+  if (src.length > MIRROR_DEGRADE_LIMIT) {
     let off = 0;
     return src.split('\n').map(l => {
       const lineStart = off; off += l.length + 1;
@@ -714,8 +748,8 @@ export function buildMirrorHtml(text, sel) {
     } else {
       inner = renderLine(l, lineStart, st.fence, st.lang, lineOn);
     }
-    const hm = !fenceM && !pf ? /^(#{1,6})\s/.exec(l) : null; // 标题分级：镜像层自由排版（不再迁就 textarea 等宽）
-    const cls = ['lm-line', hm ? `lm-h lm-h${hm[1].length}` : '',
+    const h = !fenceM && !pf ? headingAt(lines, i) : null; // 标题分级（ATX + Setext），与大纲 / 导入同口径
+    const cls = ['lm-line', h ? `lm-h lm-h${h.level}` : '',
       !fenceM && !pf && /^\s*>/.test(l) ? 'lm-quote' : '',
       (fenceM || pf) ? 'lm-code' : ''].filter(Boolean).join(' ');
     out.push(`<div class="${cls}" data-s0="${lineStart}" data-ln="${l.length}">${inner || '&#8203;'}</div>`);
@@ -738,6 +772,14 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
   const wiki = useWikiComplete({titles, areaRef: area, onChange: body => onChange({body}), headings: heads});
   const fx = useEditorEnhancers({area, value: work.body, onChange: body => onChange({body}), wiki, title: work.title, titles});
   const html = useMemo(() => mode === 'preview' ? renderMarkdown(work.body) : '', [mode, work.body]);
+  // Mermaid 图表：预览渲染后把 .mermaid 块画成 SVG（语法错误回退为普通代码块，不崩）
+  useEffect(() => {
+    if (mode !== 'preview' || !previewRef.current) return;
+    const nodes = previewRef.current.querySelectorAll('pre.mermaid:not([data-processed])');
+    if (!nodes.length) return;
+    nodes.forEach(n => n.setAttribute('data-processed', '1'));
+    mermaid.run({nodes}).catch(() => { /* 语法错误：保留原文代码块 */ });
+  }, [mode, html]);
   // 双链解析：与 graph.js 的 byName 规则一致（标题 / 路径文件名，忽略大小写）。
   const byName = useMemo(() => {
     const m = new Map();

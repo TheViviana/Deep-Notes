@@ -191,3 +191,18 @@ test('稳定 id：作品 / 草稿 / 阅读 / 档案同样按 deepnotes-id 往返
   assert.equal(r.readings[0].id, 'reading-3');
   assert.equal(r.archives[0].id, 'archive-7');
 });
+
+// —— P1-1 回归：frontmatter 块标量 / 含冒号引号值往返不丢 ——
+test('frontmatter：块标量多行值、含冒号引号值、列表值 往返不丢', async () => {
+  const src = `---\nid: x\nnote: |\n  第一行\n  第二行\nquote: "a: b, c"\ntags:\n  - 一\n  - 二\n---\n正文`;
+  const r = await parseVault([f('vault/05-方法库 methods/笔记/x.md', src)]);
+  const note = r.notes[0];
+  const md = serialize('notes', note);
+  const r2 = await parseVault([f('vault/05-方法库 methods/笔记/x.md', md)]);
+  // 块标量文本保留（进 keep 后 round-trip）
+  assert.ok(md.includes('note: |'), '块标量按 | 回写');
+  assert.ok(md.includes('第一行') && md.includes('第二行'), '两行正文都还在');
+  // 含冒号引号值二次解析不错位
+  const keep = r2.notes[0].keep || {};
+  assert.equal(keep.quote, 'a: b, c', '含冒号引号值二次解析正确');
+});

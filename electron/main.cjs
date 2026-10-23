@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, ipcMain, net, dialog, safeStorage, protocol } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, net, dialog, safeStorage, protocol, globalShortcut } = require('electron');
 const { Readable } = require('node:stream');
 const path = require('path');
 const fs = require('fs');
@@ -331,6 +331,26 @@ ipcMain.handle('vault:write', async (_e, { root, rel, body }) => {
     await atomicWrite(full, body);
     await pruneUp(root, path.dirname(full)).catch(() => {}); // 顺手清掉因改名/移动而空掉的目录
     return { ok: true };
+  } catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
+
+// 图片落盘：按内容 sha1 存到 <root>/attachments/<前 2 位>/<sha1>.<ext>，同一张图只存一份。
+// 粘贴 / 插图时计算内容哈希，命中已存在文件则直接返回同一路径，避免长文 .md 被 base64 反复撑大。
+ipcMain.handle('vault:saveAsset', async (_e, { root, name, mime, data }) => {
+  try {
+    if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
+    const sha = String(name || '').replace(/\.[^.]+$/, '');
+    if (!/^[0-9a-f]{40}$/i.test(sha)) return { ok: false, error: '非法资源名' };
+    const sub = sha.slice(0, 2);
+    const rel = path.posix.join('attachments', sub, name);
+    const full = path.join(root, rel);
+    if (!inside(root, full)) return { ok: false, error: '路径越界' };
+    if (isSymlink(full)) return { ok: false, error: '目标是符号链接，拒绝写入' };
+    try { if (await fsp.stat(full)) return { ok: true, rel }; } catch {} // 已存在：直接复用
+    const bin = Buffer.from(String(data || ''), 'base64');
+    await fsp.mkdir(path.dirname(full), { recursive: true });
+    await fsp.writeFile(full, bin);
+    return { ok: true, rel };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
@@ -754,6 +774,42 @@ ipcMain.handle('vault:meta-write', async (_e, {root, data}) => {
   } catch (err) { return {ok: false, error: String(err?.message || err)}; }
 });
 
+// —— 知识库完整性校验：列出全部 .md，计算 sha256 与字节数，与渲染层传入的期望值比对 ——
+// 返回 changed（盘上与记录不一致，疑似损坏或外部改写）、missing（盘上有但无记录）、
+// extra（记录有但盘上无）。只报告、绝不自动覆盖盘上文件；修复需用户在恢复界面手动操作。
+const MD_LIKE = /\.md$/i;
+ipcMain.handle('vault:verifyIntegrity', async (_e, {root, expected}) => {
+  try {
+    if (!root) return {ok: false, error: '参数错误'};
+    if (!(await ensureAuthorized(root))) return {ok: false, error: '知识库文件夹未授权 · Vault root not authorized'};
+    const expect = new Map(Object.entries(expected || {}));
+    const actual = new Map();
+    async function walk(dir) {
+      let entries;
+      try { entries = await fsp.readdir(dir, {withFileTypes: true}); } catch { return; }
+      for (const e of entries) {
+        if (e.name.startsWith('.') || SKIP.has(e.name)) continue;
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) { await walk(p); continue; }
+        if (!e.isFile() || !MD_LIKE.test(e.name)) continue;
+        const rel = path.relative(root, p).split(path.sep).join('/');
+        const buf = await fsp.readFile(p);
+        actual.set(rel, {sha: crypto.createHash('sha256').update(buf).digest('hex'), bytes: buf.length});
+      }
+    }
+    await walk(root);
+    const changed = [], missing = [], extra = [];
+    for (const [rel, a] of actual) {
+      const exp = expect.get(rel);
+      if (!exp) missing.push(rel);
+      else if (exp.sha !== a.sha) changed.push(rel);
+    }
+    for (const rel of expect.keys()) if (!actual.has(rel)) extra.push(rel);
+    return {ok: true, changed, missing, extra, total: actual.size};
+  } catch (err) { return {ok: false, error: String(err?.message || err)}; }
+});
+
+
 // —— 知识库文件监听：外部改动（Obsidian / 网盘回捞等）2s 防抖后通知渲染层跑一次同步比对
 // （渲染层比对无变化时静默，应用自己写盘引发的回环只是多一次便宜的全量比对，无害）。
 let vaultWatcher = null, vaultWatchTimer = null;
@@ -940,6 +996,15 @@ function createWindow() {
     ownDir = path.dirname(indexPath); // will-navigate 白名单：只放行本应用 dist 目录内的 file:// 导航
     mainWindow.loadFile(indexPath);
   }
+  // 全局快捷键：⌘/Ctrl+Shift+D 唤出主窗口（即使在别的应用里也能一键回到笔记）
+  try {
+    globalShortcut.register('CommandOrControl+Shift+D', () => {
+      if (!mainWindow) return;
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    });
+  } catch (_) { /* 快捷键被其他应用占用时静默失败，不影响启动 */ }
 }
 
 app.whenReady().then(() => {
@@ -949,6 +1014,10 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
 });
 
 app.on('window-all-closed', () => {

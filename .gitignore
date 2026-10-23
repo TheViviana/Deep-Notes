@@ -12,3 +12,4 @@ src/data/my-data.js
 !.env.example
 *.pem
 *.key
+.trae/

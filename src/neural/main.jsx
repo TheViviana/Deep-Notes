@@ -3,7 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, seedReadings, seedArchives, snapshot, concepts as CONCEPTS, notes as SEED_NOTES} from '../data';
 import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags, WORKS_KEY} from './worksStore';
 import {pickVaultFolder, pickMdFiles, parseVault} from './importer';
-import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushAll, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, uniqueNotePath, safeName, hasPendingWrites, retryPending, clearPendingWrites, pendingReady, snapshotBeforeAdopt, readFileSnapshot, loadMeta, patchMeta, VAULT_MODE} from './fileStore';
+import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushAll, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, uniqueNotePath, safeName, hasPendingWrites, retryPending, clearPendingWrites, pendingReady, snapshotBeforeAdopt, readFileSnapshot, loadMeta, patchMeta, VAULT_MODE, verifyIntegrity} from './fileStore';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
@@ -465,7 +465,19 @@ function App() {
   const graph = useMemo(() => buildGraph({works: slowWorks, notes, ideas, drafts: slowDrafts, readings, archives, concepts: mergedConcepts}), [slowWorks, notes, ideas, slowDrafts, readings, archives, mergedConcepts]);
   const layout = useMemo(() => forceLayout(graph), [graph]);
 
-  useEffect(() => { history.replaceState(null, '', page === 'home' ? location.pathname : '#' + page); window.scrollTo({top: 0}); }, [page]);
+  // 页面切换：保留各页面的滚动位置（sessionStorage，刷新后仍能回到上次位置），首次进入该页才回到顶部
+  useEffect(() => {
+    history.replaceState(null, '', page === 'home' ? location.pathname : '#' + page);
+    const key = `dn-scroll-${page}`;
+    const saved = sessionStorage.getItem(key);
+    window.scrollTo({top: saved ? parseInt(saved, 10) || 0 : 0});
+  }, [page]);
+  // 离开页面时保存当前滚动位置
+  useEffect(() => {
+    const onLeave = () => { try { sessionStorage.setItem(`dn-scroll-${page}`, String(window.scrollY)); } catch (_) {} };
+    window.addEventListener('beforeunload', onLeave);
+    return () => { onLeave(); window.removeEventListener('beforeunload', onLeave); };
+  }, [page]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2800); return () => clearTimeout(t); }, [toast]);
   // ⌘K / Ctrl+K 呼出全局命令面板（输入框聚焦时同样生效，浏览器默认行为已阻止）
   useEffect(() => {
@@ -1548,6 +1560,13 @@ function App() {
     {group: '数据 Data', icon: 'save', zh: '导出全部 Markdown', en: 'Export all Markdown', run: exportVault},
     {group: '数据 Data', icon: 'replay', zh: '恢复数据快照', en: 'Restore data snapshot', run: restoreSnapshot},
     {group: '数据 Data', icon: 'replay', zh: '文件恢复', en: 'File recovery', run: () => setModal('recovery')},
+    {group: '数据 Data', icon: 'replay', zh: '校验知识库完整性', en: 'Verify vault integrity', run: async () => {
+      const r = await verifyIntegrity({works, notes, drafts, ideas, readings, archives});
+      if (!r?.ok) { setToast(`校验失败：${r?.error || '未知错误'} · Verification failed`); return; }
+      const {changed = [], missing = [], extra = [], total = 0} = r;
+      if (!changed.length && !missing.length && !extra.length) { setToast(`校验通过：${total} 个文件与记录一致 · All ${total} files verified`); return; }
+      setToast(`发现差异：${changed.length} 处内容不一致、${missing.length} 个盘上新增、${extra.length} 个记录缺失，请去「文件恢复」核对 · Mismatch found`);
+    }},
     {group: '数据 Data', icon: 'replay', zh: '切回示例数据', en: 'Reset to sample', run: resetToSample},
   ];
   const s = stats(graph);
