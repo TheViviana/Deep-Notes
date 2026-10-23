@@ -4,6 +4,7 @@ import {seedIdeas, seedDrafts, seedReadings, seedArchives, snapshot, concepts as
 import {useWorks, seedWorks, monthWorks, normalizeWork, nowStamp, toInputDateTime, fromInputDateTime, parseTags, WORKS_KEY} from './worksStore';
 import {pickVaultFolder, pickMdFiles, parseVault} from './importer';
 import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushAll, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, uniqueNotePath, safeName, hasPendingWrites, retryPending, clearPendingWrites, pendingReady, snapshotBeforeAdopt, readFileSnapshot, loadMeta, patchMeta, VAULT_MODE, verifyIntegrity} from './fileStore';
+import {sameVaultContent} from './vaultCompare';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
 import {renderMarkdown} from './ArticleView';
@@ -1174,7 +1175,9 @@ function App() {
   // through（写透开关）：这次整体替换后的第一轮 diff 要不要写盘。导入（新副本要生成全部
   // 文件）与恢复快照（备份要写回知识库）= true；启动读盘 / 外部改动同步 = false——内容刚
   // 从盘上灌进内存，写透会把全库重写一遍。见 diff-writer 里的 adoptThrough。
-  function adoptData(data, msg, keepFolders = false, through = true) {
+  // preserveView（视图保留）：自动同步 = true——页面、打开的全文、选中态原地保留，
+  // 只清掉已被外部删除的条目的选中态；导入 / 切示例 / 恢复快照 = false，整体重置回工作台。
+  function adoptData(data, msg, keepFolders = false, through = true, preserveView = false) {
     // 概念词表合并而非覆盖：应用内改过的关键词与手动增删的概念（current）优先，
     // 词表里没有的（导入 / 同步带回的新词）补进来。直接覆盖会抹掉用户在概念内页的全部修改。
     // 代价（v1 接受）：应用内删除 / 改名的概念会在下次同步时被词表带回。
@@ -1192,10 +1195,27 @@ function App() {
     // keepFolders：自动同步 / 恢复快照不是「换库」，应用内手动建的空分类原样保留；
     // 全量导入 / 切回示例才是彻底替换，手动空分类随内容一起清掉
     if (!keepFolders) { setFolders([]); setReadFolders([]); }
-    setLibSel(data.works[0]?.id ?? null); setActive(data.drafts[0]?.id);
-    setReadSel(null); setReadOpen(null); setArcSel(null); setArcOpen(null);
-    setFocus({mod: null, sel: null}); setOpenArticle(null); setPage('home');
-    setModal(null); setToast(msg);
+    if (preserveView) {
+      // 自动同步：界面原地不动（问题 6）——不跳页、不关弹窗；只把已被外部删除的条目的
+      // 选中态清掉，避免界面停在已不存在的内容上
+      const idSet = list => new Set((Array.isArray(list) ? list : []).map(x => String(x.id)));
+      const wids = idSet(data.works), nids = idSet(data.notes ?? SEED_NOTES), dids = idSet(data.drafts);
+      const rids = idSet(data.readings ?? seedReadings), aids = idSet(data.archives ?? seedArchives);
+      setLibSel(s => s != null && !wids.has(String(s)) ? (data.works[0]?.id ?? null) : s);
+      setOpenArticle(a => a != null && !wids.has(String(a)) ? null : a);
+      setMethSel(s => s != null && !nids.has(String(s)) ? null : s);
+      setActive(a => a != null && !dids.has(String(a)) ? data.drafts[0]?.id : a);
+      setReadSel(s => s != null && !rids.has(String(s)) ? null : s);
+      setReadOpen(o => o != null && !rids.has(String(o)) ? null : o);
+      setArcSel(s => s != null && !aids.has(String(s)) ? null : s);
+      setArcOpen(o => o != null && !aids.has(String(o)) ? null : o);
+    } else {
+      setLibSel(data.works[0]?.id ?? null); setActive(data.drafts[0]?.id);
+      setReadSel(null); setReadOpen(null); setArcSel(null); setArcOpen(null);
+      setFocus({mod: null, sel: null}); setOpenArticle(null); setPage('home');
+      setModal(null);
+    }
+    setToast(msg);
   }
   function restoreSnapshot() {
     setPalette(false); setModal(null);
@@ -1433,19 +1453,10 @@ function App() {
       setToast(`知识库文件数量骤减（${lastCount} → ${data.counts.all}），已跳过自动同步以防误删；若确属有意删除，请重新导入一次该知识库 · Sync skipped`);
       return null;
     }
-    const fp = (x, keys) => JSON.stringify(keys.map(k => x?.[k] ?? null));
-    const eq = (a, b, keys) => a.length === b.length && a.every((x, i) => fp(x, keys) === fp(b[i], keys));
-    const same =
-      eq(works, data.works || [], ['id', 'title', 'date', 'direction', 'tags', 'body', 'media', 'views', 'likes', 'comments', 'saves', 'follows', 'shares', 'impressions', 'ctr', 'duration']) &&
-      eq(notes, data.notes || [], ['id', 'title', 'path', 'body']) &&
-      eq(drafts, data.drafts || [], ['id', 'title', 'body', 'source']) &&
-      eq(readings, data.readings || [], ['id', 'title', 'author', 'source', 'folder', 'date', 'body']) &&
-      eq(archives, data.archives || [], ['id', 'title', 'date', 'body']) &&
-      // 选题按业务字段判等（不含 id：导入端按出现顺序编号，顺序不代表库变更）
-      eq(ideas, data.ideas || [], ['title', 'platform', 'priority', 'status', 'note']) &&
-      // 概念按名字判等：关键词 / 顺序差异不算库变更（概念由笔记推导且应用内可编辑，不落盘，
-      // 若按整词表比较，每次启动都会判「有变化」触发一次全库重写）
-      (data.concepts || []).every(([n]) => kbConcepts.some(([k]) => k === n));
+    // 与解析器同口径的归一化 + 按 id 顺序无关比对（vaultCompare）：自己写盘的回声、数组
+    // 顺序差异、正文首尾空白、空指标 null↔0、media 缺省等往返差异都不再误判为「外部变更」。
+    // 误判的代价是 adoptData 用盘上版本覆盖内存——重置页面 / 选中态、顶掉未落盘的移动。
+    const same = sameVaultContent({works, notes, drafts, readings, archives, ideas}, data, kbConcepts);
     if (same) {
       if (unreadable.length) setToast(`知识库有 ${unreadable.length} 个文件暂时读不到（可能未从 iCloud 下载），相关内容保持原样 · Sync partial`);
       return data; // 文件夹没有变化就不打扰
@@ -1486,7 +1497,7 @@ function App() {
       archives: keepOld ? [...(data.archives ?? seedArchives), ...keepOld.archives] : (data.archives ?? seedArchives),
       snapshot: data.snapshot, concepts: data.concepts,
     };
-    adoptData(next, `已同步知识库变更：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${unreadable.length ? `（另有 ${unreadable.length} 个文件暂时读不到，已保持原样）` : ''}`, true, false); // 内容来自盘上：灌入不写透，避免全库重写
+    adoptData(next, `已同步知识库变更：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${unreadable.length ? `（另有 ${unreadable.length} 个文件暂时读不到，已保持原样）` : ''}`, true, false, true); // 内容来自盘上：灌入不写透，避免全库重写；视图原地保留，不跳工作台
     try { localStorage.setItem(FILES_KEY, String(data.counts.all + unreadable.length)); } catch {} // 文件数基线含占位文件
     return data;
   }, [works, notes, ideas, drafts, readings, archives, kbConcepts, snap]);

@@ -825,7 +825,12 @@ ipcMain.on('vault:watch', (_e, root) => {
   // 未授权的目录不监听（M1）：白名单校验走同步检查，不弹确认框（弹窗留给首个读请求）
   if (!root || !rootAuthorized(root) || process.platform === 'linux') return;
   try {
-    vaultWatcher = fs.watch(root, {recursive: true}, () => {
+    vaultWatcher = fs.watch(root, {recursive: true}, (_event, filename) => {
+      // 应用自身写盘也会触发 watch（回环）：.deepnotes/meta.json（附属数据）与 .trash（删除移入）
+      // 这类点开头路径的变更不代表用户内容变化，过滤掉——否则每次写 meta / 删文件都会白跑
+      // 一次全库读取比对。内容文件的自写回声由渲染层的同口径比对兜底（无变化静默返回）。
+      const rel = String(filename || '').replace(/\\/g, '/');
+      if (!rel || rel.split('/').some(seg => seg.startsWith('.'))) return;
       clearTimeout(vaultWatchTimer);
       vaultWatchTimer = setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('vault:changed');

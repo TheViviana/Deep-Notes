@@ -137,10 +137,15 @@ export async function writeMetaNow() {
   const root = getRoot();
   if (!v?.metaWrite || !root || !metaCache) return false;
   const gen = metaGen;
-  const snapshot = metaCache;
-  let payload = snapshot;
+  // 发送快照：只发此刻的脏键与其值。写盘期间新进来的 patch（metaCache 键值被换新引用 /
+  // dirty 新增键）不属于本次写出——成功回调若用本次 payload 回盖 metaCache 并清空 dirty，
+  // 会把 rapid 连续改动（建分类后立刻再建 / 改名等）回吞，盘上永远丢新改动（meta 竞态）。
+  const sentDirty = new Set(metaDirty);
+  const sent = {};
+  for (const k of sentDirty) sent[k] = metaCache[k];
+  let payload = {...metaCache};
   // 写前重读一次盘上 meta：长驻会话持有的 metaCache 是启动时的快照，直接整对象覆盖会把
-  // 另一台机器在这期间的改动整块抹掉。只让本会话改过的键（metaDirty）覆盖盘上值，其余以盘上为准。
+  // 另一台机器在这期间的改动整块抹掉。只让本次发送的脏键覆盖盘上值，其余以盘上为准。
   if (v.metaRead) {
     try {
       const r = await v.metaRead(root);
@@ -152,11 +157,9 @@ export async function writeMetaNow() {
       const disk = r.data && typeof r.data === 'object' && !Array.isArray(r.data) ? r.data : {};
       const base = metaBase || {};
       payload = {...disk};
-      for (const k of Object.keys(snapshot)) {
-        if (!metaDirty.has(k)) continue; // 本机没动 → 保持盘上值，绝不用启动时的陈旧快照覆盖对面机器的改动
-        payload[k] = META_LIST_KEYS.has(k) ? mergeMetaList(snapshot[k], disk[k], base[k]) : snapshot[k];
+      for (const k of sentDirty) {
+        payload[k] = META_LIST_KEYS.has(k) ? mergeMetaList(sent[k], disk[k], base[k]) : sent[k];
       }
-      for (const k of metaDirty) if (!(k in payload)) payload[k] = snapshot[k]; // 新增键照常写入
     } catch (err) { // 读盘抛错同样不落盘，提示与 !ok 分支一致
       try { window.dispatchEvent(new CustomEvent('deepnotes-meta-write-failed', {detail: String(err?.message || err)})); } catch {}
       return false;
@@ -166,9 +169,15 @@ export async function writeMetaNow() {
     const r = await v.metaWrite(root, payload);
     const ok = !!(r && r.ok);
     if (ok) {
-      Object.assign(metaCache, payload); // 保持对象身份：写盘期间的新 patchMeta 不会丢
+      // 逐键合并回 metaCache：本次发送且写盘期间没再变的键，采用合并后的写出值并清 dirty；
+      // 写盘期间又改过的键保留新值与 dirty 标记（稍后再补一轮）；非本次发送的键合入盘上新鲜值。
+      for (const k of Object.keys(payload)) {
+        if (sentDirty.has(k)) {
+          if (metaCache[k] === sent[k]) { metaCache[k] = payload[k]; metaDirty.delete(k); }
+        } else if (!metaDirty.has(k)) metaCache[k] = payload[k];
+      }
       metaBase = {...metaCache};
-      metaDirty.clear();
+      if (metaDirty.size) scheduleMeta(); // 写盘期间到达的新改动：补一轮写盘，绝不静默丢
     }
     // 写盘成功才广播：conceptStore 据此更新三向合并的 shadow（写失败不更新，shadow 不撒谎）
     if (ok && typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('deepnotes-meta-written', {detail: payload}));

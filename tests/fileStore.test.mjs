@@ -354,3 +354,37 @@ test('writeMetaNow：非脏键保持盘上值（对面机器的改动不被抹�
     globalThis.window = {};
   }
 });
+
+// —— meta 竞态回归：writeMetaNow 在途期间到达的 patch 不得被旧 payload 回吞、dirty 不得被误清 ——
+test('writeMetaNow 竞态：写盘期间的新 patch 保留 dirty 并补写，不被回吞', async () => {
+  const disk = {folders: ['A']};
+  const writes = [];
+  let resolveFirst = null, slowFirst = true;
+  globalThis.window = {deepnotes: {vault: {
+    metaRead: async () => ({ok: true, data: JSON.parse(JSON.stringify(disk))}),
+    metaWrite: async (root, payload) => {
+      writes.push(JSON.parse(JSON.stringify(payload)));
+      if (slowFirst) { slowFirst = false; await new Promise(res => { resolveFirst = res; }); }
+      return {ok: true};
+    },
+  }}};
+  try {
+    await setRoot('/tmp/vault-race');
+    await loadMeta(); // 启动首读：metaCache = metaBase = {folders:['A']}
+    patchMeta({readFolders: ['甲']});
+    const p1 = writeMetaNow(); // 发出 {folders:['A'], readFolders:['甲']}，卡在 metaWrite
+    await new Promise(r => setTimeout(r, 20)); // 等 metaRead 完成、metaWrite 在途
+    patchMeta({readFolders: ['甲', '乙']}); // 写盘在途期间又改同一键
+    resolveFirst(); await p1;
+    assert.equal(writes.length, 1);
+    assert.deepEqual(writes[0].readFolders, ['甲']);
+    // 旧实现在这里 metaDirty.clear() + Object.assign(metaCache, 旧payload)：
+    // 「乙」被回吞，之后再也不会写盘。修复后 dirty 保留，补写必须带上完整新值。
+    await writeMetaNow();
+    assert.equal(writes.length, 2);
+    assert.deepEqual(writes[1].readFolders, ['甲', '乙'], '在途期间的新改动不得被旧写盘结果回吞');
+  } finally {
+    await setRoot(null);
+    globalThis.window = {};
+  }
+});
