@@ -170,23 +170,16 @@ const deleteScopeNote = () => capable() && getRoot()
   : '此操作只影响当前浏览器。';
 
 
-// —— 导出 PDF：把正文排成打印版 HTML 塞进隐藏 iframe，调起系统打印（目标选「另存为 PDF」）。
-// 全程本地渲染，不新增联网出口；Electron 桌面版与浏览器通用 ——
-function printArticle({title, meta, html}) {
+// —— 独立的单文件 HTML 文档：打印版与「分享 HTML」共用同一套浅色排版样式（无脚本、不联网）——
+function buildArticleHtml({title, meta, html, share}) {
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
   // 视频播放器在打印版里无法播放，只会留下黑框：换成可读的引用说明（文件名保留，方便事后查找）
-  const printable = String(html).replace(/<video[^>]*data-asset="([^"]*)"[^>]*>\s*<\/video>/g,
+  let printable = String(html).replace(/<video[^>]*data-asset="([^"]*)"[^>]*>\s*<\/video>/g,
     (_, ref) => `<p class="video-ref">▶ 本地视频（请回到 Deep Notes 播放）：${esc(ref)}</p>`);
-  const iframe = document.createElement('iframe');
-  // 审计 M4：禁脚本沙箱——iframe 只承担排版打印，不执行任何 JS；同源访问保留给
-  // doc.write 与 resolveAllInDoc（引用图解析），allow-modals 放行 win.print() 调系统打印
-  iframe.setAttribute('sandbox', 'allow-same-origin allow-modals');
-  iframe.setAttribute('aria-hidden', 'true');
-  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
-  document.body.appendChild(iframe);
-  const doc = iframe.contentDocument;
-  doc.open();
-  doc.write('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>' + esc(title) + '</title><style>'
+  // 分享文件在别的设备打开时读不到知识库里的图片：换成文字说明，避免破图
+  if (share) printable = printable.replace(/<img[^>]*data-asset="([^"]*)"[^>]*>/g,
+    (_, ref) => `<p class="video-ref">🖼 本地图片（请回到 Deep Notes 查看）：${esc(ref)}</p>`);
+  return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + '</title><style>'
     + 'body{font:13px/1.9 -apple-system,"PingFang SC","Segoe UI",sans-serif;color:#222;max-width:700px;margin:0 auto;padding:36px 20px;}'
     + 'h1{font-size:22px;margin:0 0 4px;}.meta{color:#888;font-size:11px;margin-bottom:22px;}'
     + '.md h1,.md h2,.md h3,.md h4{margin:1.4em 0 .5em;line-height:1.4;}.md h1{font-size:19px;}.md h2{font-size:16.5px;}.md h3{font-size:15px;}'
@@ -200,7 +193,22 @@ function printArticle({title, meta, html}) {
     + '.md hr{border:0;border-top:1px solid #ddd;margin:1.4em 0;}'
     + '.video-ref{color:#666;font-size:12px;background:#f5f5f2;border-left:3px solid #bbb;padding:6px 10px;margin:.8em 0;}'
     + '.md a.md-video-link{color:#4a6fa5;}.md a.md-video-link::after{content:"（本地视频）";color:#999;font-size:11px;}'
-    + '</style></head><body><h1>' + esc(title) + '</h1><p class="meta">' + esc(meta) + ' · Deep Notes</p><div class="md">' + printable + '</div></body></html>');
+    + '</style></head><body><h1>' + esc(title) + '</h1><p class="meta">' + esc(meta) + ' · Deep Notes</p><div class="md">' + printable + '</div></body></html>';
+}
+
+// —— 导出 PDF：把正文排成打印版 HTML 塞进隐藏 iframe，调起系统打印（目标选「另存为 PDF」）。
+// 全程本地渲染，不新增联网出口；Electron 桌面版与浏览器通用 ——
+function printArticle({title, meta, html}) {
+  const iframe = document.createElement('iframe');
+  // 审计 M4：禁脚本沙箱——iframe 只承担排版打印，不执行任何 JS；同源访问保留给
+  // doc.write 与 resolveAllInDoc（引用图解析），allow-modals 放行 win.print() 调系统打印
+  iframe.setAttribute('sandbox', 'allow-same-origin allow-modals');
+  iframe.setAttribute('aria-hidden', 'true');
+  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+  document.body.appendChild(iframe);
+  const doc = iframe.contentDocument;
+  doc.open();
+  doc.write(buildArticleHtml({title, meta, html}));
   doc.close();
   const win = iframe.contentWindow;
   let done = false;
@@ -1608,6 +1616,21 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
     setModal(null);
     printArticle({title: cur.item.title || '未命名', meta: curMeta(cur), html: renderMarkdown(cur.item.body || '')});
   }
+  // 单文件 HTML：自带排版样式，可直接发给别人用浏览器打开；不引用任何外部资源
+  function exportCurrentHtml() {
+    const cur = currentItem(); if (!cur?.item) return;
+    setModal(null);
+    const title = cur.item.title || '未命名';
+    try {
+      const doc = buildArticleHtml({title, meta: curMeta(cur), html: renderMarkdown(cur.item.body || ''), share: true});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([doc], {type: 'text/html;charset=utf-8'}));
+      a.download = `${safeName(title)}.html`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      setToast(`已导出单文件 HTML《${title}》 · Shared`);
+    } catch { setToast('导出失败 · Export failed'); }
+  }
 
   // —— 文章 / 笔记 / 阅读 / 档案 → 思维导图：按标题层级建树（同源重复生成是更新），
   // 段落收为「¶ 摘句」叶节点；生成后跳导图页并选中，导图里可一键返回原文。
@@ -1934,6 +1957,7 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
           <button className="pill" onClick={() => setModal('import-files')}><Icon name="outlink" size={14}/>导入选定内容 <em>Import files</em></button>
           <button className="pill" disabled={!curItem?.item} title={curItem?.item ? `导出《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentMd}><Icon name="save" size={14}/>导出当前 · Markdown <em>MD</em></button>
           <button className="pill" disabled={!curItem?.item} title={curItem?.item ? `打印 / 另存 PDF《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentPdf}><Icon name="outlink" size={14}/>导出当前 · PDF <em>Print</em></button>
+          <button className="pill" disabled={!curItem?.item} title={curItem?.item ? `导出《${curItem.item.title}》为单文件 HTML（自带排版，可直接分享）` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentHtml}><Icon name="outlink" size={14}/>分享 · 单文件 HTML <em>Share</em></button>
           <button className="pill" onClick={() => setModal('recovery')}><Icon name="replay" size={14}/>文件恢复 <em>Recovery</em></button>
           <button className="pill" onClick={() => setModal('stats')}><Icon name="pulse" size={14}/>写作统计 <em>Stats</em></button>
           <button className="pill ghost" onClick={resetToSample}>切回示例数据 <em>Reset</em></button>

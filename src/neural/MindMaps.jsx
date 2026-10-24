@@ -5,7 +5,7 @@ import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {Icon} from './icons';
 import {CONFIG} from '../config';
 import {mindmaps as mindmapStore} from './conceptStore';
-import {outlineToTree, treeToOutline, headingsToTree, layoutTree, nodeCount} from './mindmap';
+import {outlineToTree, treeToOutline, headingsToTree, layoutTree, nodeCount, parseNodeText, formatNodeText, NODE_COLORS} from './mindmap';
 
 const newId = () => 'mm-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const WIN_KEY = CONFIG.storagePrefix + '-mm-window-v1';
@@ -26,12 +26,13 @@ function MapCanvas({map, onChange, onOpenSource}) {
   const [selId, setSelId] = useState(null);
   const [editing, setEditing] = useState(null);
   const [editVal, setEditVal] = useState('');
+  const [noteEdit, setNoteEdit] = useState(null); // {id, val}：正在编辑的节点备注
   const [zoom, setZoom] = useState(1);
   const view = useRef({x: 40, y: 40});
   const drag = useRef(null);
+  const dragId = useRef(null); // 拖动重排中的节点 id
   const box = useRef(null);
   const viewport = useRef(null);
-  const [tick, setTick] = useState(0);
 
   const findNode = (root, id) => {
     if (root.id === id) return root;
@@ -47,26 +48,36 @@ function MapCanvas({map, onChange, onOpenSource}) {
     return null;
   };
   const clone = n => ({...n, children: (n.children || []).map(clone)});
-  const mutate = fn => {
+  // 结构变化统一走这里：改树 + 可选的附加字段（如展开被折叠的父节点）一次提交
+  const applyTree = (fn, patch) => {
     const root = clone(tree);
     fn(root);
-    onChange({...map, outline: treeToOutline(root)});
+    onChange({...map, ...(patch || {}), outline: treeToOutline(root)});
   };
-  const addChild = () => {
-    if (!selId) return;
-    mutate(root => { const n = findNode(root, selId); if (n) (n.children ||= []).unshift({id: n.id + '-n', text: '新节点', children: []}); });
+  // 新节点 id 按「路径序号」推定（与 outlineToTree 的规则一致），建完立即进入编辑态，
+  // 双击/新建后马上就有可输入的文字框，不用再双击一次。
+  const startEdit = id => { setSelId(id); setEditing(id); setEditVal('新节点'); };
+  const addChildTo = base => {
+    const parent = base ? findNode(tree, base) : null;
+    if (!parent) return;
+    const nextFolded = {...folded};
+    delete nextFolded[base];
+    const idx = (parent.children || []).length; // 追加在末尾：已有子节点的路径 id 不变，折叠态不会错位
+    applyTree(root => { const n = findNode(root, base); if (n) (n.children ||= []).push({text: '新节点', children: []}); }, {folded: nextFolded});
+    startEdit(base + '-' + idx);
   };
-  const addSibling = () => {
-    if (!selId) return;
-    mutate(root => {
-      const p = findParent(root, selId);
-      if (!p) return;
-      p.children.splice(p.children.findIndex(c => c.id === selId) + 1, 0, {id: p.id + '-n', text: '新节点', children: []});
-    });
+  const addSiblingTo = id => {
+    if (!id) return;
+    const p = findParent(tree, id);
+    if (!p) { addChildTo(tree.id); return; }
+    const idx = p.children.findIndex(c => c.id === id);
+    applyTree(root => { const pr = findNode(root, p.id); if (pr) pr.children.splice(idx + 1, 0, {text: '新节点', children: []}); });
+    startEdit(p.id + '-' + (idx + 1));
   };
+  const addChild = () => { if (selId) addChildTo(selId); };
   const removeNode = () => {
     if (!selId) return;
-    mutate(root => { const p = findParent(root, selId); if (p) p.children = p.children.filter(c => c.id !== selId); });
+    applyTree(root => { const p = findParent(root, selId); if (p) p.children = p.children.filter(c => c.id !== selId); });
     setSelId(null);
   };
   const toggleCollapse = () => {
@@ -79,8 +90,58 @@ function MapCanvas({map, onChange, onOpenSource}) {
     if (!editing) return;
     const t = editVal.trim() || '未命名';
     if (editing === 'title') onChange({...map, title: t});
-    else mutate(root => { const n = findNode(root, editing); if (n) n.text = t; });
+    else applyTree(root => {
+      const n = findNode(root, editing);
+      if (n) { const p = parseNodeText(n.text); n.text = formatNodeText(t, p.note, p.color); }
+    });
     setEditing(null);
+  };
+  // 节点装饰：颜色与备注都编码进大纲文本，增删兄弟后仍跟着节点
+  const selNode = selId ? findNode(tree, selId) : null;
+  const selMeta = selNode ? parseNodeText(selNode.text) : {label: '', note: '', color: ''};
+  const setNodeColor = color => {
+    if (!selId) return;
+    applyTree(root => {
+      const n = findNode(root, selId);
+      if (n) { const p = parseNodeText(n.text); n.text = formatNodeText(p.label, p.note, p.color === color ? '' : color); }
+    });
+  };
+  const openNote = () => {
+    if (!selId) return;
+    const n = findNode(tree, selId);
+    if (n) setNoteEdit({id: selId, val: parseNodeText(n.text).note});
+  };
+  const commitNote = () => {
+    if (!noteEdit) return;
+    const {id, val} = noteEdit;
+    applyTree(root => {
+      const n = findNode(root, id);
+      if (n) { const p = parseNodeText(n.text); n.text = formatNodeText(p.label, val, p.color); }
+    });
+    setNoteEdit(null);
+  };
+  // 拖动重排：把节点拖到另一个节点上 → 成为它的下一个同级（拖到中心主题 → 成为其首个子级）
+  const isAncestorId = (ancestor, id) => id === ancestor || id.startsWith(ancestor + '-');
+  const moveNodeTo = (srcId, dstId) => {
+    if (!srcId || !dstId || srcId === dstId || srcId === tree.id) return;
+    if (isAncestorId(srcId, dstId)) return; // 不能把父节点拖进自己的子树
+    let moved = false;
+    applyTree(root => {
+      const srcParent = findParent(root, srcId);
+      if (!srcParent) return;
+      const srcIdx = srcParent.children.findIndex(c => c.id === srcId);
+      if (srcIdx < 0) return;
+      const [node] = srcParent.children.splice(srcIdx, 1);
+      const dstParent = findParent(root, dstId);
+      if (dstParent) {
+        const dstIdx = dstParent.children.findIndex(c => c.id === dstId);
+        dstParent.children.splice(Math.max(0, dstIdx) + 1, 0, node);
+      } else {
+        root.children.unshift(node); // 拖到中心主题：升为一级节点
+      }
+      moved = true;
+    });
+    if (moved) setSelId(null);
   };
 
   const {entries} = useMemo(() => layoutTree(tree, folded), [tree, folded]);
@@ -88,6 +149,58 @@ function MapCanvas({map, onChange, onOpenSource}) {
   const ROW = 46 * zoom, COL = (150 + 64) * zoom;
   const CANVAS = 20000;
   const ORIGIN = CANVAS / 2;
+
+  // 视图定位：把内容包围盒放到视口正中。节点画在 20000 画布的中心（ORIGIN），
+  // 打开导图 / 切换导图时若不定位，节点全在视口外——看起来就是「一张空导图」「两个找不到的节点」。
+  const fitView = useCallback(() => {
+    const vp = viewport.current;
+    if (!vp || !entries.length) return;
+    const xs = entries.map(e => e.depth * COL);
+    const ys = entries.map(e => e.y * ROW);
+    const minX = Math.min(...xs), maxX = Math.max(...xs) + 150 * zoom;
+    const minY = Math.min(...ys), maxY = Math.max(...ys) + 34 * zoom;
+    const vw = vp.clientWidth || 640, vh = vp.clientHeight || 420;
+    view.current = {
+      x: (vw - (maxX - minX)) / 2 - ORIGIN - minX,
+      y: (vh - (maxY - minY)) / 2 - ORIGIN - minY,
+    };
+    if (box.current) box.current.style.transform = `translate(${view.current.x}px, ${view.current.y}px)`;
+  }, [entries, COL, ROW, zoom, ORIGIN]);
+  // 只在切换导图时自动定位；编辑过程中不抢视角
+  const fitRef = useRef(fitView);
+  fitRef.current = fitView;
+  useEffect(() => {
+    // 换导图：清掉上一张的选中 / 编辑态（路径 id 在不同导图里可能撞名，残留会误删新导图的节点）
+    setSelId(null); setEditing(null); setNoteEdit(null);
+    const raf = requestAnimationFrame(() => fitRef.current());
+    return () => cancelAnimationFrame(raf);
+  }, [map.id]);
+
+  // 结构变化后选中 id 可能失效（如删除了父节点）：清空，避免工具按钮空转
+  useEffect(() => {
+    if (selId && !findNode(tree, selId)) setSelId(null);
+  }, [tree, selId]);
+
+  // 键盘：Enter 加同级、Tab 加子级、F2 改名、Delete 删除（输入框内不拦截）
+  useEffect(() => {
+    const onKey = e => {
+      if (!selId) return;
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (e.key === 'Enter') { e.preventDefault(); addSiblingTo(selId); }
+      else if (e.key === 'Tab') { e.preventDefault(); addChildTo(selId); }
+      else if (e.key === 'F2') { const n = findNode(tree, selId); if (n) { setEditing(selId); setEditVal(n.text); } }
+      else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); removeNode(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  // 双击空白画布：给选中节点（或中心主题）加子级，并直接进入文字编辑
+  const onCanvasDblClick = e => {
+    if (e.target.closest('.mm-node, .mm-bar, .mm-hint, button, input')) return;
+    addChildTo(selId && posOf[selId] ? selId : tree.id);
+  };
 
   const onWheel = useCallback(e => {
     if (!(e.metaKey || e.ctrlKey)) return;
@@ -115,7 +228,7 @@ function MapCanvas({map, onChange, onOpenSource}) {
   };
   useEffect(() => {
     if (box.current) box.current.style.transform = `translate(${view.current.x}px, ${view.current.y}px)`;
-  }, [tick, zoom]);
+  }, [zoom]);
 
   const exportPng = () => {
     const vp = viewport.current;
@@ -187,7 +300,7 @@ function MapCanvas({map, onChange, onOpenSource}) {
     // 导出
     const a = document.createElement('a');
     a.href = c.toDataURL('image/png');
-    a.download = `${map.title || '思维导图'}.png`;
+    a.download = `${String(map.title || '思维导图').replace(/[/\\:*?"<>|]/g, '·').slice(0, 60)}.png`;
     a.click();
   };
 
@@ -202,20 +315,33 @@ function MapCanvas({map, onChange, onOpenSource}) {
       </div>
       <div className="mm-tools" role="group" aria-label="导图工具">
         {map.source && <button className="pill ghost" onClick={() => onOpenSource(map.source)} title="打开原文"><Icon name="file" size={13}/>原文 <em>Src</em></button>}
-        <button className="pill ghost" disabled={!selId} onClick={addChild} title="给选中节点加子级"><Icon name="plus" size={13}/>子</button>
-        <button className="pill ghost" disabled={!selId || selId === tree.id} onClick={addSibling} title="加同级节点">同级</button>
+        <button className="pill ghost" disabled={!selId} onClick={addChild} title="给选中节点加子级（Tab）"><Icon name="plus" size={13}/>子</button>
+        <button className="pill ghost" disabled={!selId || selId === tree.id} onClick={() => addSiblingTo(selId)} title="加同级节点（Enter）">同级</button>
         <button className="pill ghost" disabled={!selId} onClick={toggleCollapse} title="收起/展开">折叠</button>
         <button className="pill ghost danger" disabled={!selId || selId === tree.id} onClick={removeNode} title="删除选中节点"><Icon name="trash" size={13}/></button>
+        <span className="mm-colors" role="group" aria-label="节点颜色">
+          {NODE_COLORS.map(c => <button key={c} type="button" disabled={!selId} onClick={() => setNodeColor(c)}
+            className={`mm-dot c-${c}${selMeta.color === c ? ' on' : ''}`} title={`标记颜色 ${c}（再点一次取消）`} aria-label={`节点颜色 ${c}`}/>)}
+        </span>
+        <button className="pill ghost" disabled={!selId} onClick={openNote} title="编辑节点备注">备注</button>
         <button className="pill ghost" onClick={() => exportPng()} title="导出为 PNG 图片 · Export PNG"><Icon name="outlink" size={13}/>PNG</button>
         <span className="mm-zoom">
           <button className="icon-btn" onClick={() => setZoom(z => Math.max(0.35, +(z - 0.1).toFixed(2)))} aria-label="缩小">−</button>
           <b>{Math.round(zoom * 100)}%</b>
           <button className="icon-btn" onClick={() => setZoom(z => Math.min(2, +(z + 0.1).toFixed(2)))} aria-label="放大">＋</button>
-          <button className="icon-btn" onClick={() => { view.current = {x: 40, y: 40}; setTick(t => t + 1); }} title="复位">⌂</button>
+          <button className="icon-btn" onClick={() => fitView()} title="回到内容位置（适应窗口）" aria-label="回到内容位置">⌂</button>
         </span>
       </div>
     </header>
-    <div className="mm-viewport" ref={viewport} onMouseDown={onDown}>
+    <div className="mm-viewport" ref={viewport} onMouseDown={onDown} onDoubleClick={onCanvasDblClick}>
+      {noteEdit && <div className="mm-note-bar" onMouseDown={e => e.stopPropagation()}>
+        <span>备注 <em>Note</em></span>
+        <input autoFocus value={noteEdit.val} placeholder="给这个节点写一条备注（随导图保存）" aria-label="节点备注"
+          onChange={e => setNoteEdit({...noteEdit, val: e.target.value})}
+          onKeyDown={e => { if (e.isComposing) return; if (e.key === 'Enter') commitNote(); if (e.key === 'Escape') setNoteEdit(null); }}/>
+        <button className="pill primary" onClick={commitNote}>保存</button>
+        <button className="icon-btn" onClick={() => setNoteEdit(null)} aria-label="取消备注"><Icon name="close" size={12}/></button>
+      </div>}
       <div className="mm-inner" ref={box} style={{width: CANVAS, height: CANVAS}}>
         <svg className="mm-lines" width={CANVAS} height={CANVAS} aria-hidden="true">
           {entries.filter(e => e.depth > 0 && posOf[e.pid]).map(e => {
@@ -230,22 +356,30 @@ function MapCanvas({map, onChange, onOpenSource}) {
         {entries.map(e => {
           const x = ORIGIN + e.depth * COL, y = ORIGIN + e.y * ROW;
           const kids = (e.node.children || []).length;
-          const hidden = kids && folded[e.node.id];
+          const hidden = kids > 0 && !!folded[e.node.id]; // kids 为 0 时不能返回 0：React 会把 0 当文本渲染（旧版叶子节点后面多出一个「0」）
+          const meta = parseNodeText(e.node.text);
           return <div key={e.node.id}
-            className={`mm-node${selId === e.node.id ? ' sel' : ''}${e.depth === 0 ? ' root' : ''}${hidden ? ' folded' : ''}`}
+            className={`mm-node${selId === e.node.id ? ' sel' : ''}${e.depth === 0 ? ' root' : ''}${hidden ? ' folded' : ''}${meta.color ? ' c-' + meta.color : ''}`}
             style={{left: x, top: y, width: 150 * zoom}}
+            draggable={editing !== e.node.id}
+            onDragStart={ev => { dragId.current = e.node.id; ev.dataTransfer.effectAllowed = 'move'; try { ev.dataTransfer.setData('text/plain', e.node.id); } catch {} }}
+            onDragOver={ev => { const src = dragId.current; if (src && src !== e.node.id && !isAncestorId(src, e.node.id)) ev.preventDefault(); }}
+            onDrop={ev => { ev.preventDefault(); const src = dragId.current || ev.dataTransfer.getData('text/plain'); dragId.current = null; moveNodeTo(src, e.node.id); }}
+            onDragEnd={() => { dragId.current = null; }}
             onClick={ev => { ev.stopPropagation(); setSelId(e.node.id); if (editing && editing !== e.node.id) commitText(); }}
-            onDoubleClick={() => { setEditing(e.node.id); setEditVal(e.node.text); }} title={e.node.text ? `${e.node.text.split('::')[0]}${e.node.text.includes('::') ? `\n备注：${e.node.text.split('::')[1] || ''}` : ''}\n双击改文字（::后写备注）` : '双击改文字'}>
+            onDoubleClick={() => { setEditing(e.node.id); setEditVal(meta.label); }}
+            title={`${meta.label}${meta.note ? `\n备注：${meta.note}` : ''}\n双击改文字 · 拖动可重排`}>
             {editing === e.node.id
               ? <input autoFocus value={editVal} onChange={ev => setEditVal(ev.target.value)} onBlur={commitText}
                   onKeyDown={ev => { if (ev.key === 'Enter' && !ev.isComposing) commitText(); if (ev.key === 'Escape') setEditing(null); }}
                   onClick={ev => ev.stopPropagation()} aria-label="节点文字"/>
-              : <span className="mm-text">{String(e.node.text || '').split('::')[0] || '　'}</span>}
+              : <span className="mm-text">{meta.label || '　'}</span>}
+            {meta.note && <i className="mm-note-dot" title={`备注：${meta.note}`} aria-hidden="true">•</i>}
             {hidden && <em className="mm-badge">+{kids}</em>}
           </div>;
         })}
       </div>
-      <p className="mm-hint">⌘/Ctrl+滚轮缩放 · 拖拽平移 · 双击改文字</p>
+      <p className="mm-hint">双击空白处新建子节点 · 双击节点改文字 · Enter 同级 · Tab 子级 · ⌘/Ctrl+滚轮缩放</p>
     </div>
   </section>;
 }

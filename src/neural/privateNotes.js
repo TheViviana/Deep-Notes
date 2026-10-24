@@ -78,7 +78,8 @@ export function upsertNote(args) {
     if (!key) throw new Error('请先解锁');
     const d = privateStore.get();
     const notes = [...(d?.notes || [])];
-    const enc2 = await seal(key, JSON.stringify({title: String(args.title || ''), body: String(args.body || '')}));
+    const tags = (Array.isArray(args.tags) ? args.tags : []).map(t => String(t).trim()).filter(Boolean).slice(0, 20);
+    const enc2 = await seal(key, JSON.stringify({title: String(args.title || ''), body: String(args.body || ''), tags}));
     const ts = Date.now();
     const nid = args.id || 'pn-' + ts.toString(36) + Math.random().toString(36).slice(2, 6);
     const idx = notes.findIndex(n => n.id === nid);

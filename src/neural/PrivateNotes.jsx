@@ -33,7 +33,7 @@ function PasswordGate({mode, onDone, onBack}) {
       onChange={e => setP2(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.isComposing) submit(); }}/></label>}
     {err && <p className="quiet" role="alert">{err}</p>}
     <div className="form-actions">
-      {onBack && <button className="pill ghost" onClick={onBack}>返回 <em>Back</em></button>}
+      {onBack && mode === 'setup' && <button className="pill ghost" onClick={onBack}>返回 <em>Back</em></button>}
       <button className="pill primary" disabled={busy} onClick={submit}>{mode === 'setup' ? '启用' : '解锁'} <em>Go</em></button>
     </div>
   </section>;
@@ -46,15 +46,21 @@ export function PrivateNotes() {
   const [sel, setSel] = useState(null);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
+  const [tagsInput, setTagsInput] = useState('');
+  const [q, setQ] = useState('');
   const [hint, setHint] = useState('');
+  const [syncedId, setSyncedId] = useState(null); // 编辑器里已回填好的笔记 id：只有它等于选中 id 才允许自动保存
   const saveTimer = useRef(null);
   const pending = useRef(null); // 待落盘的编辑快照：切笔记 / 上锁 / 卸载前必须 flush，防抖窗口内的输入不能丢
   const cur = sel ? notes.find(n => n.id === sel) : null;
+  const parseTags = s => String(s || '').split(/[,，、\s]+/).map(t => t.replace(/^#/, '').trim()).filter(Boolean);
+  const kw = q.trim().toLowerCase();
+  const shown = kw ? notes.filter(n => [n.title, n.body, ...(n.tags || [])].join(' ').toLowerCase().includes(kw)) : notes;
 
   const reload = () => { if (isUnlocked()) listNotes().then(setNotes).catch(() => setNotes([])); };
   useEffect(() => { if (unlocked) reload(); }, [unlocked]); // eslint-disable-line react-hooks/exhaustive-deps
   // 依赖 cur?.id（而非 sel）：新建后 notes 异步解密回来 cur 才有值，此时再回填标题正文
-  useEffect(() => { setTitle(cur?.title || ''); setBody(cur?.body || ''); }, [cur?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setTitle(cur?.title || ''); setBody(cur?.body || ''); setTagsInput((cur?.tags || []).join(', ')); setSyncedId(cur?.id || null); }, [cur?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 编辑防抖自动加密保存（800ms 静默）；cleanup 把挂起的编辑立即落盘
   const flushSave = async snapshot => {
@@ -66,16 +72,18 @@ export function PrivateNotes() {
     } catch (e) { setHint(`保存失败：${e?.message || e}`); }
   };
   useEffect(() => {
-    if (!unlocked || !sel || !cur) return; // cur 未就绪（新建瞬间）不启动防抖，避免把空值写进新笔记
+    // syncedId 保护：切笔记的瞬间标题/正文还是上一条的旧值，此时不能启动防抖，
+    // 否则 cleanup 会把旧内容写进刚选中的新笔记（覆盖新笔记正文）。
+    if (!unlocked || !sel || !cur || syncedId !== sel) return;
     clearTimeout(saveTimer.current);
-    const snapshot = {id: sel, title, body};
+    const snapshot = {id: sel, title, body, tags: parseTags(tagsInput)};
     pending.current = snapshot;
     saveTimer.current = setTimeout(() => { pending.current = null; flushSave(snapshot); }, 800);
     return () => {
       clearTimeout(saveTimer.current);
       if (pending.current) { const p = pending.current; pending.current = null; flushSave(p); }
     };
-  }, [sel, title, body, unlocked, !!cur]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sel, title, body, tagsInput, unlocked, syncedId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const createNote = async () => {
     const id = await upsertNote({title: '新建隐私笔记', body: ''});
@@ -127,21 +135,27 @@ export function PrivateNotes() {
     </header>
     <div className="pn-layout">
       <aside className="pn-list glass" aria-label="隐私笔记清单">
-        <h3>隐私笔记 <em>Notes</em><b>{notes.length}</b></h3>
-        {notes.map(n => <div key={n.id} className={`pn-item${sel === n.id ? ' active' : ''}`} onClick={() => setSel(n.id)} role="button" tabIndex={0}
+        <h3>隐私笔记 <em>Notes</em><b>{shown.length}</b></h3>
+        <input className="pn-search" type="search" value={q} onChange={e => setQ(e.target.value)}
+          placeholder="搜索标题 / 正文 / 标签" aria-label="搜索隐私笔记"/>
+        {shown.map(n => <div key={n.id} className={`pn-item${sel === n.id ? ' active' : ''}`} onClick={() => setSel(n.id)} role="button" tabIndex={0}
           onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSel(n.id); } }}>
-          <span><b>{n.title || '未命名'}</b><small>{new Date(n.ts || Date.now()).toLocaleString()}</small></span>
+          <span><b>{n.title || '未命名'}</b><small>{new Date(n.ts || Date.now()).toLocaleString()}</small>
+            {(n.tags || []).length > 0 && <small className="pn-tags">{n.tags.map(t => <i key={t}>#{t}</i>)}</small>}</span>
           <button className="icon-btn" aria-label={`删除 ${n.title || ''}`} title="删除（不可恢复）"
-            onClick={e => { e.stopPropagation(); if (window.confirm(`彻底删除隐私笔记「${n.title || '未命名'}」？加密内容无法找回。`)) { deleteNote(n.id); reload(); if (sel === n.id) setSel(null); } }}><Icon name="trash" size={13}/></button>
+            onClick={async e => { e.stopPropagation(); if (!window.confirm(`彻底删除隐私笔记「${n.title || '未命名'}」？加密内容无法找回。`)) return;
+              await deleteNote(n.id).catch(() => {}); reload(); if (sel === n.id) setSel(null); }}><Icon name="trash" size={13}/></button>
         </div>)}
-        {!notes.length && <p className="empty-line">还没有隐私笔记 <em>Nothing yet</em></p>}
+        {!shown.length && <p className="empty-line">{notes.length ? '没有匹配的笔记' : '还没有隐私笔记'} <em>Nothing yet</em></p>}
       </aside>
       {cur
         ? <section className="pn-editor glass" aria-label="隐私笔记编辑器">
             <input className="editor-title" value={title} onChange={e => setTitle(e.target.value)} placeholder="标题" aria-label="隐私笔记标题"/>
+            <input className="pn-tags-input" value={tagsInput} onChange={e => setTagsInput(e.target.value)}
+              placeholder="标签，用逗号分隔（例如：灵感, 日记）" aria-label="隐私笔记标签"/>
             <div className="editor-area"><textarea className="editor-input" value={body} onChange={e => setBody(e.target.value)}
               placeholder="写下只属于你的内容…（自动加密保存）" aria-label="隐私笔记正文"/></div>
-            <footer className="editor-foot"><span>{hint} · 内容加密后存本机与知识库附属数据</span></footer>
+            <footer className="editor-foot"><span>{hint} · 内容与标签加密后存本机与知识库附属数据</span></footer>
           </section>
         : <section className="pn-editor glass empty"><p className="empty-line">选一条笔记，或新建一条。<em>Pick or create.</em></p></section>}
     </div>

@@ -63,10 +63,10 @@ export function PomodoroFab({pomo, written, onStart, onStop}) {
     {open && <div className="pomo-panel glass" role="dialog" aria-label="番茄钟设置 Pomodoro settings">
       <header><b>番茄钟</b><em>Pomodoro</em><button className="icon-btn" onClick={() => setOpen(false)} aria-label="关闭设置"><Icon name="close" size={13}/></button></header>
       <div className="pomo-row">
-        <label>专注 <em>Focus</em><input type="number" min="1" max="180" value={set.focus}
-          onChange={e => save({focus: Math.max(1, Math.min(180, Math.round(Number(e.target.value) || 25)))})}/> 分</label>
-        <label>休息 <em>Break</em><input type="number" min="1" max="60" value={set.break}
-          onChange={e => save({break: Math.max(1, Math.min(60, Math.round(Number(e.target.value) || 5)))})}/> 分</label>
+        <label><span>专注 <em>Focus</em></span><span className="pomo-num"><input type="number" min="1" max="180" value={set.focus}
+          onChange={e => save({focus: Math.max(1, Math.min(180, Math.round(Number(e.target.value) || 25)))})}/> 分</span></label>
+        <label><span>休息 <em>Break</em></span><span className="pomo-num"><input type="number" min="1" max="60" value={set.break}
+          onChange={e => save({break: Math.max(1, Math.min(60, Math.round(Number(e.target.value) || 5)))})}/> 分</span></label>
       </div>
       <div className="pomo-presets" role="group" aria-label="专注时长快捷档">
         {[15, 25, 45, 60].map(m => <button key={m} className={`pill${set.focus === m ? ' primary' : ''}`} onClick={() => save({focus: m})}>{m} 分</button>)}

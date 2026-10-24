@@ -7,6 +7,25 @@
 // 节点 id 用「路径序号」（0、0-0、0-1-2…）：同结构多次解析 id 稳定——选中态 / 折叠态跨
 // 保存重解析不失效；结构变化（增删兄弟）只影响其后兄弟的序号，其余节点 id 原位保持。
 
+// —— 节点装饰：颜色标记与备注 ——
+// 为了随大纲文本一起往返（增删兄弟后仍跟随节点而不是位置），直接编码在行里：
+//   `{{gold}} 文本 :: 备注`。旧数据（只有 :: 备注）照常解析；颜色只认 NODE_COLORS 里的值。
+export const NODE_COLORS = ['gold', 'mint', 'lav', 'cyan', 'rose'];
+const COLOR_RE = /^\{\{([a-z]+)\}\}\s+/;
+export function parseNodeText(raw) {
+  let s = String(raw || '');
+  let color = '';
+  const m = s.match(COLOR_RE);
+  if (m && NODE_COLORS.includes(m[1])) { color = m[1]; s = s.slice(m[0].length); }
+  const i = s.indexOf('::');
+  return {label: (i >= 0 ? s.slice(0, i) : s).trim(), note: i >= 0 ? s.slice(i + 2).trim() : '', color};
+}
+export function formatNodeText(label, note, color) {
+  const head = (NODE_COLORS.includes(color) ? `{{${color}}} ` : '') + String(label || '').trim();
+  const n = String(note || '').trim().replace(/\s*\n\s*/g, ' ');
+  return n ? `${head} :: ${n}` : head;
+}
+
 export function outlineToTree(md) {
   const root = {id: '0', text: '中心主题', children: []};
   const stack = [{node: root, depth: -1}];
