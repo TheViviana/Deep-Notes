@@ -2,7 +2,7 @@
 // 加解密在 privateNotes.js（WebCrypto），密钥仅在解锁后驻内存，本页不触碰密码以外任何凭据。
 import React, {useEffect, useRef, useState} from 'react';
 import {Icon} from './icons';
-import {hasVault, isUnlocked, setupVault, unlock, relock, listNotes, upsertNote, deleteNote} from './privateNotes';
+import {hasVault, isUnlocked, setupVault, unlock, relock, listNotes, upsertNote, deleteNote, exportVault, importVault} from './privateNotes';
 
 function PasswordGate({mode, onDone, onBack}) {
   // mode: 'setup'（首次设置，输两遍） | 'unlock'
@@ -97,6 +97,32 @@ export function PrivateNotes() {
       <div className="page-head-actions">
         <button className="pill primary" onClick={createNote}><Icon name="plus" size={15}/>新建隐私笔记 <em>New</em></button>
         <button className="pill ghost" onClick={async () => { if (pending.current) { const p = pending.current; pending.current = null; await flushSave(p); } relock(); setUnlocked(false); setSel(null); }}><Icon name="close" size={14}/>上锁 <em>Lock</em></button>
+        <button className="pill ghost" title="导出加密备份文件（不含密码，导入后用同一密码解锁）· Export encrypted backup" onClick={() => {
+          try {
+            const text = exportVault();
+            const blob = new Blob([text], {type: 'application/json'});
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `Deep-Notes-隐私备份-${new Date().toISOString().slice(0, 10)}.json`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+          } catch (e) { window.showGlobalNotice?.(`备份导出失败：${e?.message || e}`); }
+        }}><Icon name="save" size={14}/>备份 <em>Backup</em></button>
+        <button className="pill ghost" title="导入加密备份文件（密文追加，同密码解锁）· Import encrypted backup" onClick={() => {
+          const inp = document.createElement('input');
+          inp.type = 'file';
+          inp.accept = '.json';
+          inp.onchange = async () => {
+            const f = inp.files?.[0];
+            if (!f) return;
+            try {
+              await importVault(await f.text());
+              reload();
+              window.showGlobalNotice?.('备份已导入 · Backup imported');
+            } catch (e) { window.showGlobalNotice?.(`导入失败：${e?.message || e}`); }
+          };
+          inp.click();
+        }}><Icon name="file" size={14}/>导入 <em>Import</em></button>
       </div>
     </header>
     <div className="pn-layout">

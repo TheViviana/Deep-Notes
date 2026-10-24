@@ -968,6 +968,7 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
     : [], [graph, selfGid]);
   // —— 阅读进度：预览模式打开时回到上次位置，滚动时节流记录百分比（关闭时兜底再存一次）——
   const pctRef = useRef(null);
+  const [progressBar, setProgressBar] = useState(null); // 0-1，底部进度条显示（独立于节流保存）
   useEffect(() => {
     if (mode !== 'preview' || !progressId) return;
     const box = previewRef.current;
@@ -980,11 +981,18 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
       sc = findScroller(b);
       const saved = readProgress(progressId);
       const span = scrollSpanOf(sc);
-      if (saved && saved.pct > 0.02 && span > 4) { sc.scrollTop = saved.pct * span; pctRef.current = saved.pct; }
-      else pctRef.current = 0;
+      if (saved && saved.pct > 0.02 && span > 4) { sc.scrollTop = saved.pct * span; pctRef.current = saved.pct; setProgressBar(saved.pct); }
+      else { pctRef.current = 0; setProgressBar(0); }
     }));
     let timer = null;
+    let rafPb = 0;
     const onScroll = () => {
+      // 进度条同步更新（rAF 包一层防高频 setState），保存仍走 600ms 节流
+      if (!rafPb) rafPb = requestAnimationFrame(() => {
+        rafPb = 0;
+        const s2 = sc;
+        if (s2) { const sp2 = scrollSpanOf(s2); if (sp2 > 4) setProgressBar(Math.min(1, Math.max(0, s2.scrollTop / sp2))); }
+      });
       if (timer) return;
       timer = setTimeout(() => {
         timer = null;
@@ -998,6 +1006,7 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
     window.addEventListener('scroll', onScroll, {passive: true, capture: true}); // 容器不定：捕获模式全监听
     box.addEventListener('scroll', onScroll, {passive: true});
     return () => {
+      if (rafPb) cancelAnimationFrame(rafPb);
       window.removeEventListener('scroll', onScroll, {capture: true});
       box.removeEventListener('scroll', onScroll);
       clearTimeout(timer);
@@ -1175,9 +1184,22 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
       {fx.menu}
       {fx.ask}
       {fx.toc}
-    </div> : <div className="editor-area hybrid">
+    </div> : <div className="editor-area hybrid" style={{position: 'relative'}}>
       <article className="md-preview" ref={previewRef} onClick={onPreviewClick} dangerouslySetInnerHTML={{__html: html}}/>
       {fx.toc}
+      {progressId && <div className="reading-progress" role="progressbar" aria-label={`阅读进度 ${Math.round((progressBar || 0) * 100)}%`}
+        title={`已读 ${Math.round((progressBar || 0) * 100)}% · 拖动快进`}>
+        <div className="reading-progress-track" onClick={e => {
+          const track = e.currentTarget;
+          const rect = track.getBoundingClientRect();
+          const pct = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+          const sc2 = previewRef.current ? findScroller(previewRef.current) : null;
+          if (sc2) { const span2 = scrollSpanOf(sc2); if (span2 > 4) { sc2.scrollTop = pct * span2; setProgressBar(pct); saveProgress(progressId, pct); } }
+        }}>
+          <div className="reading-progress-fill" style={{width: `${(progressBar || 0) * 100}%`}}/>
+        </div>
+        <span className="reading-progress-label">{Math.round((progressBar || 0) * 100)}%</span>
+      </div>}
     </div>}
     <footer className="av-foot">
       <span>{String(work.body || '').length} 字 <em>chars</em> · {wikiCount} 个双链 <em>wikilinks</em>{fx.badges(work.body).map((b, i) => <React.Fragment key={i}> · {b.zh} <em>{b.en}</em></React.Fragment>)} · 已保存到此浏览器 <em>Saved locally</em></span>

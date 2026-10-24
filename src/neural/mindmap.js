@@ -77,7 +77,7 @@ export function headingsToTree(title, body) {
 
 // —— 画布布局：经典横向树。叶子按序纵向排开，父节点纵坐标取首末可见子节点中点；x 按深度推进。
 // folded: {路径id: true}——折叠态持久化在导图记录里（不入大纲语法，往返不破坏文本）。
-const NODE_W = 150, NODE_GAP_X = 64, NODE_GAP_Y = 12;
+const NODE_W = 150, NODE_GAP_X = 64, NODE_GAP_Y = 30; // 30：同级节点之间留足间距，12 太挤
 export function layoutTree(root, folded) {
   const out = [];
   let cursorY = 0;

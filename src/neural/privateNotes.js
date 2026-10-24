@@ -95,3 +95,34 @@ export function deleteNote(id) {
     privateStore.write({...d, notes: (d?.notes || []).filter(n => n.id !== id)});
   });
 }
+
+// —— 备份导入导出：整个加密库（盐 + 校验串 + 全部密文条目）导出为 .json 文件，
+// 在另一台机器导入后用同一密码即可解锁。不包含密码本身。 ——
+export function exportVault() {
+  const d = privateStore.get();
+  if (!d?.salt) throw new Error('隐私区尚未启用');
+  return JSON.stringify({format: 'deepnotes-private-v1', salt: d.salt, check: d.check, notes: d.notes || []}, null, 2);
+}
+
+export function importVault(jsonText) {
+  return serialized(() => {
+    const v = JSON.parse(String(jsonText || ''));
+    if (v?.format !== 'deepnotes-private-v1' || !v?.salt || !v?.check) throw new Error('不是有效的隐私备份文件 · Invalid backup');
+    const cur = privateStore.get();
+    // 空库直接导入（salt + check 随备份，用备份的密码解锁）
+    if (!cur?.salt) {
+      privateStore.write({salt: v.salt, check: v.check, notes: v.notes || []});
+      return {adopted: true};
+    }
+    // 已有库 + 备份用同一密码生成（salt 相同）= 密文条目安全追加
+    if (v.salt === cur.salt) {
+      const existingIds = new Set((cur?.notes || []).map(n => n.id));
+      const merged = [...(cur?.notes || []), ...(v.notes || []).filter(n => !existingIds.has(n.id))];
+      privateStore.write({...cur, notes: merged});
+      return {merged: (v.notes || []).filter(n => !existingIds.has(n.id)).length};
+    }
+    // 已有库 + 备份用不同密码生成：密文无法用任何密码解密（当前密码对不上备份的盐），
+    // 必须拒绝而不是静默追加黑洞条目
+    throw new Error('备份与当前隐私区使用了不同密码，无法合并导入。请先清空当前隐私区（或换一个空库）再导入此备份 · Password mismatch');
+  });
+}
