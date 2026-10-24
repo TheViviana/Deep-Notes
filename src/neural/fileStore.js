@@ -4,6 +4,7 @@
 import {CONFIG, VAULT_ROOT_KEY, readVaultRoot} from '../config';
 import {clearAssetCache} from './images';
 import {isBlock} from './vaultRules';
+import {rememberVault} from './writingStats';
 
 const TARGET_KEY = CONFIG.storagePrefix + '-vault-target-v1';
 const api = () => window.deepnotes?.vault || null;
@@ -50,6 +51,7 @@ export async function setRoot(dir) {
     if (dir) localStorage.setItem(VAULT_ROOT_KEY, dir);
     else localStorage.removeItem(VAULT_ROOT_KEY);
   } catch {}
+  if (dir) rememberVault(dir); // 多库快速切换：记住最近连接过的库
   clearAssetCache(); // 换库后旧图片缓存全部作废
   clearTimeout(timer);
   timer = null;
@@ -489,9 +491,13 @@ export async function flush() {
   if (!v || !queue.size) return;
   const ops = [...queue.values()];
   queue.clear();
+  // move 先于 write / trash 执行：新条目常插到队首抢走原名，被挤到消歧名的旧条目必须先把
+  // 原名文件搬走、新条目随后才写原名——按入队序「写原名(新) → move 原名→消歧名」会把新条目
+  // 刚落盘的文件搬到消歧名再被旧内容覆盖，新条目从盘上蒸发（同名新建即触发）
+  const ordered = [...ops.filter(op => op.move), ...ops.filter(op => !op.move)];
   const failedOps = [];
   let requeued = false;
-  for (const op of ops) {
+  for (const op of ordered) {
     try {
       // 用 op 捕获时的根目录：即使中途切库，旧编辑也只写进旧库
       const root = op.root || getRoot();
@@ -629,7 +635,10 @@ export function flushSyncNow() {
   const pend = loadPending();
   if (pend.length) fillPending(pend); // 只填空位：队列里的新编辑优先于留底里的旧内容
   if (!queue.size) return;
-  const ops = [...queue.values()].map(op => ({...op, root: op.root || getRoot()}));
+  // 与 flush 同一口径：move 先于 write / trash，同名新建场景下新条目的文件不被搬走覆盖
+  const ops = [...queue.values()]
+    .map(op => ({...op, root: op.root || getRoot()}))
+    .sort((a, b) => (b.move ? 1 : 0) - (a.move ? 1 : 0));
   queue.clear();
   try {
     const res = v.flushSync(ops);
@@ -651,6 +660,9 @@ export function flushSyncNow() {
 // old 与 item 同引用（其他 kind 变化引发的全量 diff）时无需重写。
 // relMap 按「新数组」算出的消歧路径；oldRelMap 按「旧数组」算——旧路径必须用旧的消歧结果：
 // 若按新数组算，同名消歧短码会挪给别的条目，删除/重命名时错删同名文件、留下真孤儿。
+// op 带 iid（条目 id）：逐键改名时同一条目会连续入队 m:P0→P1+w:P1、m:P1→P2+w:P2…，
+// 入队即折叠成「最早路径 → 最新路径」的一次 move + 最新内容的一次 write——中间路径
+// 既不落盘也不被 move-first 排序复活成孤儿文件（同名新建顶掉旧条目的场景仍靠 move 优先）。
 export function queueSync(kind, item, old, relMap, oldRelMap) {
   const root = getRoot();
   if (!root || !api()) return;
@@ -659,11 +671,19 @@ export function queueSync(kind, item, old, relMap, oldRelMap) {
   const oldRel = old ? relOf(old, oldRelMap || relMap) : null;
   if (old === item && oldRel === newRel) return;
   if (!item) {
-    if (oldRel) enqueue({root, rel: oldRel, trash: true});
+    if (oldRel) enqueue({root, rel: oldRel, trash: true, iid: old?.id});
     return;
   }
-  if (old && oldRel && oldRel !== newRel) enqueue({root, from: oldRel, to: newRel, move: true});
-  if (newRel) enqueue({root, rel: newRel, body: serialize(kind, item)});
+  if (old && oldRel && oldRel !== newRel) {
+    let chainFrom = oldRel;
+    for (const [k, op] of queue) {
+      if (op.iid !== item.id) continue;
+      if (op.move) chainFrom = op.from; // 链头：这条条目最早一次排队的源路径
+      queue.delete(k); // 中间的 move / write 全部作废，由本次收敛后的操作取代
+    }
+    enqueue({root, from: chainFrom, to: newRel, move: true, iid: item.id});
+  }
+  if (newRel) enqueue({root, rel: newRel, body: serialize(kind, item), iid: item.id});
 }
 
 // —— 导入：桌面版选目录 → 主进程读文件 → 转成 parseVault 兼容的 File 桩 ——

@@ -6,7 +6,7 @@ mermaid.initialize({startOnLoad: false, securityLevel: 'loose', theme: 'dark'});
 import katex from 'katex';
 import 'katex/contrib/mhchem'; // 化学式 \ce{...}（注册进同一个 katex 实例）
 import 'katex/dist/katex.min.css';
-import {CONTENT} from './graph';
+import {CONTENT, nameIndex} from './graph';
 import {Icon} from './icons';
 import {useWikiComplete, WikiSuggest, resolveTarget, scrollToAnchor, headingMap} from './wiki';
 import {isVideoRef} from './images';
@@ -14,8 +14,77 @@ import {headingAt} from './vaultRules';
 import {useEditorEnhancers, usePlugins, useNetwork} from './plugins';
 import {isTranslatable, translateText} from './translate';
 import {serialize, exportFiles, safeName} from './fileStore';
+import {CONFIG} from '../config';
 
 marked.setOptions({gfm: true, breaks: false});
+
+// —— 阅读进度记忆：每篇内容记住预览模式读到的滚动百分比（百分比对内容增删天然容错）——
+// 只存本机 localStorage，最多记 500 篇（按时间淘汰最旧）；供 ArticleView 恢复与列表显示。
+const PROGRESS_KEY = CONFIG.storagePrefix + '-reading-progress-v1';
+export const readProgress = id => {
+  try { const v = JSON.parse(localStorage.getItem(PROGRESS_KEY))?.[id]; return v && Number.isFinite(v.pct) ? v : null; } catch { return null; }
+};
+function saveProgress(id, pct) {
+  try {
+    const all = JSON.parse(localStorage.getItem(PROGRESS_KEY)) || {};
+    all[id] = {pct, ts: Date.now()};
+    const entries = Object.entries(all).sort((a, b) => b[1].ts - a[1].ts).slice(0, 500);
+    localStorage.setItem(PROGRESS_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {} // 进度只是便利功能，存不进去不影响阅读
+}
+
+// 滚动容器探测：md-preview 通常自身滚动，但专注模式解除高度上限后滚动发生在祖先或页面
+const scrollSpanOf = el => (el ? el.scrollHeight - el.clientHeight : 0);
+function findScroller(box) {
+  if (scrollSpanOf(box) > 4) return box;
+  let p = box.parentElement;
+  while (p && p !== document.body && p !== document.documentElement && scrollSpanOf(p) <= 4) p = p.parentElement;
+  if (p && scrollSpanOf(p) > 4) return p;
+  return document.scrollingElement || document.documentElement;
+}
+
+// —— 文内查找（⌘F）：在渲染后的正文 DOM 里命中并高亮，支持上一个 / 下一个跳转 ——
+// 只处理文本节点，跳过沉浸式译文的 .md-trans 与已高亮的 mark；从后往前包 mark 不破坏偏移。
+function clearFindMarks(root) {
+  if (!root) return;
+  root.querySelectorAll('mark.av-find').forEach(m => { m.replaceWith(document.createTextNode(m.textContent)); });
+  root.normalize();
+}
+function markFindHits(root, q) {
+  if (!root || !q) return 0;
+  // 用带 i 标志的正则在原文上匹配：toLocaleLowerCase 会改变个别字符（如 İ）的长度，
+  // 坐标系错位会包错文字甚至越界抛错；matchAll 的偏移始终落在原文本坐标系
+  const rx = new RegExp(String(q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: n => {
+      const p = n.parentElement;
+      if (!p || /script|style|mark/i.test(p.tagName)) return NodeFilter.FILTER_REJECT;
+      if (p.closest('.md-trans')) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const tn of nodes) {
+    const positions = [...tn.data.matchAll(rx)].map(m => m.index);
+    for (let p = positions.length - 1; p >= 0; p--) { // 从后往前：先包后面的不影响前面偏移
+      try {
+        const range = document.createRange();
+        range.setStart(tn, positions[p]);
+        range.setEnd(tn, positions[p] + q.length);
+        const mark = document.createElement('mark');
+        mark.className = 'av-find';
+        range.surroundContents(mark);
+      } catch {} // 节点边界异常（极少见）跳过该处命中
+    }
+  }
+  return root.querySelectorAll('mark.av-find').length; // DOM 序即文档序
+}
+function focusFindHit(root, idx) {
+  const marks = root ? root.querySelectorAll('mark.av-find') : [];
+  marks.forEach((m, i) => m.classList.toggle('cur', i === idx));
+  marks[idx]?.scrollIntoView({block: 'center'});
+}
 
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 // 源码层已把 < 转成 &lt;；注入点还原后走完整 esc()，避免二次转义把实体显示成文字（esc(原文本) 幂等）
@@ -759,7 +828,7 @@ export function buildMirrorHtml(text, sel) {
   return out.join('');
 }
 
-export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent, onEditInfo, eyebrow = ['ARTICLE', '文章全文'], exportKind = 'works'}) {
+export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent, onEditInfo, eyebrow = ['ARTICLE', '文章全文'], exportKind = 'works', progressId = ''}) {
   const [mode, setMode] = useState('edit');
   // 专注模式：隐藏头部信息与页脚，正文区占满（浮层本身已全屏，这里是榨出最后的可视空间）
   const [focusMode, setFocusMode] = useState(false);
@@ -772,8 +841,97 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
     .map(n => ({id: n.id, title: n.path?.split('/').pop().replace(/\.md$/, '') || n.title, short: n.short || n.title, kind: n.kind})), [graph, work.id]);
   const heads = useMemo(() => headingMap(graph), [graph]);
   const wiki = useWikiComplete({titles, areaRef: area, onChange: body => onChange({body}), headings: heads});
-  const fx = useEditorEnhancers({area, value: work.body, onChange: body => onChange({body}), wiki, title: work.title, titles});
+  // preview / previewMode 传入后，大纲目录（toc 插件）在预览模式同样可用：
+  // 阅读区导入的书籍动辄几百页，没有目录无法快速跳章节
+  const fx = useEditorEnhancers({area, value: work.body, onChange: body => onChange({body}), wiki, title: work.title, titles, preview: previewRef, previewMode: mode === 'preview' ? 'preview' : 'edit', docId: exportKind + ':' + work.id});
   const html = useMemo(() => mode === 'preview' ? renderMarkdown(work.body) : '', [mode, work.body]);
+  // —— 文内查找（⌘F）：预览模式正文命中高亮 + 上一个 / 下一个 ——
+  const [find, setFind] = useState(null); // {q, total, idx} | null
+  const findInput = useRef(null);
+  const findTimer = useRef(null);
+  const runFind = q => {
+    clearTimeout(findTimer.current);
+    findTimer.current = setTimeout(() => {
+      const box = previewRef.current;
+      clearFindMarks(box);
+      if (!q) { setFind(f => (f ? {...f, total: 0, idx: -1} : f)); return; }
+      const total = markFindHits(box, q);
+      setFind(f => ({q, total, idx: total ? 0 : -1}));
+      if (total) focusFindHit(box, 0);
+    }, 180); // 长书逐键全量走查 DOM 不便宜，防抖一下
+  };
+  const stepFind = dir => {
+    if (!find?.total) return;
+    const idx = (find.idx + dir + find.total) % find.total;
+    setFind({...find, idx});
+    focusFindHit(previewRef.current, idx);
+  };
+  const closeFind = () => { clearTimeout(findTimer.current); clearFindMarks(previewRef.current); setFind(null); };
+  // ⌘F / Ctrl+F 唤出查找（焦点在窗口任意处均可）；编辑模式不拦截
+  useEffect(() => {
+    const onKey = e => {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'f' && mode === 'preview') {
+        e.preventDefault();
+        setFind(f => f ?? {q: '', total: 0, idx: -1});
+        setTimeout(() => findInput.current?.select(), 0);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [mode]);
+  // 正文重渲染（切预览 / 翻译插入等）后旧高亮随 innerHTML 消失，计数一并归零
+  useEffect(() => {
+    if (mode !== 'preview') return;
+    setFind(f => (f && (f.total || f.idx >= 0) ? {...f, total: 0, idx: -1} : f));
+  }, [html, mode]);
+  useEffect(() => () => { clearTimeout(findTimer.current); clearFindMarks(previewRef.current); }, []);
+  // —— 反向链接：哪些内容用 [[双链]] 指向了这篇（编辑时无需去分析栏翻找）——
+  const selfGid = useMemo(() => ['post', 'reading', 'archive', 'draft', 'note'].map(k => k + ':' + work.id).find(x => graph.index.has(x)) || null, [graph, work.id]);
+  const backlinks = useMemo(() => selfGid
+    ? graph.links.filter(l => l.kind === 'wiki' && l.t === selfGid).map(l => graph.index.get(l.s)).filter(Boolean)
+    : [], [graph, selfGid]);
+  // —— 阅读进度：预览模式打开时回到上次位置，滚动时节流记录百分比（关闭时兜底再存一次）——
+  const pctRef = useRef(null);
+  useEffect(() => {
+    if (mode !== 'preview' || !progressId) return;
+    const box = previewRef.current;
+    if (!box) return;
+    let sc = null;
+    // 等渲染完成再定位（Mermaid / 图片回填会改变高度，双 rAF 足够覆盖绝大多数排版）
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const b = previewRef.current;
+      if (!b) return;
+      sc = findScroller(b);
+      const saved = readProgress(progressId);
+      const span = scrollSpanOf(sc);
+      if (saved && saved.pct > 0.02 && span > 4) { sc.scrollTop = saved.pct * span; pctRef.current = saved.pct; }
+      else pctRef.current = 0;
+    }));
+    let timer = null;
+    const onScroll = () => {
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        const s = sc;
+        if (!s || !progressId) return;
+        const span = scrollSpanOf(s);
+        const pct = span > 4 ? Math.min(1, Math.max(0, s.scrollTop / span)) : 1;
+        if (pctRef.current !== pct) { pctRef.current = pct; saveProgress(progressId, pct); }
+      }, 600);
+    };
+    window.addEventListener('scroll', onScroll, {passive: true, capture: true}); // 容器不定：捕获模式全监听
+    box.addEventListener('scroll', onScroll, {passive: true});
+    return () => {
+      window.removeEventListener('scroll', onScroll, {capture: true});
+      box.removeEventListener('scroll', onScroll);
+      clearTimeout(timer);
+      // 关闭兜底：现读滚动容器最终位置（节流窗内的最后一段位移也要存上）
+      const s = sc || (previewRef.current ? findScroller(previewRef.current) : null);
+      const span = scrollSpanOf(s);
+      if (progressId && s && span > 4) saveProgress(progressId, Math.min(1, Math.max(0, s.scrollTop / span)));
+      else if (progressId && pctRef.current != null) saveProgress(progressId, pctRef.current);
+    };
+  }, [mode, progressId, work.id]);
   // Mermaid 图表：预览渲染后把 .mermaid 块画成 SVG（语法错误回退为普通代码块，不崩）
   useEffect(() => {
     if (mode !== 'preview' || !previewRef.current) return;
@@ -782,16 +940,8 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
     nodes.forEach(n => n.setAttribute('data-processed', '1'));
     mermaid.run({nodes}).catch(() => { /* 语法错误：保留原文代码块 */ });
   }, [mode, html]);
-  // 双链解析：与 graph.js 的 byName 规则一致（标题 / 路径文件名，忽略大小写）。
-  const byName = useMemo(() => {
-    const m = new Map();
-    for (const n of graph.nodes) {
-      if (!CONTENT.has(n.kind)) continue;
-      m.set(String(n.title).toLowerCase(), n.id);
-      if (n.path) m.set(n.path.split('/').pop().replace(/\.md$/, '').toLowerCase(), n.id);
-    }
-    return m;
-  }, [graph]);
+  // 双链解析：与 graph.js 的 byName 规则一致（nameIndex 统一实现）。
+  const byName = useMemo(() => nameIndex(graph.nodes), [graph]);
   const wikiCount = (String(work.body).match(/\[\[([^\]\n]+)\]\]/g) || []).length;
   // —— 沉浸式翻译（immersive 插件 + 顶栏联网开关，二者都打开才发请求） ——
   const [trans, setTrans] = useState({phase: 'idle', done: 0, total: 0}); // idle | running | done
@@ -901,6 +1051,23 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
         <button className="icon-btn" onClick={onClose} aria-label="收起文章全文"><Icon name="close" size={15}/></button>
       </div>
     </header>
+    {mode === 'preview' && find && <div className="av-findbar" role="search" aria-label="文内查找 Find in document">
+      <Icon name="search" size={13}/>
+      <input ref={findInput} value={find.q} placeholder="文内查找 · Find in document（Enter 下一个 / Shift+Enter 上一个）"
+        onChange={e => { setFind({...find, q: e.target.value}); runFind(e.target.value); }}
+        onKeyDown={e => { if (e.isComposing) return; if (e.key === 'Enter') { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); } else if (e.key === 'Escape') closeFind(); }}/>
+      <span className="av-find-count">{find.total ? `${find.idx + 1}/${find.total}` : find.q ? '无匹配' : ''}</span>
+      <button className="icon-btn av-find-prev" onClick={() => stepFind(-1)} disabled={find.total < 2} aria-label="上一个命中"><Icon name="chevron" size={13}/></button>
+      <button className="icon-btn" onClick={() => stepFind(1)} disabled={find.total < 2} aria-label="下一个命中"><Icon name="chevron" size={13}/></button>
+      <button className="icon-btn" onClick={closeFind} aria-label="关闭查找"><Icon name="close" size={13}/></button>
+    </div>}
+    {backlinks.length > 0 && <div className="av-backlinks" role="group" aria-label={`反向链接 ${backlinks.length} 条 Backlinks`}>
+      <span className="av-bl-label"><Icon name="back" size={12}/>反链 <em>{backlinks.length}</em></span>
+      <div className="chip-row">{backlinks.slice(0, 10).map(n => n && <button key={n.id} className="chip" style={{'--kc': 'var(--gold)'}}
+        title={`打开《${n.title}》`} onClick={() => (onOpenContent || onGo)(n.id)}>{n.short || n.title}</button>)}
+        {backlinks.length > 10 && <span className="chip static">+{backlinks.length - 10}</span>}
+      </div>
+    </div>}
     {mode === 'edit' && fx.bar}
     {mode === 'edit' ? <div className="editor-area hybrid">
       <LineMirror text={work.body} taRef={area}/>
@@ -913,7 +1080,10 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
       {fx.menu}
       {fx.ask}
       {fx.toc}
-    </div> : <article className="md-preview" ref={previewRef} onClick={onPreviewClick} dangerouslySetInnerHTML={{__html: html}}/>}
+    </div> : <div className="editor-area hybrid">
+      <article className="md-preview" ref={previewRef} onClick={onPreviewClick} dangerouslySetInnerHTML={{__html: html}}/>
+      {fx.toc}
+    </div>}
     <footer className="av-foot">
       <span>{String(work.body || '').length} 字 <em>chars</em> · {wikiCount} 个双链 <em>wikilinks</em>{fx.badges(work.body).map((b, i) => <React.Fragment key={i}> · {b.zh} <em>{b.en}</em></React.Fragment>)} · 已保存到此浏览器 <em>Saved locally</em></span>
       <span className="av-hint"><Icon name="pulse" size={12}/>双链与标签会自动汇入图谱 <em>Links feed the graph</em></span>

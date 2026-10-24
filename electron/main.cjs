@@ -126,10 +126,14 @@ const SKIP = new Set(['.obsidian', '.trash', '.git', '.DS_Store', 'node_modules'
 // 临时文件以 . 开头：readMd 与 vault:asset 都会跳过，永远不会被当成笔记读出来。
 async function atomicWrite(full, body) {
   const tmp = path.join(path.dirname(full), '.' + path.basename(full) + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8));
+  // 覆盖已有文件时沿用原权限：临时文件默认 0644，rename 换 inode 后用户手动收紧的
+  // 权限（如 chmod 600）会被静默放宽
+  let mode = 0o666;
+  try { mode = (await fsp.stat(full)).mode & 0o777; } catch {}
   // open + sync + close：数据落盘后才 rename（断电也不会出现「rename 完成但内容还在页缓存」的空文件）；
   // close 放 finally——写失败也不能漏关句柄，fd 泄漏积多了进程再也打不开文件
   try {
-    const fh = await fsp.open(tmp, 'w');
+    const fh = await fsp.open(tmp, 'w', mode);
     try {
       await fh.writeFile(typeof body === 'string' ? String(body ?? '') : (body ?? Buffer.alloc(0)), typeof body === 'string' ? 'utf8' : undefined);
       await fh.sync();
@@ -191,11 +195,22 @@ async function pruneSnapshots(dir, now, isRoot = true) { // 超期清理 + 空�
 // 不能按字符串排——「-」排在「.」前面会把 stem_123-1.md 当成比 stem_123.md 更旧/更新。
 const snapNum = n => { const m = n.match(/_(\d{13,})(?:-(\d+))?\.md$/); return m ? [+m[1], +(m[2] || 0)] : [0, 0]; };
 const sortSnapNames = names => names.sort((a, b) => { const [ta, ia] = snapNum(a), [tb, ib] = snapNum(b); return ta - tb || ia - ib; });
-async function capSnapshots(dir) { // 单个文件的快照超额删最旧（文件名带毫秒时间戳前缀，天然可排序）
+async function capSnapshots(dir) { // 单个文件的快照超额删最旧：按原文件（stem）分组，每组最多 SNAP_KEEP 份
+  // 不能按目录合并计数：快照目录镜像库目录，同目录里所有笔记的快照混在一起，
+  // 按目录限额会让同目录第 31 篇笔记的首次快照挤掉最早那篇的唯一快照
   let names = [];
   try { names = sortSnapNames((await fsp.readdir(dir)).filter(n => n.endsWith('.md'))); } catch { return; }
-  if (names.length <= SNAP_KEEP) return;
-  for (const n of names.slice(0, names.length - SNAP_KEEP)) await fsp.rm(path.join(dir, n), { force: true }).catch(() => {});
+  const stemOf = n => n.replace(/_\d{13,}(?:-\d+)?\.md$/, '');
+  const perStem = new Map();
+  for (const n of names) {
+    const s = stemOf(n);
+    if (!perStem.has(s)) perStem.set(s, []);
+    perStem.get(s).push(n); // names 已按时间升序，组内天然有序
+  }
+  for (const arr of perStem.values()) {
+    if (arr.length <= SNAP_KEEP) continue;
+    for (const n of arr.slice(0, arr.length - SNAP_KEEP)) await fsp.rm(path.join(dir, n), { force: true }).catch(() => {});
+  }
 }
 function uniqueSnapPath(dir, stem, ts) { // 审计 B5：同毫秒多次写同一文件时追加递增后缀，避免互相覆盖
   let idx = 0;
@@ -372,7 +387,16 @@ ipcMain.handle('vault:move', async (_e, { root, from, to }) => {
     if (srcExists) {
       let targetExists = false;
       try { targetExists = !!(await fsp.stat(b)); } catch {}
-      if (targetExists) return { ok: false, error: '目标已存在，拒绝覆盖' };
+      if (targetExists) {
+        // 大小写不敏感文件系统（macOS APFS / Windows NTFS）上「仅改大小写」的改名会 stat 到源文件本身，
+        // 按「目标已存在」误拒会让这类改名永远失败——同一 inode（或同一路径）时放行 rename。
+        // (ino || dev) 防 Windows 等平台两值恒 0 时任意两个文件都被判成同一文件
+        let sameFile = a === b;
+        if (!sameFile) {
+          try { const sa = await fsp.stat(a), sb = await fsp.stat(b); sameFile = sa.ino === sb.ino && sa.dev === sb.dev && !!(sa.ino || sa.dev); } catch {}
+        }
+        if (!sameFile) return { ok: false, error: '目标已存在，拒绝覆盖' };
+      }
     }
     await fsp.mkdir(path.dirname(b), { recursive: true });
     await fsp.rename(a, b).catch(err => { if (err?.code === 'ENOENT') return; throw err; }); // 源本就不存在视为已移走
@@ -464,7 +488,14 @@ ipcMain.on('vault:flush-sync', (e, ops) => {
         if (srcExists) {
           let exists = false;
           try { exists = fs.existsSync(b); } catch {}
-          if (exists) { failed.push(rel); continue; }
+          if (exists) {
+            // 与 vault:move 同一口径：大小写不敏感 FS 上的纯大小写改名（同一 inode）放行
+            let sameFile = a === b;
+            if (!sameFile) {
+              try { const sa = fs.statSync(a), sb = fs.statSync(b); sameFile = sa.ino === sb.ino && sa.dev === sb.dev && !!(sa.ino || sa.dev); } catch {}
+            }
+            if (!sameFile) { failed.push(rel); continue; }
+          }
         }
         fs.mkdirSync(path.dirname(b), { recursive: true });
         try { fs.renameSync(a, b); } catch (err) { if (err?.code !== 'ENOENT') throw err; }

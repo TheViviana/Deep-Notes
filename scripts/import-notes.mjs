@@ -56,11 +56,14 @@ const maxWorks = opt.maxWorks || Infinity, maxNotes = opt.maxNotes || Infinity;
 // —— 读取 Markdown ——
 const SKIP = new Set(['.obsidian', '.trash', '.git', 'node_modules', '.DS_Store']);
 function walk(dir, out = []) {
-  for (const name of readdirSync(dir)) {
-    if (SKIP.has(name) || name.startsWith('.')) continue;
-    const p = join(dir, name), st = statSync(p);
-    if (st.isDirectory()) walk(p, out);
-    else if (name.toLowerCase().endsWith('.md')) out.push(p);
+  for (const e of readdirSync(dir, {withFileTypes: true})) {
+    if (SKIP.has(e.name) || e.name.startsWith('.')) continue;
+    // 符号链接一律跳过（与主进程 readMd 同口径）：跟随链接会把库外内容静默导入
+    // （如 ln -s ~/Documents docs），自引用链接更会无限递归直到路径超长崩溃
+    if (e.isSymbolicLink()) continue;
+    const p = join(dir, e.name);
+    if (e.isDirectory()) walk(p, out);
+    else if (e.isFile() && e.name.toLowerCase().endsWith('.md')) out.push(p);
   }
   return out;
 }
@@ -128,7 +131,9 @@ const notes = bucket.methods.slice(0, maxNotes).map(x => {
   // 方法笔记 path 由 notePath 统一生成（与软件内导入同一份规则）：分类根之后的子目录全链保留，
   // 三层以上不再压平——不同子目录里的同名文件不再互相覆盖；没有分类根（--all-as-notes）时
   // 跳过库内第一层目录，与软件内 dirs.slice(1) 对齐。
-  const rootName = (x.root > 0 ? parts[x.root - 1] : parts[0]) || '';
+  // 文件直接在库根（parts 只有文件名一段）时没有第一层目录可跳：rootName 取空，
+  // 与软件内导入（dirs 为空 → rootName ''）同口径，否则文件名会被当成分类目录双层嵌套
+  const rootName = (x.root > 0 ? parts[x.root - 1] : (parts.length > 1 ? parts[0] : '')) || '';
   const rest = x.root > 0 ? parts.slice(x.root, parts.length - 1) : parts.slice(1, parts.length - 1);
   return {fm: x.fm, rel: x.rel, title: x.title, path: notePath(rootName, rest, parts[parts.length - 1]), body: clean(x.body),
     updatedAt: String(pick(x.fm, ['updated']) || '') || undefined, keep: keepOf(x.fm, 'notes')};

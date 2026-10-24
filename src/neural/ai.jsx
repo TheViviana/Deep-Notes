@@ -6,18 +6,8 @@ import {Icon} from './icons';
 import {CONFIG} from '../config';
 import {isNetworkOn, useNetwork, usePlugins} from './plugins';
 import {renderMarkdown} from './ArticleView.jsx';
-import {CONTENT} from './graph';
-
-// 双链点击解析：与 graph.js 的 byName 规则一致（标题 / 路径文件名，忽略大小写）。
-function nameIndex(graph) {
-  const m = new Map();
-  for (const n of graph.nodes) {
-    if (!CONTENT.has(n.kind)) continue;
-    m.set(String(n.title).toLowerCase(), n.id);
-    if (n.path) m.set(n.path.split('/').pop().replace(/\.md$/, '').toLowerCase(), n.id);
-  }
-  return m;
-}
+import {CONTENT, nameIndex} from './graph';
+import {aiMemory, aiPersona, saveAiMemory, forgetAiMemory, aiMemoryPrompt} from './conceptStore';
 
 // —— 服务商预设：baseUrl 与常用模型来自各家公开文档；custom 允许接任意 OpenAI 兼容端点 ——
 export const AI_PROVIDERS = [
@@ -174,6 +164,10 @@ const AI_TOOLS = [
     id: {type: 'string'}, title: {type: 'string'}, body: {type: 'string'}}, required: ['id']}}},
   {type: 'function', function: {name: 'delete_file', description: '删除文件；执行时软件会向用户弹出确认框', parameters: {type: 'object', properties: {
     id: {type: 'string'}}, required: ['id']}}},
+  {type: 'function', function: {name: 'save_memory', description: '把需要跨会话记住的用户偏好、设定或事实存进本地长期记忆（之后的对话会自动携带）', parameters: {type: 'object', properties: {
+    text: {type: 'string', description: '要记住的一条内容（一句话到一段话）'}}, required: ['text']}}},
+  {type: 'function', function: {name: 'forget_memory', description: '按 id 删除一条长期记忆', parameters: {type: 'object', properties: {
+    id: {type: 'string'}}, required: ['id']}}},
 ];
 async function runTool(name, args = {}) {
   const ops = aiRuntime.ops;
@@ -185,6 +179,8 @@ async function runTool(name, args = {}) {
     if (name === 'create_file') return ops.create(String(args.kind || ''), args);
     if (name === 'update_file') return ops.update(String(args.id || ''), args);
     if (name === 'delete_file') return ops.remove(String(args.id || ''));
+    if (name === 'save_memory') { const e = saveAiMemory(String(args.text || '')); return e ? {ok: true, id: e.id} : {error: '内容为空'}; }
+    if (name === 'forget_memory') { forgetAiMemory(String(args.id || '')); return {ok: true}; }
     return {error: `未知工具 ${name}`};
   } catch (e) { return {error: String(e?.message || e)}; }
 }
@@ -234,11 +230,16 @@ export function useAiDraft() {
 export const openAiPanel = () => window.dispatchEvent(new CustomEvent('dn-ai-open'));
 
 function buildSystem(ctx = {}) {
+  const persona = aiPersona.get();
+  const personaText = persona?.enabled ? String(persona.text || '').trim().slice(0, 2000) : ''; // 人设限长：超长人设会撑爆每次请求的上下文
+  const mem = aiMemoryPrompt();
   const lines = [
     '你是「创作神经网络看板」笔记软件内置的 AI 助手。用户的全部数据（文章、草稿、方法笔记、选题）都保存在本机。',
+    personaText ? `用户为你设定的人设（回答风格与立场优先遵循它）：${personaText}` : '',
     `当前界面：${ctx.page || '未知'}${ctx.title ? `；用户正在查看/编辑《${ctx.title}》` : ''}${ctx.excerpt ? `，正文节选：「${ctx.excerpt}」` : ''}。`,
+    mem ? `你的本地长期记忆（跨会话保留；新的重要偏好/事实可用 save_memory 工具追加）：\n${mem}` : '',
     ctx.brief || '',
-    '规则：用用户的语言（默认简体中文）简洁作答；需要读写文件时先 list_files / read_file 了解现状再动手；update_file 是全量覆盖正文，改动前先读取原文；delete_file 会向用户弹出确认框；不确定时先问用户，不要编造文件 id。',
+    '规则：用用户的语言（默认简体中文）简洁作答；需要读写文件时先 list_files / read_file 了解现状再动手；update_file 是全量覆盖正文，改动前先读取原文；delete_file 会向用户弹出确认框；写长文前先读长期记忆与相关旧文，保持人设与既往设定一致；不确定时先问用户，不要编造文件 id。',
   ];
   return lines.filter(Boolean).join('\n');
 }
@@ -252,7 +253,8 @@ export async function aiSend(text) {
   chatErr = ''; notify(errSubs);
   pushMsg({role: 'user', content: q});
   const sys = {role: 'system', content: buildSystem(typeof aiRuntime.getContext === 'function' ? aiRuntime.getContext() : {})};
-  const convo = chatLog.filter(m => m.role === 'user' || m.role === 'assistant').slice(-16).map(m => ({role: m.role, content: m.content}));
+  // 上下文放宽：长文写作需要更多历史（24 轮）与更长的工具结果（12k 字符）
+  const convo = chatLog.filter(m => m.role === 'user' || m.role === 'assistant').slice(-24).map(m => ({role: m.role, content: m.content}));
   busy = true; notify(busySubs);
   try {
     for (let round = 0; round < 6; round++) {
@@ -266,7 +268,7 @@ export async function aiSend(text) {
           try { args = JSON.parse(tc.function?.arguments || '{}'); } catch {}
           const out = await runTool(tc.function?.name, args);
           pushMsg({role: 'op', text: opBrief(tc.function?.name, args, out)});
-          convo.push({role: 'tool', tool_call_id: tc.id, content: JSON.stringify(out).slice(0, 6000)});
+          convo.push({role: 'tool', tool_call_id: tc.id, content: JSON.stringify(out).slice(0, 12000)});
         }
         continue;
       }
@@ -289,6 +291,8 @@ function opBrief(name, args, out) {
   if (name === 'create_file') return out?.error ? `创建失败：${out.error}` : `新建了${t || '文件'}（${out?.id || ''}）`;
   if (name === 'update_file') return out?.error ? `更新失败：${out.error}` : `更新了《${out?.title || args?.id || ''}》`;
   if (name === 'delete_file') return out?.error ? `删除失败：${out.error}` : `删除了《${out?.title || args?.id || ''}》`;
+  if (name === 'save_memory') return out?.error ? '记忆保存失败' : `记住了：${String(args?.text || '').slice(0, 50)}${String(args?.text || '').length > 50 ? '…' : ''}`;
+  if (name === 'forget_memory') return '删除了一条长期记忆';
   return name;
 }
 
@@ -299,6 +303,28 @@ export function AiChip() {
   const {on: net} = useNetwork();
   const [open, setOpen] = useState(false);
   const wrap = useRef(null);
+  // 人设与长期记忆：本地保存（连库时随 meta.json 走），随时启停
+  const persona = aiPersona.use();
+  const memory = aiMemory.use();
+  const memList = Array.isArray(memory.list) ? memory.list : [];
+  const [personaDraft, setPersonaDraft] = useState(null); // null = 未编辑，显示已存版本
+  const [memOpen, setMemOpen] = useState(false);
+  const [memDraft, setMemDraft] = useState('');
+  const mdImport = useRef(null);
+  const onImportMd = async e => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    try {
+      const text = await f.text();
+      // 按标题切块入库（无标题整篇作一条，超长由 saveAiMemory 截断）
+      const chunks = text.split(/\n(?=#{1,3} )/).map(s => s.trim()).filter(s => s.length > 10);
+      let n = 0;
+      if (chunks.length) for (const c of chunks.slice(0, 50)) { saveAiMemory(c); n += 1; }
+      else { saveAiMemory(text); n = 1; }
+      window.showGlobalNotice?.(`已把 ${n} 条内容存入 AI 长期记忆 · ${n} memories imported`);
+    } catch (err) { window.showGlobalNotice?.(`导入失败：${err?.message || err}`); }
+  };
   useEffect(() => {
     if (!open) return;
     const away = e => { if (!wrap.current?.contains(e.target)) setOpen(false); };
@@ -352,6 +378,40 @@ export function AiChip() {
       {p.id === 'custom' && <div className="ai-row"><span className="ai-label">Base URL</span>
         <input value={cfg.baseUrl || ''} placeholder="https://…/v1" aria-label="Base URL"
           onChange={e => setCfg({baseUrl: e.target.value})}/></div>}
+      <div className="ai-row"><span className="ai-label">人设 <em>Persona</em></span>
+        <div className="ai-persona">
+          <label className="ai-persona-toggle" title="启用后 AI 的回答风格与立场优先遵循人设">
+            <input type="checkbox" checked={!!persona?.enabled} onChange={e => aiPersona.write({...persona, enabled: e.target.checked})}/>
+            {persona?.enabled ? '已启用' : '已停用'}
+          </label>
+          <textarea rows={2} value={personaDraft ?? String(persona?.text || '')} aria-label="AI 人设"
+            placeholder="例如：你是我的写作教练，风格犀利直接，多给例子，少客套…"
+            onChange={e => setPersonaDraft(e.target.value)}/>
+          <button type="button" className="pill" disabled={personaDraft == null}
+            onClick={() => { aiPersona.write({...persona, enabled: persona?.enabled ?? true, text: (personaDraft || '').slice(0, 2000)}); setPersonaDraft(null); }}>保存人设 <em>Save</em></button>
+        </div>
+      </div>
+      <div className="ai-row"><span className="ai-label">长期记忆 <em>Memory</em></span>
+        <div className="ai-mem">
+          <button type="button" className="pill" onClick={() => setMemOpen(o => !o)}>{memOpen ? '收起' : `管理（${memList.length} 条）`}</button>
+          <button type="button" className="pill" onClick={() => mdImport.current?.click()} title="把一个 .md 的章节逐条存入长期记忆">导入 .md <em>Import</em></button>
+          <input ref={mdImport} type="file" accept=".md,.markdown,.txt" hidden onChange={onImportMd} aria-hidden="true"/>
+          {memOpen && <div className="ai-mem-list">
+            {[...memList].reverse().slice(0, 12).map(m => <div key={m.id} className="ai-mem-item">
+              <span>{String(m.text || '').slice(0, 90)}{String(m.text || '').length > 90 ? '…' : ''}</span>
+              <button type="button" aria-label={`删除记忆 ${m.id}`} title="删除" onClick={() => forgetAiMemory(m.id)}>×</button>
+            </div>)}
+            {!memList.length && <p className="ai-mem-empty">还没有记忆。AI 对话中让它「记住这个」会自动存入；也可在下面手动添加，或导入 .md。</p>}
+            <div className="ai-mem-add">
+              <input value={memDraft} placeholder="手动添加一条记忆…" aria-label="手动添加记忆"
+                onChange={e => setMemDraft(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && !e.isComposing && memDraft.trim()) { saveAiMemory(memDraft); setMemDraft(''); } }}/>
+              <button type="button" className="send" disabled={!memDraft.trim()} aria-label="添加记忆"
+                onClick={() => { if (memDraft.trim()) { saveAiMemory(memDraft); setMemDraft(''); } }}>＋</button>
+            </div>
+          </div>}
+        </div>
+      </div>
       <p className="ai-note" role="status">
         {!net ? '顶栏联网开关未打开，AI 不会发起任何请求 · Network switch is off'
           : secureWarn ? '本机安全存储不可用，密钥本次只留在内存、没有保存，重启后需重填 · Secure storage unavailable'
@@ -416,7 +476,7 @@ export function AiInput({placeholder}) {
 export function AiDockChat({onClose, graph, onGo}) {
   const [cfg] = useAiConfig();
   const p = providerOf(cfg);
-  const byName = useMemo(() => (graph ? nameIndex(graph) : null), [graph]);
+  const byName = useMemo(() => (graph ? nameIndex(graph.nodes) : null), [graph]);
   const jump = name => {
     const id = byName && byName.get(String(name).toLowerCase());
     if (id && onGo) onGo(id);

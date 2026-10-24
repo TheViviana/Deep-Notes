@@ -57,7 +57,8 @@ function check(m, label) {
   }
   if (new Set(m.posts.map(p => p.id)).size !== m.posts.length) errs.push('作品 id 有重复');
   // path 收紧：必须是「05-方法库 methods/<子目录…>/<非空文件名>.md」，至少一级子目录、以 .md 结尾
-  for (const n of m.notes) if (!/^05-方法库 methods\/[^/]+(\/[^/]+)+\.md$/.test(n.path || '')) errs.push(`笔记 path 格式不对：${n.title}`);
+  // （/i：CLI 与主进程都接受大写 .MD，verify 不能因此误报）
+  for (const n of m.notes) if (!/^05-方法库 methods\/[^/]+(\/[^/]+)+\.md$/i.test(n.path || '')) errs.push(`笔记 path 格式不对：${n.title}`);
   // 选题 id：示例数据用数字，导入的 .md 用「idea-<散列>」字符串（同一选题增删文件后不再漂移），两者都合法
   for (const i of m.seedIdeas) if (!(typeof i.id === 'number' || (typeof i.id === 'string' && i.id)) || !['待写', '待扩展', '已转草稿'].includes(i.status)) errs.push(`选题须有 id（数字或字符串）、status 须为 待写/待扩展/已转草稿：${i.title}`);
   if (new Set(m.seedIdeas.map(i => i.id)).size !== m.seedIdeas.length) errs.push('选题 id 有重复');

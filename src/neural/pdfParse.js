@@ -32,7 +32,8 @@ export async function pdfToMarkdown(file) {
         pages.push(out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim());
       } finally {
         // 每页取完立即释放：500 页的页面资源不再累积到 pdf.destroy()
-        await page.cleanup().catch(() => {});
+        // pdfjs v6 的 page.cleanup() 返回布尔值而非 Promise，不能 .catch（那样第一页就抛 TypeError）
+        try { await page.cleanup(); } catch {}
       }
     }
     const title = String(meta?.info?.Title || '').trim();

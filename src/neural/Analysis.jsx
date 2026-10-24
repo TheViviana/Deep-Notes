@@ -1,5 +1,5 @@
 import React, {useEffect, useMemo, useState} from 'react';
-import {KINDS, CONTENT, MODULES, neighbors, latent, askGraph, LINK_KINDS, LINK_EN} from './graph';
+import {KINDS, CONTENT, MODULES, nameIndex, neighbors, latent, askGraph, LINK_KINDS, LINK_EN} from './graph';
 import {Icon} from './icons';
 import {conceptExtras, setConceptExtra} from './conceptStore';
 
@@ -64,22 +64,16 @@ function parseWikis(body) {
 }
 const patchBody = (body, raw, next) => { const i = body.indexOf(raw); return i < 0 ? body : body.slice(0, i) + next + body.slice(i + raw.length); };
 
-function WikiEditor({graph, node, onBody, onNoteTitle, onAction}) {
+function WikiEditor({graph, node, onBody, onNoteTitle, onAction, onGo}) {
   const body = bodyOf(node);
   const wikis = parseWikis(body);
   const [mode, setMode] = useState(null); // {type:'add'} | {type:'rename', raw}
   const [val, setVal] = useState('');
   const [titleEditing, setTitleEditing] = useState(false);
   const [titleVal, setTitleVal] = useState('');
-  // 名称 → 节点 id：与图谱内 byName 同规则（标题 + path 文件名，小写）。
-  const nameMap = useMemo(() => {
-    const m = new Map();
-    for (const n of graph.nodes) {
-      m.set(String(n.title).toLowerCase(), n.id);
-      if (n.path) m.set(n.path.split('/').pop().replace(/\.md$/, '').toLowerCase(), n.id);
-    }
-    return m;
-  }, [graph]);
+  // 名称 → 节点 id：与图谱内 byName 同规则（nameIndex 统一实现；CONTENT 过滤后
+  // [[作品库]] 这类目录名不再误解析到目录节点）
+  const nameMap = useMemo(() => nameIndex(graph.nodes), [graph]);
   const resolve = name => nameMap.get(name.toLowerCase());
   const save = next => { onBody(node.kind, node.id, next); setMode(null); setVal(''); };
   const addWiki = () => {
@@ -118,7 +112,7 @@ function WikiEditor({graph, node, onBody, onNoteTitle, onAction}) {
         const tNode = t0 && graph.index.get(t0);
         const hit = tNode && tNode.kind !== 'ghost';
         return <span className="le-row" key={i}>
-          <button className={`le-name ${hit ? '' : 'le-ghost'}`} title={hit ? '在图谱中打开' : '未创建——点击改名，或用右侧按钮一键创建'} onClick={() => { if (hit) onGo(t0); else { setMode({type: 'rename', raw: w.raw}); setVal(w.target); } }}>{w.target}{!hit && <em>未创建</em>}{dup > 1 && <em>×{dup}</em>}</button>
+          <button className={`le-name ${hit ? '' : 'le-ghost'}`} title={hit ? '在图谱中打开' : '未创建——点击改名，或用右侧按钮一键创建'} onClick={() => { if (hit) { if (onGo) onGo(t0); } else { setMode({type: 'rename', raw: w.raw}); setVal(w.target); } }}>{w.target}{!hit && <em>未创建</em>}{dup > 1 && <em>×{dup}</em>}</button>
           {w.alias && <span className="le-alias">「{w.alias}」</span>}
           <span className="le-ops">
             {!hit && <>
@@ -195,7 +189,7 @@ function Links({graph, node, onGo, onBody, onNoteTitle, onConcept, concepts, onA
       <p><i>{arrow}</i>{zh} <em>{en}</em><b>{list.length}</b></p>
       <div className="chip-row">{list.slice(0, 14).map(l => <Chip key={l.id} graph={graph} id={l.id} onGo={onGo} sub={sub(l)}/>)}{list.length > 14 && <span className="chip static more">+{list.length - 14}</span>}</div>
     </div>)}
-    {(node.kind === 'post' || node.kind === 'note' || node.kind === 'draft') && onBody && <WikiEditor graph={graph} node={node} onBody={onBody} onNoteTitle={onNoteTitle} onAction={onAction}/>}
+    {(node.kind === 'post' || node.kind === 'note' || node.kind === 'draft') && onBody && <WikiEditor graph={graph} node={node} onBody={onBody} onNoteTitle={onNoteTitle} onAction={onAction} onGo={onGo}/>}
     {node.kind === 'concept' && onConcept && <ConceptEditor node={node} concepts={concepts} onConcept={onConcept}/>}
   </section>;
 }

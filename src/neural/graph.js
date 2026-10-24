@@ -51,6 +51,19 @@ export const MODULES = [
 ];
 export const moduleOf = node => MODULES.find(m => m.kind === node?.kind) || null;
 
+// 名称 → 内容节点 id：标题与路径文件名（去 .md）双写、忽略大小写。
+// 图谱双链解析、各页双链点击、补全、AI 面板共用的同一套规则——此前 6 处各写一份，
+// 口径已经分叉（有的版本没过滤目录节点，[[作品库]] 会误解析到目录而非幽灵节点）。
+export function nameIndex(nodes) {
+  const m = new Map();
+  for (const n of nodes) {
+    if (!CONTENT.has(n.kind)) continue;
+    m.set(String(n.title).toLowerCase(), n.id);
+    if (n.path) m.set(n.path.split('/').pop().replace(/\.md$/, '').toLowerCase(), n.id);
+  }
+  return m;
+}
+
 export const cleanTitle = t => String(t || '').replace(/^\d+[A-Z]?-☑️/, '').replace(/^\d+-/, '').replace(/_/g, ' · ');
 export function buildGraph({works = [], notes = notesRaw, ideas = [], drafts = [], readings = [], archives = [], concepts} = {}) {
   const nodes = new Map();
@@ -119,11 +132,7 @@ export function buildGraph({works = [], notes = notesRaw, ideas = [], drafts = [
   }
 
   // [[双链]]：文章、方法库笔记与草稿正文。能对应到现有内容即为实链，否则是「未创建」笔记。
-  const byName = new Map();
-  for (const n of nodes.values()) if (CONTENT.has(n.kind)) {
-    byName.set(String(n.title).toLowerCase(), n.id);
-    if (n.path) byName.set(n.path.split('/').pop().replace(/\.md$/, '').toLowerCase(), n.id);
-  }
+  const byName = nameIndex(nodes.values());
   for (const n of [...nodes.values()]) {
     if (!CONTENT.has(n.kind)) continue;
     for (const m of (n.body || '').matchAll(/\[\[([^\]]+)\]\]/g)) {

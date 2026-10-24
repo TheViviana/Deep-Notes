@@ -5,29 +5,43 @@ import {CONTENT, KINDS} from './graph';
 import {Icon} from './icons';
 
 const KIND_ICON = {post: 'works', note: 'methods', idea: 'idea', draft: 'draft', reading: 'book', archive: 'archive', concept: 'concept'};
+// 内容类型筛选：全部 / 六类内容；配合正则可做「只在我读过的书里找」这类精确检索
+const KIND_FILTERS = [['all', '全部 All'], ['post', '文章'], ['note', '笔记'], ['draft', '草稿'], ['reading', '阅读'], ['archive', '档案'], ['idea', '选题']];
 
 export function CommandPalette({open, onClose, graph, actions, onOpenContent}) {
   const [q, setQ] = useState('');
   const [pick, setPick] = useState(0);
+  const [kind, setKind] = useState('all');
   const listRef = useRef(null);
 
-  useEffect(() => { if (open) { setQ(''); setPick(0); } }, [open]);
+  useEffect(() => { if (open) { setQ(''); setPick(0); setKind('all'); } }, [open]);
 
   const items = useMemo(() => {
     if (!open) return [];
-    const k = q.trim().toLowerCase();
+    const k = q.trim();
+    // 正则模式：输入形如 /关键词/ 或 /关键词/i —— 标题 + 正文全文匹配（带 g 标志会被剥掉，.test 无状态；
+    // 无效正则退回普通文本匹配，空结果时输入框下方给出提示）
+    let re = null;
+    const rm = k.match(/^\/(.+)\/([gimsu]*)$/);
+    if (rm) { try { re = new RegExp(rm[1], rm[2].replace(/g/g, '')); } catch { re = null; } }
+    const plain = k.toLowerCase();
     const acts = actions.filter(a => !k
-      || a.zh.toLowerCase().includes(k) || String(a.en || '').toLowerCase().includes(k));
+      || a.zh.toLowerCase().includes(plain) || String(a.en || '').toLowerCase().includes(plain));
     if (!k) return acts;
     // 有关键词时：标题命中排前、按连接度排序的内容结果 + 剩余可用命令
+    const hit = n => {
+      if (kind !== 'all' && n.kind !== kind) return false;
+      if (re) return re.test(String(n.title)) || re.test(String(n.text || ''));
+      const t = String(n.title).toLowerCase(), x = String(n.text || '').toLowerCase();
+      return t.includes(plain) || x.includes(plain);
+    };
     const hits = graph.nodes
-      .filter(n => (CONTENT.has(n.kind) || n.kind === 'concept')
-        && (String(n.title).toLowerCase().includes(k) || String(n.text || '').toLowerCase().includes(k)))
-      .sort((a, b) => (String(b.title).toLowerCase().includes(k) ? 1 : 0) - (String(a.title).toLowerCase().includes(k) ? 1 : 0) || (b.in || 0) - (a.in || 0))
+      .filter(n => (CONTENT.has(n.kind) || n.kind === 'concept') && hit(n))
+      .sort((a, b) => (String(b.title).toLowerCase().includes(plain) ? 1 : 0) - (String(a.title).toLowerCase().includes(plain) ? 1 : 0) || (b.in || 0) - (a.in || 0))
       .slice(0, 8)
       .map(n => ({type: 'content', id: n.id, zh: n.short || n.title, en: KINDS[n.kind].label, icon: KIND_ICON[n.kind] || 'file', group: '内容 Content'}));
     return [...hits, ...acts];
-  }, [open, q, actions, graph]);
+  }, [open, q, kind, actions, graph]);
 
   useEffect(() => { if (pick >= items.length) setPick(0); }, [items.length, pick]);
   useEffect(() => { listRef.current?.querySelector('.palette-item.on')?.scrollIntoView({block: 'nearest'}); }, [pick]);
@@ -51,7 +65,10 @@ export function CommandPalette({open, onClose, graph, actions, onOpenContent}) {
       <div className="palette-input">
         <Icon name="search" size={15}/>
         <input autoFocus value={q} onChange={e => { setQ(e.target.value); setPick(0); }}
-          placeholder="搜索内容或输入命令… Search or type a command" aria-label="搜索内容或命令"/>
+          placeholder="搜索内容或输入命令… 支持 /正则/ 与按类型筛选 · Search, /regex/, filter by kind" aria-label="搜索内容或命令"/>
+      </div>
+      <div className="palette-filters" role="group" aria-label="按内容类型筛选 Filter by kind">
+        {KIND_FILTERS.map(([k, zh]) => <button key={k} className={kind === k ? 'on' : ''} onClick={() => { setKind(k); setPick(0); }}>{zh}</button>)}
       </div>
       <div className="palette-list" ref={listRef} role="listbox" aria-label="命令与结果">
         {items.map((it, i) => <button key={(it.type === 'content' ? 'c:' : 'a:') + (it.id || it.zh) + i}
@@ -61,7 +78,7 @@ export function CommandPalette({open, onClose, graph, actions, onOpenContent}) {
           <span className="pi-zh">{it.zh}<em>{it.en}</em></span>
           {it.group && <small className="pi-group">{it.group}</small>}
         </button>)}
-        {!items.length && <p className="palette-empty">没有匹配的命令或内容 <em>No match</em></p>}
+        {!items.length && <p className="palette-empty">{/^\/.+\/[gimsu]*$/.test(q.trim()) ? '正则表达式无效或没有匹配 · Invalid regex or no match' : '没有匹配的命令或内容 <em>No match</em>'}</p>}
       </div>
       <p className="palette-foot">↑↓ 选择 <em>navigate</em> · Enter 执行 <em>run</em> · Esc 关闭 <em>close</em> · ⌘K 呼出 <em>toggle</em></p>
     </section>

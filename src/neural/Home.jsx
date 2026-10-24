@@ -19,7 +19,9 @@ export function moduleItems(graph, modId) {
   if (!m) return [];
   const list = graph.nodes.filter(n => n.kind === m.kind);
   if (m.kind === 'post') list.sort((a, b) => String(b.date).localeCompare(String(a.date)));
-  if (m.kind === 'concept') list.sort((a, b) => b.in - a.in);
+  // 概念按提及数排序 + 标题做次序稳定键：改定义不改提及数时顺序不翻转，
+  // 扇形条目动画的「集合判等」不会被纯内容级变化打断
+  if (m.kind === 'concept') list.sort((a, b) => b.in - a.in || a.title.localeCompare(b.title, 'zh-CN'));
   return list;
 }
 
@@ -173,7 +175,17 @@ function Scene({graph, items, onModule, onItem, live, sel}) {
   const vidRef = (id, part) => el => { (vids.current[id] ||= {})[part] = el; };
   const summaries = useMemo(() => Object.fromEntries(MODULES.map(m => [m.id, moduleSummary(graph, m)])), [graph]);
 
-  useLayoutEffect(() => { live.current.itemState = items.map(() => null); live.current.fanStart = performance.now(); }, [items, live]);
+  // 扇形条目动画只在「条目集合真的变了」时重播：改概念定义 / 移动文件等只改内容不改集合的
+  // 操作会重建 graph（数组身份变化），若按数组身份重置动画，伞状条目会整体收回重长一遍——
+  // 这就是「改个定义界面就刷新一下」的来源。按 id 序列判等即可挡住纯内容级重渲染。
+  const itemIds = items.map(x => x.id).join('\u0001');
+  const prevItemIds = useRef(itemIds);
+  useLayoutEffect(() => {
+    if (prevItemIds.current === itemIds) return;
+    prevItemIds.current = itemIds;
+    live.current.itemState = items.map(() => null);
+    live.current.fanStart = performance.now();
+  }, [items, live, itemIds]);
 
   useEffect(() => {
     let raf, last = performance.now();
@@ -419,7 +431,7 @@ function Dock({graph, onGo}) {
   </div>;
 }
 
-export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced, name, onRename, onBody, onNoteTitle, onConcept, concepts, onLinkify}) {
+export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced, name, onRename, onBody, onNoteTitle, onConcept, concepts, onLinkify, layoutMode = 'force', onToggleLayout}) {
   const stageRef = useRef(null);
   const [size, setSize] = useState({w: 1280, h: 760});
   const [paused, setPaused] = useState(false);
@@ -547,6 +559,7 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
 
     <div className="stage-tools glass" role="toolbar" aria-label="动画控制">
       <button onClick={replay} title="重播开场 Replay"><Icon name="replay" size={15}/><span>重播 <em>Replay</em></span></button>
+      {onToggleLayout && <button onClick={onToggleLayout} title="切换图谱布局：力导向 / 径向同心圆（大库更清晰）· Toggle layout: force / radial" aria-pressed={layoutMode === 'radial'}><Icon name="grid" size={15}/><span>布局 {layoutMode === 'radial' ? '径向' : '力导向'} <em>{layoutMode === 'radial' ? 'Radial' : 'Force'}</em></span></button>}
       <button onClick={() => setPaused(!paused)} title={paused ? '继续 Resume' : '暂停 Pause'} aria-pressed={paused}><Icon name={paused ? 'play' : 'pause'} size={15}/><span>{paused ? '继续' : '暂停'} <em>{paused ? 'Resume' : 'Pause'}</em></span></button>
       <button onClick={onAbout} title="关于图谱 About"><Icon name="info" size={15}/><span>数据来源 <em>Sources</em></span></button>
     </div>

@@ -1,8 +1,8 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
-import {KINDS, CONTENT, MODULES, neighbors, latent, LINK_EN} from './graph';
+import {KINDS, CONTENT, MODULES, nameIndex, neighbors, latent, LINK_EN} from './graph';
 import {Icon} from './icons';
 import {Analysis, Count} from './Analysis';
-import {ArticleView, LineMirror, renderMarkdown} from './ArticleView';
+import {ArticleView, LineMirror, renderMarkdown, readProgress} from './ArticleView';
 import {useWikiComplete, WikiSuggest, resolveTarget, scrollToAnchor, headingMap} from './wiki';
 import {useEditorEnhancers} from './plugins';
 import {conceptExtras, setConceptExtra, conceptReview, gradeConcept, paraCards, paraReview, deleteParaCard, gradePara} from './conceptStore';
@@ -17,15 +17,6 @@ function useLocalState(key, init) {
   return [v, set];
 }
 // 双链点击解析：与 graph.js 的 byName 规则一致（标题 / 路径文件名，忽略大小写）。
-function nameIndex(graph) {
-  const m = new Map();
-  for (const n of graph.nodes) {
-    if (!CONTENT.has(n.kind)) continue;
-    m.set(String(n.title).toLowerCase(), n.id);
-    if (n.path) m.set(n.path.split('/').pop().replace(/\.md$/, '').toLowerCase(), n.id);
-  }
-  return m;
-}
 const FILE_KIND_ZH = {post: ['文章', 'Posts'], draft: ['草稿', 'Drafts'], note: ['方法笔记', 'Notes']};
 const dayOfTs = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
 
@@ -164,7 +155,22 @@ function InboxPanel({items, setItems, onToDraft, onToNote, onDaily, onClose}) {
   </aside>;
 }
 
-export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onGo, onJumpContent, works, notes, onMove, inbox, setInbox, onFlashToDraft, onFlashToNote, onDaily}) {
+// —— 写作番茄钟徽标：每秒本地刷新倒计时（不动整棵树），本轮专注新增字数实时显示 ——
+function PomoBadge({pomo, written, onStop}) {
+  const [, tick] = useState(0);
+  useEffect(() => { const t = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(t); }, []);
+  const left = Math.max(0, Math.ceil((pomo.endTs - Date.now()) / 1000));
+  const mm = String(Math.floor(left / 60)).padStart(2, '0'), ss = String(left % 60).padStart(2, '0');
+  const focus = pomo.phase === 'focus';
+  return <span className={`editor-pomo${focus ? ' focus' : ' break'}`} role="timer"
+    aria-label={focus ? `专注剩余 ${mm} 分 ${ss} 秒，本轮新增 ${written} 字` : `休息剩余 ${mm} 分 ${ss} 秒`}
+    title={focus ? '25 分钟专注进行中 · Focus running' : '5 分钟休息中 · On break'}>
+    {focus ? '🍅' : '☕'} {mm}:{ss}{focus && written > 0 ? <> · +{written.toLocaleString('zh-CN')} 字</> : null}
+    <button type="button" onClick={onStop} aria-label="结束本轮番茄 Stop pomodoro" title="结束本轮 · Stop">■</button>
+  </span>;
+}
+
+export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onGo, onJumpContent, works, notes, onMove, inbox, setInbox, onFlashToDraft, onFlashToNote, onDaily, pomo, onPomoStart, onPomoStop}) {
   const draft = drafts.find(d => d.id === active) || drafts[0];
   const area = useRef(null);
   const pv = useRef(null); // 阅读模式渲染容器（浮动目录在阅读下跳转/高亮用）
@@ -180,7 +186,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
   const titles = useMemo(() => graph.nodes.filter(n => CONTENT.has(n.kind) && n.id !== 'draft:' + draft?.id).map(n => ({id: n.id, title: n.path?.split('/').pop().replace(/\.md$/, '') || n.title, short: n.short || n.title, kind: n.kind})), [graph, draft?.id]);
   const heads = useMemo(() => headingMap(graph), [graph]);
   const wiki = useWikiComplete({titles, areaRef: area, onChange: body => change('body', body), headings: heads});
-  const fx = useEditorEnhancers({area, value: draft?.body, onChange: body => change('body', body), wiki, title: draft?.title, titles, preview: pv, previewMode: readMode ? 'preview' : 'edit'});
+  const fx = useEditorEnhancers({area, value: draft?.body, onChange: body => change('body', body), wiki, title: draft?.title, titles, preview: pv, previewMode: readMode ? 'preview' : 'edit', docId: 'draft:' + draft?.id});
   const node = draft && graph.index.get('draft:' + draft.id);
   const nb = node ? neighbors(graph, node.id) : null;
   const wikiLinks = node ? graph.links.filter(l => l.kind === 'wiki' && l.s === node.id).map(l => graph.index.get(l.t)) : [];
@@ -205,7 +211,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
     ...(notes || []).map(n => ({id: 'note:' + n.id, title: n.title, kind: 'note', body: n.body})),
   ], [works, drafts, draft?.id, notes]);
   const cmpTarget = cmpOn ? files.find(f => f.id === cmp.id) || null : null;
-  const byName = useMemo(() => nameIndex(graph), [graph]);
+  const byName = useMemo(() => nameIndex(graph.nodes), [graph]);
   // 阅读模式与对照栏共用：渲染 + [[双链]] 点击跳转（阅读模式 TOC 依赖编辑器滚动，故隐藏）
   const readHtml = useMemo(() => readMode && draft ? renderMarkdown(draft.body) : '', [readMode, draft]);
   const cmpHtml = useMemo(() => cmpTarget ? renderMarkdown(cmpTarget.body) : '', [cmpTarget]);
@@ -252,6 +258,8 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
         <div className="editor-meta">
           <span>03-创作台 / 正在写 <em>Writing</em></span>
           <span className="editor-tools" role="group" aria-label="编辑器视图 Editor views">
+            {pomo ? <PomoBadge pomo={pomo} written={pomo.phase === 'focus' ? Math.max(0, drafts.reduce((s, d) => s + (d.body || '').length, 0) - pomo.baseChars) : 0} onStop={onPomoStop}/>
+              : onPomoStart && <button type="button" title="开始 25 分钟专注 + 5 分钟休息的番茄钟 · Start a 25/5 pomodoro" onClick={onPomoStart}>番茄 <em>Pomodoro</em></button>}
             {onMove && <button type="button" title="把这篇草稿移到其他模块（作品库 / 方法库 / 选题池） · Move this draft to another module" onClick={() => onMove(draft.id)}>移动到 <em>Move</em></button>}
             <button type="button" className={focusMode ? 'on' : ''} aria-pressed={focusMode}
               title="隐藏左右卡片，编辑区占满，可与对照/阅读叠加 · Hide side cards and widen the editor; stacks with Compare/Read" onClick={toggleFocus}>专注 <em>Focus</em></button>
@@ -334,12 +342,15 @@ const LANES = [['待写', 'To write'], ['待扩展', 'To expand'], ['已转草�
 const PRI = {高: ['High', 'high'], 中: ['Medium', 'mid'], 低: ['Low', 'low']};
 
 // —— 方法库 Methods：左侧笔记列表按二级分类分组（可折叠、可拖拽归类、分类可增删改），右侧就地编辑 ——
-export function Methods({graph, notes, setNotes, selected, setSelected, onGo, onJumpContent, onNew, onDelete, onUpdate, onMove, folders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder}) {
+export function Methods({graph, notes, setNotes, selected, setSelected, onGo, onJumpContent, onNew, onDelete, onUpdate, onMove, onMerge, folders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder}) {
   const note = notes.find(n => n.id === selected) || notes[0];
   const area = useRef(null);
   const pv = useRef(null); // 阅读模式渲染容器（浮动目录在阅读下跳转/高亮用）
   const [q, setQ] = useState('');
   const [readMode, setReadMode] = useState(false);
+  const [merging, setMerging] = useState(false); // 合并弹窗：两篇笔记拼一篇
+  const [mergeA, setMergeA] = useState('');
+  const [mergeB, setMergeB] = useState('');
   // 专注模式：与创作台同一套机制（隐藏左列表 + focusIn 动画 + 退出滑回），位置单独持久化
   const [focusMode, setFocusMode] = useLocalState(CONFIG.storagePrefix + '-methods-focus-v1', false);
   const focusFx = useRef(null);
@@ -353,12 +364,17 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
   };
   useEffect(() => () => clearTimeout(focusFx.current), []);
   const change = (key, value) => { if (note) onUpdate(note.id, {[key]: value}); };
+  // 反向链接：编辑时直接看到哪些笔记用 [[双链]] 指向本篇（与 ArticleView 的反链栏同一口径）
+  const selfNode = note && graph.index.get('note:' + note.id);
+  const backlinks = useMemo(() => selfNode
+    ? graph.links.filter(l => l.kind === 'wiki' && l.t === selfNode.id).map(l => graph.index.get(l.s)).filter(Boolean)
+    : [], [graph, selfNode]);
   const titles = useMemo(() => graph.nodes.filter(n => CONTENT.has(n.kind) && n.id !== 'note:' + note?.id).map(n => ({id: n.id, title: n.title, short: n.short || n.title, kind: n.kind})), [graph, note?.id]);
   const heads = useMemo(() => headingMap(graph), [graph]);
   const wiki = useWikiComplete({titles, areaRef: area, onChange: body => change('body', body), headings: heads});
-  const fx = useEditorEnhancers({area, value: note?.body, onChange: body => change('body', body), wiki, title: note?.title, titles, preview: pv, previewMode: readMode ? 'preview' : 'edit'});
+  const fx = useEditorEnhancers({area, value: note?.body, onChange: body => change('body', body), wiki, title: note?.title, titles, preview: pv, previewMode: readMode ? 'preview' : 'edit', docId: 'note:' + note?.id});
   const readHtml = useMemo(() => readMode && note ? renderMarkdown(note.body) : '', [readMode, note]);
-  const byName = useMemo(() => nameIndex(graph), [graph]);
+  const byName = useMemo(() => nameIndex(graph.nodes), [graph]);
   const jumpWiki = e => {
     const a = e.target.closest('a[data-target]');
     if (!a) return;
@@ -406,6 +422,7 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
   };
   return <div className="page page-methods">
     <PageHead zh="方法库" en="Methods" sub="方法可复用，笔记会长出连接。" subEn="Reusable methods — every note grows links in the graph.">
+      {notes.length >= 2 && <button className="pill" onClick={() => { setMerging(true); setMergeA(note?.id || notes[0].id); setMergeB(notes.find(n => n.id !== (note?.id || notes[0].id))?.id || ''); }} title="把两篇笔记合并成一篇 · Merge two notes"><Icon name="draft" size={15}/>合并 <em>Merge</em></button>}
       <button className="pill primary" onClick={onNew}><Icon name="plus" size={15}/>新建笔记 <em>New note</em></button>
     </PageHead>
     <div className={`drafts-layout methods-page${focusMode ? ' focused' : ''}${unfocusing ? ' unfocusing' : ''}`}>
@@ -477,6 +494,13 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
           <span><Icon name="check" size={13}/>已保存到此浏览器 <em>Saved locally</em></span>
         </div>
         <input className="editor-title" value={note.title} onChange={e => change('title', e.target.value)} placeholder="给这篇笔记一个标题 Title" aria-label="笔记标题"/>
+        {backlinks.length > 0 && <div className="av-backlinks" role="group" aria-label={`反向链接 ${backlinks.length} 条 Backlinks`}>
+          <span className="av-bl-label"><Icon name="back" size={12}/>反链 <em>{backlinks.length}</em></span>
+          <div className="chip-row">{backlinks.slice(0, 10).map(n => n && <button key={n.id} className="chip" style={{'--kc': 'var(--gold)'}}
+            title={`打开《${n.title}》`} onClick={() => (onJumpContent || onGo)(n.id)}>{n.short || n.title}</button>)}
+            {backlinks.length > 10 && <span className="chip static">+{backlinks.length - 10}</span>}
+          </div>
+        </div>}
         {!readMode && fx.bar}
         <div className="editor-area hybrid">
           {readMode
@@ -495,6 +519,28 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
         </div>
       </section> : <section className="editor glass"><p className="empty-line">还没有方法笔记，点右上角新建。 <em>No notes yet.</em></p></section>}
     </div>
+    {merging && <div className="veil" onClick={() => setMerging(false)}>
+      <section className="modal glass" role="dialog" aria-modal="true" aria-label="合并笔记 Merge notes" onClick={e => e.stopPropagation()}>
+        <header><h2>合并笔记 <em>Merge notes</em></h2><button className="icon-btn" onClick={() => setMerging(false)} aria-label="关闭弹窗"><Icon name="close" size={16}/></button></header>
+        <div className="about">
+          <p className="quiet">把第二篇合并进第一篇：正文按序拼接、[[双链]]随正文归并，生成一篇新笔记（归入第一篇所在分类）；原两篇移入回收站（30 天内可找回）。<em>Bodies are concatenated into a new note; originals go to .trash.</em></p>
+          <div className="form-row">
+            <label>第一篇（保留其分类） <em>Into</em>
+              <select value={mergeA} aria-label="第一篇笔记" onChange={e => { setMergeA(e.target.value); if (e.target.value === mergeB) setMergeB(notes.find(n => n.id !== e.target.value)?.id || ''); }}>
+                {notes.map(n => <option key={n.id} value={n.id}>{n.title || '未命名笔记'}</option>)}
+              </select></label>
+            <label>第二篇 <em>From</em>
+              <select value={mergeB} aria-label="第二篇笔记" onChange={e => setMergeB(e.target.value)}>
+                {notes.filter(n => n.id !== mergeA).map(n => <option key={n.id} value={n.id}>{n.title || '未命名笔记'}</option>)}
+              </select></label>
+          </div>
+          <div className="form-actions">
+            <button className="pill ghost" onClick={() => setMerging(false)}>取消 <em>Cancel</em></button>
+            <button className="pill primary" disabled={!mergeA || !mergeB || mergeA === mergeB} onClick={() => { setMerging(false); if (onMerge) onMerge(mergeA, mergeB); }}><Icon name="draft" size={14}/>合并 <em>Merge</em></button>
+          </div>
+        </div>
+      </section>
+    </div>}
   </div>;
 }
 
@@ -559,10 +605,10 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
   };
   return <div className="page page-readings">
     <PageHead zh="阅读区" en="Readings" sub="别人的好内容，收进自己的网络。" subEn="Reading list — others' words, linked into your graph.">
-      <button className="pill" onClick={() => fileRef.current?.click()} disabled={importing} title="支持 PDF / HTML / Markdown / TXT（离线解析）">{importing ? '解析中…' : '导入文件'} <em>Import</em></button>
+      <button className="pill" onClick={() => fileRef.current?.click()} disabled={importing} title="支持 PDF / Word(.docx) / HTML / Markdown / TXT（离线解析）">{importing ? '解析中…' : '导入文件'} <em>Import</em></button>
       <button className="pill primary" onClick={onNew}><Icon name="plus" size={15}/>添加阅读 <em>New reading</em></button>
     </PageHead>
-    <input ref={fileRef} type="file" accept=".pdf,.html,.htm,.md,.markdown,.txt" multiple hidden onChange={onPickFiles} aria-hidden="true"/>
+    <input ref={fileRef} type="file" accept=".pdf,.docx,.html,.htm,.md,.markdown,.txt" multiple hidden onChange={onPickFiles} aria-hidden="true"/>
     <div className="library-layout readings-layout">
       <aside className="read-folders glass" aria-label="阅读分类目录">
         <h3>分类 <em>Folders</em></h3>
@@ -619,7 +665,7 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
             onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(r.id); setOpenReading(r.id); } }}>
             <span className="rc-body">
               <span className="rc-title">{r.title || '未命名阅读'}</span>
-              <span className="rc-sub">{curFolder == null && folderOf(r) !== '未分类' ? `${folderOf(r)} · ` : ''}{r.author || '佚名'}{r.source ? ` · ${r.source}` : ''} · {String(r.date || '').slice(0, 10) || '未标日期'} · {(r.body || '').length.toLocaleString('zh-CN')} 字</span>
+              <span className="rc-sub">{curFolder == null && folderOf(r) !== '未分类' ? `${folderOf(r)} · ` : ''}{r.author || '佚名'}{r.source ? ` · ${r.source}` : ''} · {String(r.date || '').slice(0, 10) || '未标日期'} · {(r.body || '').length.toLocaleString('zh-CN')} 字{readProgress(r.id) ? ` · 读至 ${Math.round(readProgress(r.id).pct * 100)}%` : ''}</span>
             </span>
             <span className="rc-tools">
               <button className="icon-btn" title="删除这条阅读 Delete" aria-label={`删除 ${r.title || '未命名阅读'}`}
@@ -632,7 +678,7 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
       </section>
       {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'readings')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} onLinkify={onLinkify}/></aside>}
     </div>
-    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenReading(null)} onGo={onGo} onOpenContent={onJumpContent} eyebrow={['READING', '阅读全文']} exportKind="readings"/>}
+    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenReading(null)} onGo={onGo} onOpenContent={onJumpContent} eyebrow={['READING', '阅读全文']} exportKind="readings" progressId={cur.id}/>}
   </div>;
 }
 
@@ -698,7 +744,7 @@ export function Concepts({graph, onGo, onJumpContent}) {
   const [draftText, setDraftText] = useState(''); // 定义草稿
   const [termDraft, setTermDraft] = useState(''); // 关键词输入
   const [rev, setRev] = useState(null); // 复习会话 {tab, queue, i, flipped}
-  const names = useMemo(() => nameIndex(graph), [graph]); // 来源标题 → 节点 id
+  const names = useMemo(() => nameIndex(graph.nodes), [graph]); // 来源标题 → 节点 id
   const linkedOf = c => graph.links.filter(l => (l.a === c.id || l.b === c.id) && l.kind === 'mention')
     .map(l => graph.index.get(l.a === c.id ? l.b : l.a)?.title).filter(Boolean);
   const rows = graph.nodes.filter(n => n.kind === 'concept' && (!q || n.title.toLowerCase().includes(q.toLowerCase())))
@@ -918,7 +964,7 @@ export function Ideas({graph, ideas, onEdit, onNew, onGraph}) {
             {n?.shared?.length > 0 && <div className="chip-row">{n.shared.slice(0, 5).map(c => <span key={c} className="chip static" style={{'--kc': KINDS.concept.color}}>{c}</span>)}</div>}
             <div className="ic-reach"><Icon name="link" size={13}/>{works.length ? <>可延伸 {works.length} 篇作品 <em>builds on {works.length} works</em></> : <>暂无关联作品 <em>No related works</em></>}</div>
             <footer>
-              <button className="pill ghost" onClick={() => onGraph(n.id)}><Icon name="concept" size={14}/>图谱 <em>Graph</em></button>
+              <button className="pill ghost" disabled={!n} onClick={() => n && onGraph(n.id)}><Icon name="concept" size={14}/>图谱 <em>Graph</em></button>
               <button className="pill" onClick={() => onEdit(idea)}>编辑 <em>Edit</em><Icon name="chevron" size={13}/></button>
             </footer>
           </article>;

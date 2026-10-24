@@ -6,7 +6,7 @@ import {pickVaultFolder, pickMdFiles, parseVault} from './importer';
 import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushAll, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, uniqueNotePath, safeName, hasPendingWrites, retryPending, clearPendingWrites, pendingReady, snapshotBeforeAdopt, readFileSnapshot, loadMeta, patchMeta, VAULT_MODE, verifyIntegrity} from './fileStore';
 import {sameVaultContent} from './vaultCompare';
 import {CONFIG, asset} from '../config';
-import {buildGraph, forceLayout, stats, KINDS, CONTENT} from './graph';
+import {buildGraph, forceLayout, radialLayout, stats, KINDS, nameIndex} from './graph';
 import {renderMarkdown} from './ArticleView';
 import {Home} from './Home';
 import {Library, Drafts, Ideas, Methods, Readings, Archives, Concepts} from './pages';
@@ -20,6 +20,7 @@ import {CommandPalette} from './CommandPalette';
 import {RecoveryModal} from './recovery';
 import {conceptExtras, setConceptSink, hydrateConceptMeta} from './conceptStore';
 import {useVaultImages, resolveAllInDoc} from './images';
+import {totalChars, recordDaily, loadStats, dailyDeltas, streakDays, knownVaults} from './writingStats';
 import {resolveTarget, scrollToAnchor} from './wiki';
 import {T} from './theme';
 import './neural.css';
@@ -251,15 +252,7 @@ function ReadFull({r, graph, onClose, onGo, onOpenContent}) {
     if (idx >= 0 && list[idx]) list[idx].scrollIntoView({block: 'start'});
   };
   const html = useMemo(() => renderMarkdown(r.body), [r.body]);
-  const byName = useMemo(() => {
-    const m = new Map();
-    for (const n of graph.nodes) {
-      if (!CONTENT.has(n.kind)) continue;
-      m.set(String(n.title).toLowerCase(), n.id);
-      if (n.path) m.set(n.path.split('/').pop().replace(/\.md$/, '').toLowerCase(), n.id);
-    }
-    return m;
-  }, [graph]);
+  const byName = useMemo(() => nameIndex(graph.nodes), [graph]);
   const jump = e => {
     const a = e.target.closest('a[data-target]');
     if (!a) return;
@@ -321,7 +314,7 @@ function ReadFull({r, graph, onClose, onGo, onOpenContent}) {
       </div>
       {src ? <pre>{r.body}</pre>
         : <article ref={box} className="md-preview" onClick={jump} dangerouslySetInnerHTML={{__html: html}}/>}
-      {!src && tocOn && outline.length > 0 && <TocPanel outline={outline} cur={-1} jump={jumpHead}/>}
+      {!src && tocOn && outline.length > 0 && <TocPanel outline={outline} cur={-1} jump={jumpHead} docId={r.id}/>}
     </div>
   </Modal>;
 }
@@ -399,6 +392,147 @@ const mergeFolders = (incoming, local) => [...new Set(
     .filter(x => typeof x === 'string' && x.trim())
 )].sort();
 
+// —— 改名联动双链：标题从 A 改成 B 时，他篇正文里的 [[A]]（含 [[A|别名]]、[[A#小节]]）同步换成
+// [[B]]——否则改名后旧双链当场变成断链。六类正文全部扫一遍，改动经全局 diff 自动写盘。
+const escapeRe = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// —— 每日随机回顾：每天首次启动按日期种子确定性挑 3 条旧内容，浮动入口 + 弹窗速览 ——
+// 同一天多次启动抽到同三篇；点条目直接跳转打开。防止导入的旧笔记/书籍章节石沉大海。
+const RECALL_KEY = CONFIG.storagePrefix + '-daily-recall-v1';
+function todayRecall(pool) {
+  if (!pool.length) return [];
+  const d = new Date();
+  const day = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem(RECALL_KEY)); } catch {}
+  if (cached?.day === day && Array.isArray(cached.ids)) {
+    const byId = new Map(pool.map(x => [x.id, x]));
+    const items = cached.ids.map(id => byId.get(id)).filter(Boolean);
+    if (items.length) return items;
+  }
+  // 日期做种子的确定性洗牌：清了缓存 / 重装后同一天抽到的仍是同三篇
+  let s = 0; for (const c of day) s = (s * 31 + c.charCodeAt(0)) >>> 0;
+  const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const arr = [...pool];
+  for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; }
+  const picked = arr.slice(0, Math.min(3, arr.length));
+  try { localStorage.setItem(RECALL_KEY, JSON.stringify({day, ids: picked.map(x => x.id)})); } catch {}
+  return picked;
+}
+function DailyRecall({works, notes, readings, archives, onOpen}) {
+  // 池子用延迟值构建：编辑打字不必每个按键全库重建摘录（大库 O(全库字符数)）
+  const dWorks = useDeferredValue(works);
+  const dNotes = useDeferredValue(notes);
+  const dReadings = useDeferredValue(readings);
+  const dArchives = useDeferredValue(archives);
+  const pool = useMemo(() => [
+    ...dWorks.map(w => ({id: 'post:' + w.id, kind: 'works', title: w.title, excerpt: (w.body || '').replace(/\s+/g, ' ')})),
+    ...dNotes.map(n => ({id: 'note:' + n.id, kind: 'methods', title: n.title, excerpt: (n.body || '').replace(/\s+/g, ' ')})),
+    ...dReadings.map(r => ({id: 'reading:' + r.id, kind: 'readings', title: r.title, excerpt: (r.body || '').replace(/\s+/g, ' ')})),
+    ...dArchives.map(a => ({id: 'archive:' + a.id, kind: 'archives', title: a.title, excerpt: (a.body || '').replace(/\s+/g, ' ')})),
+  ].filter(x => x.excerpt.trim().length >= 20), [dWorks, dNotes, dReadings, dArchives]);
+  // 池子随编辑变化，但当天抽中的三篇由缓存钉死（必须校验 day：否则缓存永不轮换，「每日」变「永远同三篇」）
+  const cachedIds = useMemo(() => {
+    try {
+      const c = JSON.parse(localStorage.getItem(RECALL_KEY));
+      const d = new Date(), p = n => String(n).padStart(2, '0');
+      const day = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+      return c?.day === day && Array.isArray(c.ids) ? c.ids : null;
+    } catch { return null; }
+  }, [pool]);
+  const picks = useMemo(() => {
+    const byId = new Map(pool.map(x => [x.id, x]));
+    if (cachedIds) { const hit = cachedIds.map(id => byId.get(id)).filter(Boolean); if (hit.length) return hit; }
+    return todayRecall(pool);
+  }, [pool, cachedIds]);
+  const [open, setOpen] = useState(false);
+  const [dismissed, setDismissed] = useState(false); // 仅本会话隐藏，明天照常出现
+  if (dismissed || !picks.length) return null;
+  return <>
+    <button className="recall-fab" onClick={() => setOpen(o => !o)} aria-expanded={open}
+      title="每天随机回顾三条旧内容 · Daily random recall">
+      <Icon name="replay" size={14}/>今日回顾 <em>{picks.length}</em>
+    </button>
+    {open && <div className="veil" onClick={() => setOpen(false)}>
+      <section className="modal glass" role="dialog" aria-modal="true" aria-label="今日回顾 Daily recall" onClick={e => e.stopPropagation()}>
+        <header><h2>今日回顾 <em>Daily recall</em></h2><button className="icon-btn" onClick={() => setOpen(false)} aria-label="关闭弹窗"><Icon name="close" size={16}/></button></header>
+        <div className="about">
+          <p className="quiet">每天随机捞三条旧内容回来见一面，同一天内固定不变；点条目直接打开原文。<em>Three random pieces a day — same all day. Click to open.</em></p>
+          {picks.map(p => <div className="recall-item" key={p.id}>
+            <span className="recall-kind">{MOVE_ZH[p.kind]}</span>
+            <button className="recall-open" onClick={() => { setOpen(false); onOpen(p.id); }}>
+              <b>{p.title || '未命名'}</b>
+              <small>{p.excerpt.slice(0, 110)}{p.excerpt.length > 110 ? '…' : ''}</small>
+            </button>
+          </div>)}
+          <div className="form-actions"><button className="pill ghost" onClick={() => setDismissed(true)}>本次启动不再显示 <em>Hide for now</em></button></div>
+        </div>
+      </section>
+    </div>}
+  </>;
+}
+
+// —— 全库批量替换：范围（全部 / 单模块）+ 普通文本或正则，先预览逐条命中数，确认后应用 ——
+const REPLACE_SCOPES = [['all', '全部 All'], ['works', '作品库'], ['notes', '方法库'], ['drafts', '创作台'], ['readings', '阅读区'], ['archives', '档案区']];
+function ReplaceModal({works, notes, drafts, readings, archives, onClose, onApply}) {
+  const [scope, setScope] = useState('all');
+  const [find, setFind] = useState('');
+  const [repl, setRepl] = useState('');
+  const [useRe, setUseRe] = useState(false);
+  const [armed, setArmed] = useState(false);
+  let re = null, reErr = '';
+  if (useRe && find) { try { re = new RegExp(find, 'g'); } catch (e) { reErr = String(e?.message || e); } }
+  const plain = find.toLowerCase();
+  const data = [['works', works], ['notes', notes], ['drafts', drafts], ['readings', readings], ['archives', archives]];
+  const hits = useMemo(() => {
+    if (!find || (useRe && !re)) return [];
+    const out = [];
+    for (const [kind, items] of data) {
+      if (scope !== 'all' && scope !== kind) continue;
+      for (const x of items) {
+        const body = String(x.body || '');
+        const c = useRe ? (body.match(re) || []).length : (body.toLowerCase().split(plain).length - 1);
+        if (!c) continue;
+        const at = useRe ? body.search(re) : body.toLowerCase().indexOf(plain);
+        out.push({kind, title: x.title || '未命名', count: c,
+          snippet: body.slice(Math.max(0, at - 20), Math.min(body.length, Math.max(0, at - 20) + 90)).replace(/\s+/g, ' ')});
+      }
+    }
+    return out;
+  }, [find, scope, useRe, works, notes, drafts, readings, archives]); // eslint-disable-line react-hooks/exhaustive-deps
+  const total = hits.reduce((s, x) => s + x.count, 0);
+  const SCOPE_ZH = Object.fromEntries(REPLACE_SCOPES);
+  return <Modal title="批量替换" en="Find & replace" onClose={onClose}>
+    <div className="form">
+      <p className="quiet">在所选范围的正文里查找并替换（标题不动）。先预览命中，确认后写入；改动会照常写回知识库，且可用 ⌘K「恢复数据快照」回退。<em>Preview first, then apply.</em></p>
+      <label>范围 <em>Scope</em>
+        <select value={scope} onChange={e => setScope(e.target.value)} aria-label="替换范围">
+          {REPLACE_SCOPES.map(([k, zh]) => <option key={k} value={k}>{zh}</option>)}
+        </select></label>
+      <div className="form-row">
+        <label>查找 <em>Find</em><input autoFocus value={find} onChange={e => { setFind(e.target.value); setArmed(false); }} placeholder="要替换的文本"/></label>
+        <label>替换为 <em>Replace</em><input value={repl} onChange={e => { setRepl(e.target.value); setArmed(false); }} placeholder="新文本（可留空删除）"/></label>
+      </div>
+      <label className="rep-regex"><input type="checkbox" checked={useRe} onChange={e => { setUseRe(e.target.checked); setArmed(false); }}/>按正则表达式查找（替换串支持 $1 等分组引用）</label>
+      {reErr && <p className="quiet" role="alert">正则无效：{reErr}</p>}
+      {find && !reErr && <div className="rep-preview">
+        <p className="quiet">{hits.length ? `${hits.length} 条内容、共 ${total} 处命中：` : '没有命中。'}</p>
+        <div className="rep-hits">{hits.slice(0, 30).map((h, i) => <div key={i} className="rep-hit">
+          <span className="rep-hit-head">[{SCOPE_ZH[h.kind]}] {h.title} <b>×{h.count}</b></span>
+          <small>…{h.snippet}…</small>
+        </div>)}
+        {hits.length > 30 && <p className="quiet">…还有 {hits.length - 30} 条未列出</p>}</div>
+      </div>}
+      <div className="form-actions">
+        <button className="pill ghost" onClick={onClose}>取消 <em>Cancel</em></button>
+        {armed
+          ? <button className="pill danger" disabled={!total} onClick={() => { onApply(scope, find, repl, useRe); onClose(); }}><Icon name="check" size={14}/>确认替换 {total} 处 <em>Apply</em></button>
+          : <button className="pill primary" disabled={!total} onClick={() => setArmed(true)}>预览并准备替换 <em>Arm</em></button>}
+      </div>
+    </div>
+  </Modal>;
+}
+
 function App() {
   // 知识库引用图（![[名字]] / 相对路径）：所有 .md-preview 里新出现的 <img> 自动经 vault:asset 回填
   useVaultImages();
@@ -463,8 +597,23 @@ function App() {
   }), [kbConcepts, extras]);
   const slowWorks = useDeferredValue(works);
   const slowDrafts = useDeferredValue(drafts);
-  const graph = useMemo(() => buildGraph({works: slowWorks, notes, ideas, drafts: slowDrafts, readings, archives, concepts: mergedConcepts}), [slowWorks, notes, ideas, slowDrafts, readings, archives, mergedConcepts]);
-  const layout = useMemo(() => forceLayout(graph), [graph]);
+  // 六类内容全部延迟进图谱：works/drafts 之外，在方法笔记/阅读/档案/选题里打字也不必
+  // 每个按键同步重算整张图（大库 O(n²) 力导向布局会把输入卡成「界面刷新」）
+  const slowNotes = useDeferredValue(notes);
+  const slowReadings = useDeferredValue(readings);
+  const slowArchives = useDeferredValue(archives);
+  const slowIdeas = useDeferredValue(ideas);
+  const graph = useMemo(() => buildGraph({works: slowWorks, notes: slowNotes, ideas: slowIdeas, drafts: slowDrafts, readings: slowReadings, archives: slowArchives, concepts: mergedConcepts}), [slowWorks, slowNotes, slowIdeas, slowDrafts, slowReadings, slowArchives, mergedConcepts]);
+  // 布局按「节点 + 连接」签名缓存：改定义 / 改正文 / 移动文件不改变图的拓扑，复用上一次
+  // 布局结果（力导向迭代是 O(迭代×节点²)，大库重算一次要数秒，视觉上就是整体刷新）
+  const [layoutMode, setLayoutMode] = useSaved(CONFIG.storagePrefix + '-layout-mode-v1', 'force'); // force | radial
+  const layoutKey = useMemo(() => graph.nodes.map(n => n.id).join('\u0001') + '\u0002' + graph.links.map(l => l.a + '|' + l.b + '|' + l.kind).join('\u0001') + '\u0003' + layoutMode, [graph, layoutMode]);
+  const layoutCache = useRef({key: null, val: null});
+  const layout = useMemo(() => {
+    if (layoutCache.current.key === layoutKey) return layoutCache.current.val;
+    layoutCache.current = {key: layoutKey, val: layoutMode === 'radial' ? radialLayout(graph) : forceLayout(graph)};
+    return layoutCache.current.val;
+  }, [layoutKey, graph, layoutMode]);
 
   // 页面切换：保留各页面的滚动位置（sessionStorage，刷新后仍能回到上次位置），首次进入该页才回到顶部
   useEffect(() => {
@@ -533,10 +682,15 @@ function App() {
   // 退出前尽力把防抖队列写完（800ms 内关闭窗口的场景）：localStorage 与知识库写盘都走同步通道——
   // beforeunload 里异步 IPC 可能页面先卸载根本发不出去，同步 sendSync / setItem 才可靠
   useEffect(() => {
-    const bye = () => { flushPendingSaves(); if (capable()) flushSyncNow(); };
+    const bye = () => { flushPendingSaves(); if (capable()) flushSyncNow(); recordDaily(totalChars(contentRef.current)); };
     window.addEventListener('beforeunload', bye);
     return () => window.removeEventListener('beforeunload', bye);
   }, []);
+  // 写作统计：内容变化后防抖 5 秒记一次当日全库字数快照（当日取最大值，删除不产生负增量）
+  useEffect(() => {
+    const t = setTimeout(() => recordDaily(totalChars({works, notes, drafts, readings, archives})), 5000);
+    return () => clearTimeout(t);
+  }, [works, notes, drafts, readings, archives]);
 
   // —— 挂起写：上次会话有重试后仍失败的写盘操作 ——
   // 此刻自动同步会用旧文件夹内容覆盖浏览器里更新的数据，必须先由用户裁决（重试 / 放弃）
@@ -657,7 +811,61 @@ function App() {
   // 方法笔记 path 分配：同一相对路径只属于一条笔记（否则写盘同键覆盖、正文静默丢失）。
   // 统一走 fileStore.uniqueNotePath：有冲突时追加 id 短码，再不行递增 -2.md。
   const noteTaken = (list, excludeId) => new Map(list.filter(x => x.id !== excludeId && x.path).map(x => [x.path, x.id]));
+  // 改名联动双链：计数在 updater 外用当前闭包数组算（updater 里累加会在执行前就被读到，
+  // 计数恒偏小——linkifyMentions 注释点名的同一反模式）；应用走函数式 updater 且
+  // 未命中的条目保持原对象身份，不触发无谓的全量写盘
+  const renameWikiRefs = (oldTitle, newTitle) => {
+    const a = String(oldTitle || '').trim(), b = String(newTitle || '').trim();
+    if (!a || !b || a === b) return 0;
+    const re = new RegExp(`\\[\\[\\s*${escapeRe(a)}\\s*(#[^\\]|\\n]*)?(\\|[^\\]\\n]*)?\\]\\]`, 'g');
+    const conv = body => String(body || '').replace(re, (_, anchor, alias) => `[[${b}${anchor || ''}${alias || ''}]]`);
+    let n = 0;
+    const cur = {works, notes, drafts, readings, archives};
+    const setters = {works: setWorks, notes: setNotes, drafts: setDrafts, readings: setReadings, archives: setArchives};
+    for (const kind of Object.keys(cur)) {
+      const count = (cur[kind] || []).reduce((s, x) => s + ((String(x.body || '').match(re) || []).length), 0);
+      if (!count) continue;
+      n += count;
+      setters[kind](list => (list || []).map(x => {
+        const body = String(x.body || '');
+        if (!body.includes('[[')) return x;
+        const next = conv(body);
+        return next === body ? x : {...x, body: next};
+      }));
+    }
+    return n;
+  };
+  // 标题输入是逐键事件：不能每个按键都联动（中间态会污染全库双链），攒到停手 1.2s 后
+  // 用「第一次变更前的旧名 → 最终新名」一次性替换；期间换了别的条目在改名则先冲掉前一个
+  const renameSync = useRef(null); // {id, from, to, timer}
+  function queueRenameRefs(id, from, to) {
+    const fire = job => {
+      const n = renameWikiRefs(job.from, job.to);
+      if (n) setToast(`标题已改，${n} 处 [[双链]] 引用同步更新 · Links synced`);
+    };
+    if (renameSync.current && renameSync.current.id !== id) {
+      clearTimeout(renameSync.current.timer);
+      const prev = renameSync.current;
+      renameSync.current = null;
+      if (prev.from !== prev.to) fire(prev);
+    }
+    if (renameSync.current) renameSync.current.to = to;
+    else renameSync.current = {id, from, to, timer: null};
+    clearTimeout(renameSync.current.timer);
+    renameSync.current.timer = setTimeout(() => {
+      const job = renameSync.current;
+      renameSync.current = null;
+      if (job && job.from !== job.to) fire(job);
+    }, 1200);
+  }
   function updateNote(id, patch) {
+    // 标题变化时联动更新他篇 [[双链]]（旧名引用不再断链）
+    if (patch.title != null) {
+      const old = notes.find(n => n.id === id);
+      if (old && String(old.title).trim() !== String(patch.title).trim()) {
+        queueRenameRefs(id, String(old.title).trim(), String(patch.title).trim());
+      }
+    }
     // 路径分配进 updater：用最新 notes 查重；文件名统一走 safeName（截断 60、分隔符换 ·），
     // 且 path 缺失 / 无 .md 时按目录重建文件名，标题与磁盘文件名不再脱节。
     setNotes(ns => ns.map(n => {
@@ -757,6 +965,26 @@ function App() {
     });
     setFolders(fs => fs.filter(f => f !== name));
     setToast(`分类「${name}」已删除 · Folder deleted`);
+  }
+  // —— 笔记合并：两篇拼成一篇新笔记（正文拼接、双链随正文归并），原两篇经全局 diff 进回收站 ——
+  function mergeNotes(aId, bId) {
+    const a = notes.find(n => n.id === aId), b = notes.find(n => n.id === bId);
+    if (!a || !b || a.id === b.id) return;
+    if (!window.confirm(`把《${b.title || '未命名'}》合并进《${a.title || '未命名'}》？\n\n将生成一篇新笔记（正文拼接、[[双链]]随正文归并），原两篇移入知识库回收站（30 天内可找回）。`)) return;
+    const nid = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
+    const title = safeName(`${a.title || '未命名'} ＋ ${b.title || ''}`.replace(/\s＋\s*$/, '') || '合并笔记');
+    const folder = subOf(a);
+    const body = `${a.body || ''}${(a.body || '').trim() && (b.body || '').trim() ? '\n\n---\n\n' : ''}${b.body || ''}`;
+    setNotes(ns => {
+      const rest = ns.filter(n => n.id !== a.id && n.id !== b.id);
+      const path = uniqueNotePath(`05-方法库 methods/${folder}/${title}.md`, new Map(rest.filter(x => x.path).map(x => [x.path, x.id])), nid);
+      return [{id: nid, title, path, body}, ...rest];
+    });
+    // 外部指向 A、B 的 [[双链]] 一并改指向合并后的新笔记（确认框承诺的「双链归并」）
+    renameWikiRefs(a.title, title);
+    renameWikiRefs(b.title, title);
+    setMethSel(nid); setPage('methods');
+    setToast('已合并为一篇新笔记，原两篇进回收站 · Merged');
   }
   // —— 阅读区 CRUD：收藏别人写好的内容，可批注编辑；标题/作者/来源/日期 ——
   function newReading() {
@@ -932,10 +1160,22 @@ function App() {
     setToast('文章已创建，保存在此浏览器 · Article created locally');
   }
   function updateWork(id, patch) {
+    if (patch.title != null) {
+      const old = works.find(w => w.id === id);
+      if (old && String(old.title).trim() !== String(patch.title).trim()) {
+        const n = renameWikiRefs(old.title, patch.title);
+        if (n) setToast(`标题已改，${n} 处 [[双链]] 引用同步更新 · Links synced`);
+      }
+    }
     setWorks(ws => ws.map(w => w.id === id ? {...w, ...patch, updatedAt: nowStamp()} : w));
   }
   function saveWork() {
     if (!editingWork?.title.trim()) return;
+    const old = works.find(w => w.id === editingWork.id);
+    if (old && String(old.title).trim() !== String(editingWork.title).trim()) {
+      const n = renameWikiRefs(old.title, editingWork.title);
+      if (n) setToast(`标题已改，${n} 处 [[双链]] 引用同步更新 · Links synced`);
+    }
     setWorks(ws => ws.map(w => w.id === editingWork.id ? normalizeWork({...editingWork, updatedAt: nowStamp()}) : w));
     setModal(null); setToast('文章信息已保存 · Article info saved');
   }
@@ -1042,6 +1282,9 @@ function App() {
   function onNoteTitle(gid, title) {
     const t = title.trim().replace(/[/\\]/g, '·'); // 文件名安全化，与 updateNote 一致
     if (!t) return;
+    // 联动双链走同一条防抖队列（与 updateNote 共用 from→to 串联，避免双入口交叉改名错向）
+    const cur = notes.find(n => 'note:' + n.id === gid);
+    if (cur && String(cur.title).trim() !== t) queueRenameRefs(cur.id, String(cur.title).trim(), t);
     setNotes(ns => ns.map(n => {
       if ('note:' + n.id !== gid) return n;
       const base = String(n.path || `05-方法库 methods/笔记/${t}.md`).replace(/[^/]+$/, t + '.md');
@@ -1134,10 +1377,11 @@ function App() {
     return {error: '未知类型 ' + kind};
   };
   const aiContext = () => {
-    if (page === 'drafts') { const d = drafts.find(x => x.id === active) || drafts[0]; return {page: '创作台 Drafts', title: d?.title, excerpt: (d?.body || '').slice(0, 1000)}; }
-    if (page === 'library') { const w = works.find(x => x.id === (openArticle || libSel)); return {page: '作品库 Works', title: w?.title, excerpt: (w?.body || '').slice(0, 1000)}; }
+    // 正文节选取整段前 8000 字：长文写作时 AI 需要足够上下文（此前 1000 字经常不够用）
+    if (page === 'drafts') { const d = drafts.find(x => x.id === active) || drafts[0]; return {page: '创作台 Drafts', title: d?.title, excerpt: (d?.body || '').slice(0, 8000)}; }
+    if (page === 'library') { const w = works.find(x => x.id === (openArticle || libSel)); return {page: '作品库 Works', title: w?.title, excerpt: (w?.body || '').slice(0, 8000)}; }
     const sel = focus?.sel && graph.index.get(focus.sel);
-    return {page: '工作台 Workspace', title: sel?.title, excerpt: ''};
+    return {page: '工作台 Workspace', title: sel?.title, excerpt: (sel?.body || '').slice(0, 8000)};
   };
   useEffect(() => {
     aiRuntime.ops = {list: aiList, read: aiRead, search: aiSearch, create: aiCreate, update: aiUpdate, remove: aiRemove};
@@ -1223,6 +1467,10 @@ function App() {
     try { bak = JSON.parse(localStorage.getItem(BACKUP_KEY)); } catch {}
     if (!bak || !Array.isArray(bak.works)) { setToast('没有可恢复的数据快照 · No snapshot'); return; }
     if (!window.confirm(`恢复 ${bak.at} 的数据快照？当前内容会先另存一份新快照（可再恢复回来），桌面版会写回知识库文件夹。`)) return;
+    // 确认框承诺的「先另存一份新快照」：连库时 localStorage 全量快照缺位（saveSnapshot 直接
+    // 返回），至少把内存里与备份有差异的条目存进应用内快照（IndexedDB），「文件恢复」可找回
+    snapshotBeforeAdopt({works, notes, drafts, readings, archives},
+      {works: bak.works ?? [], notes: bak.notes ?? SEED_NOTES, drafts: bak.drafts ?? [], readings: bak.readings ?? [], archives: bak.archives ?? []});
     adoptData({
       works: bak.works, notes: bak.notes ?? SEED_NOTES, ideas: bak.ideas ?? [], drafts: bak.drafts ?? [],
       readings: bak.readings ?? [], archives: bak.archives ?? [],
@@ -1362,6 +1610,106 @@ function App() {
     adoptData({works: seedWorks(), notes: SEED_NOTES, ideas: seedIdeas, drafts: seedDrafts, readings: seedReadings, archives: seedArchives, snapshot, concepts: CONCEPTS}, '已切回示例数据 · Sample data restored');
   }
 
+  // —— 多库快速切换：换根目录 → 重读附属数据 → 按启动首读口径灌入（等同重启后连上该库）——
+  // metaReady 先关门：换库期间分类/闪念的变化不回写盘；附属数据按新库「替换」而非并集
+  // （旧库的闪念/分类已在 setRoot 的 writeMetaNow 里落进旧库，不能跟着渗透到新库）。
+  async function switchVault(dir) {
+    if (!dir || dir === getRoot()) return;
+    metaReady.current = false;
+    await setRoot(dir); // 旧库队列先写尽、附属数据先落旧库
+    window.deepnotes?.vault?.watch?.(dir);
+    const meta = await loadMeta();
+    if (meta) {
+      hydrateConceptMeta(meta);
+      if (Array.isArray(meta.inbox)) setInbox(meta.inbox);
+      if (Array.isArray(meta.folders)) setFolders(meta.folders);
+      if (Array.isArray(meta.readFolders)) setReadFolders(meta.readFolders);
+    }
+    metaReady.current = true;
+    // force：用户亲自切库不算「文件数骤减」（内存里还是旧库条目，骤减守卫的基线对不上）
+    const data = await syncRef.current({startup: true, force: true});
+    if (!data?.counts?.all) showGlobalNotice('该知识库没有读到内容：确认文件夹还在原位，或先导入一次 · Vault appears empty');
+  }
+
+  // 批量替换的执行端：把命中正文整体替换（内部统一走正则；普通模式转义查找串 + 忽略大小写，
+  // 且替换串里的 $ 按字面处理——普通模式用户预期没有 $& / $1 展开语义）
+  function applyVaultReplace(scope, find, repl, useRe) {
+    if (!find) return 0;
+    let rx = null;
+    if (useRe) { try { rx = new RegExp(find, 'g'); } catch { return 0; } }
+    else rx = new RegExp(escapeRe(find), 'gi');
+    const rep = useRe ? repl : String(repl).replace(/\$/g, '$$$$');
+    let n = 0;
+    const cur = {works, notes, drafts, readings, archives};
+    const setters = {works: setWorks, notes: setNotes, drafts: setDrafts, readings: setReadings, archives: setArchives};
+    for (const kind of Object.keys(cur)) {
+      if (scope !== 'all' && scope !== kind) continue;
+      const list = cur[kind] || [];
+      const count = list.reduce((s, x) => s + ((String(x.body || '').match(rx) || []).length), 0); // 计数在 updater 外
+      if (!count) continue;
+      n += count;
+      setters[kind](arr => (arr || []).map(x => {
+        const s = String(x.body || '');
+        if (!s) return x;
+        const next = s.replace(rx, rep);
+        return next === s ? x : {...x, body: next};
+      }));
+    }
+    setToast(`已替换 ${n} 处 · ${n} replaced`);
+    return n;
+  }
+
+  // —— 导出分享版：整个知识库打成一个自包含 HTML（内嵌全部正文，浏览器直接打开可读）——
+  // 知识库引用图（![[x.png]]）在分享版里以文件名文本呈现；dataURL 粘贴图原样内嵌。
+  async function exportVaultHtml() {
+    setPalette(false); setModal(null);
+    const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+    const MODULES_ZH = {works: '作品库', notes: '方法库', drafts: '创作台', readings: '阅读区', archives: '档案区'};
+    const groups = [['works', works], ['notes', notes], ['drafts', drafts], ['readings', readings], ['archives', archives]]
+      .map(([kind, items]) => ({kind, name: MODULES_ZH[kind], items: items.map(x => ({
+        id: esc(kind + '-' + x.id), title: esc(x.title || '未命名'),
+        meta: esc([kind === 'readings' ? x.author : '', kind === 'works' ? (x.date || '').slice(0, 10) : kind === 'notes' ? (x.path || '').split('/').slice(1).join(' / ') : (x.date || '').slice(0, 10)].filter(Boolean).join(' · ')),
+        html: renderMarkdown(x.body || '')}))}))
+      .filter(g => g.items.length);
+    const total = groups.reduce((s, g) => s + g.items.length, 0);
+    const chars = totalChars({works, notes, drafts, readings, archives});
+    if (!total) { setToast('还没有可导出的内容 · Nothing to export'); return; }
+    const now = new Date(), p = n => String(n).padStart(2, '0');
+    const date = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(wsName)} · Deep Notes 分享版</title><style>
+:root{color-scheme:dark}body{margin:0;background:#111413;color:#ddd8cc;font:14px/1.9 -apple-system,"PingFang SC","Segoe UI",sans-serif}
+header.top{position:sticky;top:0;z-index:5;display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 22px;background:rgba(17,20,19,.92);backdrop-filter:blur(8px);border-bottom:1px solid #2c312e}
+header.top h1{margin:0;font-size:16px;font-weight:600}header.top small{color:#98a29b}
+main{display:grid;grid-template-columns:240px 1fr;min-height:calc(100vh - 53px)}
+nav{border-right:1px solid #242927;padding:18px 10px 40px;overflow:auto;max-height:calc(100vh - 53px);position:sticky;top:53px}
+nav h3{margin:14px 10px 6px;font-size:11px;color:#98a29b;letter-spacing:.08em}
+nav a{display:block;padding:4px 10px;border-radius:7px;color:#c9c3b4;text-decoration:none;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+nav a:hover{background:#1d2220;color:#e8b45a}
+article{padding:26px 34px 80px;max-width:860px}
+article h2.dt{margin:8px 0 2px;font-size:22px}article p.dm{margin:0 0 26px;color:#98a29b;font-size:12px;border-bottom:1px solid #242927;padding-bottom:14px}
+.md-preview{font-size:14.5px;line-height:1.95}.md-preview h1,.md-preview h2,.md-preview h3,.md-preview h4{margin:1.4em 0 .5em;line-height:1.4}
+.md-preview h1{font-size:20px}.md-preview h2{font-size:17px}.md-preview h3{font-size:15px}
+.md-preview code{background:#1d2220;padding:1px 5px;border-radius:4px;font-size:12.5px}
+.md-preview pre{background:#1d2220;padding:12px 14px;border-radius:9px;overflow:auto}.md-preview pre code{background:none;padding:0}
+.md-preview blockquote{margin:.8em 0;padding:2px 14px;border-left:3px solid #4a4436;color:#b3ac9b}
+.md-preview table{border-collapse:collapse}.md-preview th,.md-preview td{border:1px solid #333833;padding:5px 10px}
+.md-preview img{max-width:100%}.md-preview a{color:#8fb7d8}
+footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-top:1px solid #242927}
+@media (max-width:760px){main{grid-template-columns:1fr}nav{position:static;max-height:none;border-right:0;border-bottom:1px solid #242927}}
+</style></head><body>
+<header class="top"><h1>${esc(wsName)} · Deep Notes 分享版</h1><small>${date} 生成 · ${total} 条 · ${chars.toLocaleString('zh-CN')} 字 · 本地导出，未联网</small></header>
+<main><nav>${groups.map(g => `<h3>${esc(g.name)} · ${g.items.length}</h3>${g.items.map(x => `<a href="#${x.id}">${x.title}</a>`).join('')}`).join('')}</nav>
+<article>${groups.map(g => g.items.map(x => `<section id="${x.id}"><h2 class="dt">${x.title}</h2><p class="dm">${g.name}${x.meta ? ' · ' + x.meta : ''}</p><div class="md-preview">${x.html}</div></section>`).join('<hr style="border:0;border-top:1px solid #242927;margin:34px 0">')).join('<hr style="border:0;border-top:1px solid #242927;margin:34px 0">')}</article>
+</main><footer>由 Deep Notes 导出的只读快照 · Read-only snapshot exported by Deep Notes</footer></body></html>`;
+    const blob = new Blob([html], {type: 'text/html;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `Deep-Notes-分享版-${date}.html`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    setToast(`已导出 ${total} 条内容为单个 HTML（浏览器直接打开） · Exported`);
+  }
+
   // —— 导出全部 Markdown：按模块目录序列化成 .md；桌面版选目录逐文件落盘，网页版合并成一个文件下载 ——
   // 路径与知识库写盘共用同一套规则（resolveRels 同名标题消歧），导出的文件夹可直接当 Obsidian 库用。
   async function exportVault() {
@@ -1431,6 +1779,7 @@ function App() {
   // 返回值：读到并解析成功的 data（含 counts），任何失败 / 跳过返回 null。启动首读据此提示「没读到内容」。
   const syncFromVault = useCallback(async (opts) => {
     const startup = !!opts?.startup; // 启动首读：内存还是空占位，没有任何可被覆盖的编辑
+    const force = !!opts?.force; // 用户显式换库（switchVault）：骤减守卫的基线还是旧库条目，必须跳过
     if (!capable() || !getRoot()) return null;
     await pendingReady; // IndexedDB 兜底的挂起写先灌回内存，再判定是否跳过同步（防覆盖）
     if (!startup && hasPendingWrites()) { setToast('上次有未写盘的修改，已跳过自动同步以防覆盖 · Sync skipped'); return null; }
@@ -1446,10 +1795,14 @@ function App() {
     let data;
     try { data = await parseVault(files, getTarget()); } catch { return null; }
     if (seq !== syncSeq.current || !data.counts.all) return null;
-    const lastCount = Math.max(Number(localStorage.getItem(FILES_KEY) || 0),
-      works.length + notes.length + drafts.length + readings.length + archives.length + ideas.length);
-    // 读不到的文件计入应读数：iCloud 占位不算「库被清空」
-    if (data.counts.all + unreadable.length < lastCount * 0.7) {
+    // 骤减守卫基线：会话内有内容时以内存条数为准——应用内删除已随 diff 写进 .trash，
+    // 盘上不少于内存即属合法收缩（照常同步并在 same 分支收缩基线）；内存为空（启动首读）
+    // 才用导入基线 FILES_KEY 兜底。此前取两者 max 且删除后从不收缩 FILES_KEY：删超 30%
+    // 后自动同步被永久拦截，重启首读也被同一守卫拦成「空库」。
+    const memCount = works.length + notes.length + drafts.length + readings.length + archives.length + ideas.length;
+    const lastCount = memCount > 0 ? memCount : Math.max(Number(localStorage.getItem(FILES_KEY) || 0), 0);
+    // 读不到的文件计入应读数：iCloud 占位不算「库被清空」；force（显式换库）不做骤减判定
+    if (!force && data.counts.all + unreadable.length < lastCount * 0.7) {
       setToast(`知识库文件数量骤减（${lastCount} → ${data.counts.all}），已跳过自动同步以防误删；若确属有意删除，请重新导入一次该知识库 · Sync skipped`);
       return null;
     }
@@ -1459,6 +1812,8 @@ function App() {
     const same = sameVaultContent({works, notes, drafts, readings, archives, ideas}, data, kbConcepts);
     if (same) {
       if (unreadable.length) setToast(`知识库有 ${unreadable.length} 个文件暂时读不到（可能未从 iCloud 下载），相关内容保持原样 · Sync partial`);
+      // 无变化也要收缩基线：应用内删除落盘后的回声同步走这里，FILES_KEY 不更新会越积越高
+      try { localStorage.setItem(FILES_KEY, String(data.counts.all + unreadable.length)); } catch {}
       return data; // 文件夹没有变化就不打扰
     }
     // iCloud 占位：读不到的文件不参与删除判定，对应内容原样保留（与当前 state 同引用，
@@ -1501,6 +1856,23 @@ function App() {
     try { localStorage.setItem(FILES_KEY, String(data.counts.all + unreadable.length)); } catch {} // 文件数基线含占位文件
     return data;
   }, [works, notes, ideas, drafts, readings, archives, kbConcepts, snap]);
+  // —— 写作番茄钟：25 分钟专注 + 5 分钟休息。状态放 App（切页不中断）；倒计时秒级
+  // 刷新只在创作台的徽标组件里做，App 树不必每秒重渲染。本轮写字数 = 草稿总字数相对起点增量。
+  const [pomo, setPomo] = useState(null); // {phase: 'focus'|'break', endTs, baseChars}
+  const draftsChars = () => drafts.reduce((s, d) => s + (d.body || '').length, 0);
+  const startPomo = () => setPomo({phase: 'focus', endTs: Date.now() + 25 * 60_000, baseChars: draftsChars()});
+  useEffect(() => {
+    if (!pomo) return;
+    const t = setTimeout(() => {
+      // 经 ref 读最新草稿字数：effect 闭包里的 draftsChars 是开始那一刻的快照，25 分钟后早已过期
+      const curChars = (contentRef.current.drafts || []).reduce((s, d) => s + (d.body || '').length, 0);
+      if (pomo.phase === 'focus') {
+        setToast(`🍅 专注 25 分钟完成（本轮 +${Math.max(0, curChars - pomo.baseChars).toLocaleString('zh-CN')} 字），休息 5 分钟 · Focus done`);
+        setPomo({phase: 'break', endTs: Date.now() + 5 * 60_000, baseChars: pomo.baseChars});
+      } else { setToast('☕ 休息结束，继续写吧 · Break over, back to writing'); setPomo(null); }
+    }, Math.max(0, pomo.endTs - Date.now()));
+    return () => clearTimeout(t);
+  }, [pomo]); // eslint-disable-line react-hooks/exhaustive-deps
   // 挂载跑一次启动首读，并开始监听外部改动：主进程 fs.watch 防抖 2s → 渲染层再防抖 3s → 同一比对
   // （应用自己写盘引发的回环只是多一次便宜的全量比对，无变化时静默，无害）。
   // 磁盘唯一事实源：启动先把上次没写成的挂起编辑补写进知识库（落盘才算数），再读盘灌入界面；
@@ -1568,6 +1940,9 @@ function App() {
     {group: '跳转 Go', icon: 'concept', zh: '打开概念网络', en: 'Go to Concepts', run: () => setPage('concepts')},
     {group: '数据 Data', icon: 'file', zh: '导入知识库文件夹', en: 'Import vault folder', run: () => setModal('import')},
     {group: '数据 Data', icon: 'outlink', zh: '导入选定内容', en: 'Import selected files', run: () => setModal('import-files')},
+    {group: '数据 Data', icon: 'search', zh: '批量替换', en: 'Find & replace', run: () => setModal('replace')},
+    {group: '数据 Data', icon: 'pulse', zh: '写作统计', en: 'Writing stats', run: () => setModal('stats')},
+    {group: '数据 Data', icon: 'outlink', zh: '导出分享版 HTML', en: 'Export shareable HTML', run: exportVaultHtml},
     {group: '数据 Data', icon: 'save', zh: '导出全部 Markdown', en: 'Export all Markdown', run: exportVault},
     {group: '数据 Data', icon: 'replay', zh: '恢复数据快照', en: 'Restore data snapshot', run: restoreSnapshot},
     {group: '数据 Data', icon: 'replay', zh: '文件恢复', en: 'File recovery', run: () => setModal('recovery')},
@@ -1618,6 +1993,12 @@ function App() {
       })}</nav>
       <div className="top-actions">
         <button className="pill primary" onClick={() => newDraft()}><Icon name="plus" size={14}/>新建草稿 <em>New</em></button>
+        {capable() && knownVaults().length > 1 && <label className="vault-switch" title="切换知识库 · Switch vault">
+          <Icon name="file" size={13}/>
+          <select value={getRoot() || ''} onChange={e => { if (e.target.value) switchVault(e.target.value); }} aria-label="切换知识库 Switch vault">
+            {knownVaults().map(v => <option key={v.path} value={v.path}>{v.path.replace(/\/+$/, '').split('/').pop()}</option>)}
+          </select>
+        </label>}
         <NetSwitch/>
         <button className="icon-btn" onClick={() => setModal('plugins')} title="插件管理 Plug-ins" aria-label="插件管理 Plug-ins"><Icon name="spark" size={15}/></button>
         <button className="avatar" onClick={() => setModal('about')} aria-label="知识库信息与数据来源"><img src={asset(CONFIG.avatar)} alt=""/></button>
@@ -1626,12 +2007,12 @@ function App() {
 
     <main>
       {page === 'home' && <>
-        <Home graph={graph} layout={layout} focus={focus} setFocus={setFocus} onAction={onAction} onAbout={() => setModal('about')} reduced={reduced} name={wsName} onRename={setWsName} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions}/>
+        <Home graph={graph} layout={layout} focus={focus} setFocus={setFocus} onAction={onAction} onAbout={() => setModal('about')} reduced={reduced} name={wsName} onRename={setWsName} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions} layoutMode={layoutMode} onToggleLayout={() => setLayoutMode(m => m === 'force' ? 'radial' : 'force')}/>
         <Snapshot goal={goal} onGoal={() => { setGoalInput(String(goal)); setModal('goal'); }} ideas={ideas} drafts={drafts} works={works} notes={notes} onIdea={editIdea} onDraft={id => { setActive(id); setPage('drafts'); }} onLibrary={id => { if (typeof id === 'string') setLibSel(id); setPage('library'); }} snap={snap} graph={graph}/>
       </>}
       {page === 'library' && <Library graph={graph} works={works} selected={libSel} setSelected={setLibSel} openArticle={openArticle} setOpenArticle={setOpenArticle} onNewWork={newWork} onUpdateWork={updateWork} onDeleteWork={deleteWork} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions}/>}
-      {page === 'methods' && <Methods graph={graph} notes={notes} setNotes={setNotes} selected={methSel} setSelected={setMethSel} onGo={openInGraph} onJumpContent={openContent} onNew={addNote} onDelete={deleteNote} onUpdate={updateNote} onMove={id => setModal({move: {kind: 'note', id}})} folders={folders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveNoteToFolder} onCreateFolder={createFolder} onRenameFolder={renameFolder} onDeleteFolder={deleteFolder}/>}
-      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onGo={openInGraph} onJumpContent={openContent} works={works} notes={notes} onMove={id => setModal({move: {kind: 'draft', id}})} inbox={inbox} setInbox={setInbox} onFlashToDraft={flashToDraft} onFlashToNote={flashToNote} onDaily={openDaily}/>}
+      {page === 'methods' && <Methods graph={graph} notes={notes} setNotes={setNotes} selected={methSel} setSelected={setMethSel} onGo={openInGraph} onJumpContent={openContent} onNew={addNote} onDelete={deleteNote} onUpdate={updateNote} onMove={id => setModal({move: {kind: 'note', id}})} onMerge={mergeNotes} folders={folders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveNoteToFolder} onCreateFolder={createFolder} onRenameFolder={renameFolder} onDeleteFolder={deleteFolder}/>}
+      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onGo={openInGraph} onJumpContent={openContent} works={works} notes={notes} onMove={id => setModal({move: {kind: 'draft', id}})} inbox={inbox} setInbox={setInbox} onFlashToDraft={flashToDraft} onFlashToNote={flashToNote} onDaily={openDaily} pomo={pomo} onPomoStart={startPomo} onPomoStop={() => setPomo(null)}/>}
       {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onNew={() => editIdea({id: nextIdeaId(ideas), title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
       {page === 'readings' && <Readings graph={graph} readings={readings} selected={readSel} setSelected={setReadSel} openReading={readOpen} setOpenReading={setReadOpen} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onNew={newReading} onUpdate={updateReading} onDelete={deleteReading} readFolders={readFolders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveReadingToFolder} onCreateFolder={createReadingFolder} onRenameFolder={renameReadingFolder} onDeleteFolder={deleteReadingFolder} onLinkify={linkifyMentions} onImportFiles={importReadingItems}/>}
       {page === 'archives' && <Archives graph={graph} archives={archives} selected={arcSel} setSelected={setArcSel} openArchive={arcOpen} setOpenArchive={setArcOpen} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onNew={newArchive} onUpdate={updateArchive} onDelete={deleteArchive} onLinkify={linkifyMentions}/>}
@@ -1651,6 +2032,8 @@ function App() {
     {toast && <div className="toast glass" role="status"><Icon name="check" size={15}/>{toast}</div>}
     {/* AI 助手浮动入口：工作台已有 dock 常驻对话，其余页面用右下角按钮唤起同一个会话 */}
     {page !== 'home' && <AiFab/>}
+    {/* 每日随机回顾：左下角浮动入口（本会话可隐藏） */}
+    <DailyRecall works={works} notes={notes} readings={readings} archives={archives} onOpen={openContent}/>
 
     {/* ⌘K 全局命令面板：全文搜索 + 新建 / 跳转 / 导入导出 */}
     <CommandPalette open={palette} onClose={() => setPalette(false)} graph={graph} actions={paletteActions} onOpenContent={openContent}/>
@@ -1663,6 +2046,7 @@ function App() {
           <button className="pill" disabled={!curItem?.item} title={curItem?.item ? `导出《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentMd}><Icon name="save" size={14}/>导出当前 · Markdown <em>MD</em></button>
           <button className="pill" disabled={!curItem?.item} title={curItem?.item ? `打印 / 另存 PDF《${curItem.item.title}》` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentPdf}><Icon name="outlink" size={14}/>导出当前 · PDF <em>Print</em></button>
           <button className="pill" onClick={() => setModal('recovery')}><Icon name="replay" size={14}/>文件恢复 <em>Recovery</em></button>
+          <button className="pill" onClick={() => setModal('stats')}><Icon name="pulse" size={14}/>写作统计 <em>Stats</em></button>
           <button className="pill ghost" onClick={resetToSample}>切回示例数据 <em>Reset</em></button>
         </div>
         <p className="quiet">随时按 <kbd>⌘K</kbd>（Windows 为 <kbd>Ctrl K</kbd>）呼出命令面板：全文搜索、新建、跳转、导出全部 Markdown、恢复数据快照都在那里。「导入选定内容」挑几个 .md 文件合并进某个模块（同标题更新、其余追加，不动其他内容），整体替换请用「导入知识库文件夹」；「导出当前」是正在看的那篇（文章全文 / 草稿 / 方法笔记 / 阅读 / 档案），PDF 经系统打印对话框「另存为 PDF」。任何整体替换之前都会自动存一份快照，可从 ⌘K 恢复；内容被意外覆盖时（外部同步、同名顶掉等），用「文件恢复」从两层快照网里找回旧版本。<em>Press ⌘K anywhere; imports are snapshotted first and reversible; overwritten versions live in File recovery.</em></p>
@@ -1716,6 +2100,33 @@ function App() {
         <p className="quiet">frontmatter 里的 author / source / date / folder / tags 照常识别；阅读区条目带上 folder 字段会自动归入对应分类。合并前会自动存数据快照，可从 ⌘K 恢复。<em>Frontmatter is honored; a snapshot is saved first.</em></p>
       </div>
     </Modal>}
+    {modal === 'replace' && <ReplaceModal works={works} notes={notes} drafts={drafts} readings={readings} archives={archives} onClose={close} onApply={applyVaultReplace}/>}
+    {modal === 'stats' && (() => {
+      const list = dailyDeltas(loadStats()).slice(-14);
+      const maxDelta = Math.max(1, ...list.map(x => x.delta));
+      const streak = streakDays(loadStats());
+      const today = list[list.length - 1];
+      const d = new Date(), pd = n => String(n).padStart(2, '0');
+      const dayStr = `${d.getFullYear()}-${pd(d.getMonth() + 1)}-${pd(d.getDate())}`;
+      const todayDelta = today && today.d === dayStr ? today.delta : 0; // 今天还没记录时不显示昨天的增量
+      const mods = [['作品库', works], ['方法库', notes], ['创作台', drafts], ['阅读区', readings], ['档案区', archives]].map(([zh, arr]) => [zh, arr.reduce((s, x) => s + (x.body || '').length, 0)]);
+      const modMax = Math.max(1, ...mods.map(([, c]) => c));
+      return <Modal title="写作统计" en="Writing stats" onClose={close}>
+        <div className="about">
+          <div className="kpi-band glass" style={{marginBottom: 14}}>
+            {[['今日新增', 'Today', todayDelta.toLocaleString('zh-CN') + ' 字'], ['连续写作', 'Streak', `${streak} 天`], ['全库总字数', 'Total', totalChars({works, notes, drafts, readings, archives}).toLocaleString('zh-CN')]].map(([zh, en, v]) =>
+              <div key={zh}><span>{zh} <em>{en}</em></span><strong>{v}</strong></div>)}
+          </div>
+          <h3>最近 14 天 <em>Last 14 days</em></h3>
+          <div className="stats-bars">{list.length ? list.map(x => <div key={x.d} className="stats-bar" title={`${x.d}：+${x.delta.toLocaleString('zh-CN')} 字`}>
+            <i style={{'--h': x.delta / maxDelta}}/><small>{x.d.slice(5)}</small>
+          </div>) : <p className="quiet">还没有记录，写下第一笔后就会出现（每天记一次全库字数快照）。<em>No data yet.</em></p>}</div>
+          <h3>模块字数分布 <em>By module</em></h3>
+          <div className="stats-mods">{mods.map(([zh, c]) => <div key={zh} className="stats-mod"><span>{zh}</span><i style={{'--w': c / modMax}}/><b>{c.toLocaleString('zh-CN')}</b></div>)}</div>
+          <p className="quiet">统计只存在本机（每天一条全库字数快照，最多 400 天），不联网、不写入知识库。<em>Local-only daily snapshots.</em></p>
+        </div>
+      </Modal>;
+    })()}
     {modal === 'goal' && <Modal title="本月写作目标" en="Monthly goal" onClose={close}>
       <form className="form" onSubmit={e => { e.preventDefault(); const n = Number(goalInput); if (Number.isInteger(n) && n >= 1 && n <= 100) { setGoal(n); setModal(null); setToast('写作目标已更新 · Goal updated'); } }}>
         <p className="quiet">本月已新建 {monthPosts.length} 篇。目标只保存在当前浏览器。</p>

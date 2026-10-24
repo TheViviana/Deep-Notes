@@ -388,3 +388,47 @@ test('writeMetaNow 竞态：写盘期间的新 patch 保留 dirty 并补写，�
     globalThis.window = {};
   }
 });
+
+test('改名链折叠：同条目连续改名只落最终路径不留中间孤儿；同名新建让位仍 move 先行', async () => {
+  const calls = [];
+  window.deepnotes = {vault: {
+    write: async (root, rel, body) => { calls.push(['write', rel]); return {ok: true}; },
+    move: async (root, from, to) => { calls.push(['move', from, to]); return {ok: true}; },
+    trash: async (root, rel) => { calls.push(['trash', rel]); return {ok: true}; },
+  }};
+  store.set(VAULT_ROOT_KEY, '/tmp/vault');
+
+  // 场景一：逐键改名（不 flush），折叠为「最早路径 → 最终路径」一次 move + 一次 write
+  const v0 = {id: 'k1', title: '甲', body: 'x'};
+  const v1 = {...v0, title: '甲乙'};
+  const v2 = {...v0, title: '甲乙丙'};
+  const m0 = resolveRels('drafts', [v0]);
+  const m1 = resolveRels('drafts', [v1]);
+  const m2 = resolveRels('drafts', [v2]);
+  queueSync('drafts', v0, null, m0);
+  queueSync('drafts', v1, v0, m1, m0);
+  queueSync('drafts', v2, v1, m2, m1);
+  await flush();
+  assert.deepEqual(calls, [
+    ['move', '03-创作台/正在写/甲.md', '03-创作台/正在写/甲乙丙.md'],
+    ['write', '03-创作台/正在写/甲乙丙.md'],
+  ]);
+
+  // 场景二：同名新建顶掉旧条目——旧条目让位的 move 必须先于新条目写原名
+  calls.length = 0;
+  const old = {id: 'k2', title: '同名', body: '旧'};
+  const old2 = {...old, body: '旧2'};
+  const fresh = {id: 'k3', title: '同名', body: '新'};
+  const mo = resolveRels('drafts', [old]);
+  const displaced = resolveRels('drafts', [fresh, old2]); // fresh 排前占原名，旧条目被挤到消歧路径
+  queueSync('drafts', old, null, mo);                 // 旧条目先写原名（尚未 flush）
+  queueSync('drafts', fresh, null, displaced);        // 新条目占同名
+  queueSync('drafts', old2, old, displaced, mo);      // 旧条目改名让位
+  await flush();
+  const kinds = calls.map(c => c[0]);
+  const moveIdx = kinds.indexOf('move');
+  const writeOrig = calls.findIndex(c => c[0] === 'write' && c[1] === '03-创作台/正在写/同名.md');
+  assert.ok(moveIdx >= 0, '让位 move 存在');
+  assert.ok(writeOrig > moveIdx, `新条目写原名必须晚于让位 move（move=${moveIdx}, write=${writeOrig}）`);
+  assert.ok(calls.some(c => c[0] === 'write' && /同名--\w+\.md$/.test(c[1])), '旧条目内容落在消歧路径');
+});

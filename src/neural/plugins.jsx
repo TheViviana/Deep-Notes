@@ -197,15 +197,37 @@ export function parseOutline(text) {
 
 // 大纲目录：平时自动收进编辑区右缘、只露一条竖线；悬停竖线（或面板）滑出，
 // 离开约 .35s 后收回（用 hide 方向的 transition-delay 实现，纯 CSS 无需计时器）。
-export function TocPanel({outline, cur, jump}) {
+// docId 提供时启用章节书签：星标章节钉在面板顶部、一键直达（按「层级:标题文本」记，容错行号漂移）。
+const BM_KEY = CONFIG.storagePrefix + '-toc-bookmarks-v1';
+export function TocPanel({outline, cur, jump, docId = ''}) {
+  const bmKey = h => `${h.level}:${h.text}`;
+  const load = () => { try { const v = JSON.parse(localStorage.getItem(BM_KEY)); return new Set(Array.isArray(v?.[docId]) ? v[docId] : []); } catch { return new Set(); } };
+  const [marks, setMarks] = useState(load);
+  useEffect(() => { if (docId) setMarks(load()); }, [docId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const toggleMark = h => {
+    const next = new Set(marks);
+    const k = bmKey(h);
+    if (next.has(k)) next.delete(k); else next.add(k);
+    setMarks(next);
+    try {
+      const all = JSON.parse(localStorage.getItem(BM_KEY)) || {};
+      all[docId] = [...next];
+      localStorage.setItem(BM_KEY, JSON.stringify(all));
+    } catch {} // 书签是便利功能，存不进不影响大纲
+  };
+  const starred = outline.filter(h => marks.has(bmKey(h)));
+  const row = (h, star) => <div key={(star ? '★' : '') + h.line} className="toc-row">
+    <button className={h.line === cur ? 'on' : ''} style={{'--lv': h.level - 1}}
+      title={h.text} onClick={() => jump(h.line)}>{h.text}</button>
+    {docId && <button className={`toc-star${star ? ' on' : ''}`} aria-label={star ? `移除书签 ${h.text}` : `书签 ${h.text}`}
+      title={star ? '移除书签 Remove bookmark' : '加书签 Bookmark'} onClick={() => toggleMark(h)}>★</button>}
+  </div>;
   return <div className="toc-dock">
     <i className="toc-rail" aria-hidden="true" data-n={outline.length}/>
     <nav className="toc-panel glass" aria-label="大纲目录 Outline">
-      <p>大纲 <em>Outline</em></p>
-      <div className="toc-list">{outline.map(h =>
-        <button key={h.line} className={h.line === cur ? 'on' : ''} style={{'--lv': h.level - 1}}
-          title={h.text} onClick={() => jump(h.line)}>{h.text}</button>)}
-      </div>
+      <p>大纲 <em>Outline</em>{docId && outline.length ? <span className="toc-bm-count">★ {starred.length}</span> : null}</p>
+      {starred.length > 0 && <div className="toc-list toc-starred">{starred.map(h => row(h, true))}</div>}
+      <div className="toc-list">{outline.map(h => row(h, false))}</div>
     </nav>
   </div>;
 }
@@ -214,7 +236,7 @@ export function TocPanel({outline, cur, jump}) {
 // 用法：const fx = useEditorEnhancers({area, value, onChange, wiki, title, titles});
 // textarea: onKeyDown={fx.onKeyDown} onBlur={fx.onBlur} onChange 里追加 fx.onInput(e.target)
 // 渲染 {fx.bar}（编辑区上方）、{fx.toc}（editor-area 内）、{fx.menu}、{fx.ask}；页脚追加 fx.badges(text)
-export function useEditorEnhancers({area, value, onChange, wiki, title, titles, preview, previewMode}) {
+export function useEditorEnhancers({area, value, onChange, wiki, title, titles, preview, previewMode, docId = ''}) {
   const {on} = usePlugins();
   const {on: netOn} = useNetwork();
   const [userTpls, setUserTpls] = useUserTemplates();
@@ -228,6 +250,11 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
   const pendSel = useRef(null); // mutate 目标选区（同帧连续按键时校正用）
 
   const tw = on('typewriter');
+  // 粘贴等 DOM 监听只在挂载时绑定一次，捕获的是首帧渲染的 mutate/onChange 闭包；
+  // 提交必须经 ref 走最新渲染的 onChange，否则切换草稿/笔记后粘贴会写进过期目标并
+  // 把整个数组回滚到挂载快照（其他条目的编辑被静默吞掉）
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
   // —— 粘贴处理：图片压缩存盘；富文本（HTML）转 Markdown；其余按纯文本 ——
   useEffect(() => {
     const el = area.current;
@@ -288,7 +315,7 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
   // 用户往往已经开始在别处打字，这时再拽光标会让后续输入全部落到过期位置（如「空行打字跑到上一行」）。
   const mutate = (next, selStart, selEnd = selStart) => { // selEnd 缺省 = 折叠光标：单参调用点不会把 undefined 写进 pendSel / setSelectionRange
     pendSel.current = [selStart, selEnd]; // 记录目标选区：同帧内连续按键时 React 尚未重渲染，DOM 选区是旧值
-    onChange(next);
+    onChangeRef.current(next);
     requestAnimationFrame(() => {
       pendSel.current = null;
       const el = area.current;
@@ -776,7 +803,7 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
     ask,
     badges: text => on('readingtime') ? [readingTime(text)] : [],
     bar,
-    toc: tocOn && outline.length ? <TocPanel outline={outline} cur={curLine} jump={jumpTo}/> : null,
+    toc: tocOn && outline.length ? <TocPanel outline={outline} cur={curLine} jump={jumpTo} docId={docId}/> : null,
   };
 }
 

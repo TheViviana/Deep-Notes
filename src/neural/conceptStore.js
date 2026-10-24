@@ -24,7 +24,7 @@ if (typeof window !== 'undefined') {
     const snap = e.detail;
     if (snap && typeof snap === 'object') {
       const sh = readShadow();
-      for (const k of ['conceptExtras', 'conceptReview', 'paraCards', 'paraReview']) {
+      for (const k of ['conceptExtras', 'conceptReview', 'paraCards', 'paraReview', 'aiMemory', 'aiPersona']) {
         if (snap[k] && typeof snap[k] === 'object') sh[k] = snap[k];
       }
       writeShadow(sh);
@@ -111,6 +111,44 @@ export function gradeConcept(name, grade) { gradeIn(conceptReview, name, grade);
 // 复习调度与概念卡同一条 Leitner 曲线，进度按卡片 id 存 -para-review-v1。
 export const paraCards = makeStore('-para-cards-v1', 'paraCards');
 export const paraReview = makeStore('-para-review-v1', 'paraReview');
+
+// —— AI 长期记忆与人设：localStorage 本机保存，连库时随 .deepnotes/meta.json 走 ——
+// aiMemory：{list: [{id, text, ts}]}——AI 的跨会话记忆（可由工具写入 / 导入 .md）；
+// aiPersona：{enabled: bool, text: string}——用户自定义人设，随时启停，启用时注入系统提示。
+export const aiMemory = makeStore('-ai-memory-v1', 'aiMemory');
+export const aiPersona = makeStore('-ai-persona-v1', 'aiPersona');
+const AI_MEM_MAX = 300;        // 条数上限（超出删最旧）
+const AI_MEM_TEXT_MAX = 2000;  // 单条字数上限（超出截断并标注）
+export function saveAiMemory(text) {
+  const t = String(text || '').trim();
+  if (!t) return null;
+  const clipped = t.length > AI_MEM_TEXT_MAX ? t.slice(0, AI_MEM_TEXT_MAX) + '…（已截断）' : t;
+  const cur = aiMemory.get();
+  const list = Array.isArray(cur.list) ? cur.list : [];
+  // id 随机段取 7 位：导入 .md 时同毫秒批量入库，3 位随机的生日碰撞概率 ~2.6%（重复 key + 误删）
+  const entry = {id: 'm-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 9), text: clipped, ts: Date.now()};
+  const next = [...list, entry].slice(-AI_MEM_MAX);
+  aiMemory.write({list: next});
+  return entry;
+}
+export function forgetAiMemory(id) {
+  const cur = aiMemory.get();
+  aiMemory.write({list: (Array.isArray(cur.list) ? cur.list : []).filter(x => x.id !== id)});
+}
+// 供系统提示消费的记忆文本：按时间正序、单条限 400 字、总长限 8000 字（从最新往前留）
+export function aiMemoryPrompt() {
+  const list = Array.isArray(aiMemory.get().list) ? aiMemory.get().list : [];
+  if (!list.length) return '';
+  const items = list.map(x => String(x.text || '').slice(0, 400));
+  let out = '', used = 0;
+  const picked = [];
+  for (let i = items.length - 1; i >= 0; i--) { // 最新的优先保留
+    if (used + items[i].length > 8000) break;
+    picked.unshift(items[i]);
+    used += items[i].length;
+  }
+  return picked.map(t => `- ${t}`).join('\n');
+}
 export function saveParaCard(text, source) {
   const id = 'pc-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   paraCards.write({...paraCards.get(), [id]: {id, text, source, ts: Date.now()}});
@@ -130,7 +168,7 @@ export function gradePara(id, grade) { gradeIn(paraReview, id, grade); }
 // 审计 B7）；没有 shadow（老用户首次升级 / 从未写盘成功过）退化为本地优先，与旧行为一致。
 export function hydrateConceptMeta(meta) {
   if (!meta || typeof meta !== 'object') return;
-  const pairs = [[conceptExtras, 'conceptExtras'], [conceptReview, 'conceptReview'], [paraCards, 'paraCards'], [paraReview, 'paraReview']];
+  const pairs = [[conceptExtras, 'conceptExtras'], [conceptReview, 'conceptReview'], [paraCards, 'paraCards'], [paraReview, 'paraReview'], [aiMemory, 'aiMemory'], [aiPersona, 'aiPersona']];
   const shadow = readShadow();
   const hasShadow = shadow && typeof shadow === 'object';
   hydrating = true;

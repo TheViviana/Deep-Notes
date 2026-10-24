@@ -39,7 +39,12 @@ export function useWikiComplete({titles, areaRef, onChange, headings}) {
     setSuggest({q: raw, start: el.selectionStart - raw.length, end: el.selectionEnd, list}); setPick(0);
   };
   const insert = t => {
-    const el = areaRef.current, s = live.current.suggest.start, e = live.current.suggest.end ?? el.selectionStart;
+    const el = areaRef.current, sug = live.current.suggest;
+    if (!el || !sug) return;
+    const s = sug.start, e = sug.end ?? el.selectionStart;
+    // 偏移校验：菜单打开时的 [[ 上下文已不在此处（切换草稿/笔记后 textarea 被程序化换值，
+    // 无 input 事件、菜单残留），按旧偏移切割新正文会把双链插错位置——直接关菜单不误插
+    if (el.value.slice(s - 2, s) !== '[[' || el.value.slice(s, s + sug.q.length) !== sug.q) { setSuggest(null); return; }
     const value = el.value.slice(0, s) + t.title + ']]' + el.value.slice(e).replace(/^\]\]/, '');
     const pos = s + t.title.length + 2;
     onChange(value); setSuggest(null);
