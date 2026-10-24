@@ -57,6 +57,29 @@ export function treeToOutline(root) {
   return lines.join('\n');
 }
 
+// 导图 → 草稿 Markdown：一级分支转成 ## 小节，更深层级转成缩进列表，节点备注转为引用行
+export function mapToDraftMarkdown(map) {
+  const tree = outlineToTree(map?.outline || '');
+  const lines = [];
+  const walk = (node, depth) => {
+    for (const c of node.children || []) {
+      const p = parseNodeText(c.text);
+      const label = p.label || '未命名';
+      if (depth === 0) {
+        lines.push(`## ${label}`, '');
+        if (p.note) lines.push(`> ${p.note}`, '');
+        walk(c, 1);
+        if (lines[lines.length - 1] !== '') lines.push('');
+      } else {
+        lines.push('  '.repeat(depth - 1) + `- ${label}${p.note ? `（${p.note}）` : ''}`);
+        walk(c, depth + 1);
+      }
+    }
+  };
+  walk(tree, 0);
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 // 文章正文 → 树：单遍走正文行，标题行入栈成枝、正文段落按位置挂在「当时栈顶」的标题下
 // （此前先收标题再挂段落的实现会把所有段落错挂到最后一节）。
 // 代码块里的内容不当段落；无标题时正文直接挂根。

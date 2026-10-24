@@ -20,7 +20,7 @@ function loadWinPos() {
 }
 
 // —— 画布：横向树，拖拽平移、⌘+滚轮缩放、选中节点的编辑与增删 ——
-function MapCanvas({map, onChange, onOpenSource}) {
+function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, onToDraft}) {
   const tree = useMemo(() => outlineToTree(map.outline), [map.outline]);
   const folded = map.folded || {};
   const [selId, setSelId] = useState(null);
@@ -89,7 +89,7 @@ function MapCanvas({map, onChange, onOpenSource}) {
   const commitText = () => {
     if (!editing) return;
     const t = editVal.trim() || '未命名';
-    if (editing === 'title') onChange({...map, title: t});
+    if (editing === 'title' || editing === tree.id) onChange({...map, title: t}); // 中心主题不进大纲文本，改名即改导图标题
     else applyTree(root => {
       const n = findNode(root, editing);
       if (n) { const p = parseNodeText(n.text); n.text = formatNodeText(t, p.note, p.color); }
@@ -324,6 +324,10 @@ function MapCanvas({map, onChange, onOpenSource}) {
             className={`mm-dot c-${c}${selMeta.color === c ? ' on' : ''}`} title={`标记颜色 ${c}（再点一次取消）`} aria-label={`节点颜色 ${c}`}/>)}
         </span>
         <button className="pill ghost" disabled={!selId} onClick={openNote} title="编辑节点备注">备注</button>
+        <button className={`pill ghost${outlineOpen ? ' on' : ''}`} aria-pressed={!!outlineOpen} onClick={onToggleOutline}
+          title="文本大纲：与画布双向同步，可拖动分割线调宽 · Outline panel">大纲 <em>Outline</em></button>
+        {onToDraft && <button className="pill ghost" onClick={() => onToDraft(map)}
+          title="按导图结构生成一篇新草稿（一级分支转小节） · Convert to draft"><Icon name="draft" size={13}/>转草稿</button>}
         <button className="pill ghost" onClick={() => exportPng()} title="导出为 PNG 图片 · Export PNG"><Icon name="outlink" size={13}/>PNG</button>
         <span className="mm-zoom">
           <button className="icon-btn" onClick={() => setZoom(z => Math.max(0.35, +(z - 0.1).toFixed(2)))} aria-label="缩小">−</button>
@@ -358,22 +362,23 @@ function MapCanvas({map, onChange, onOpenSource}) {
           const kids = (e.node.children || []).length;
           const hidden = kids > 0 && !!folded[e.node.id]; // kids 为 0 时不能返回 0：React 会把 0 当文本渲染（旧版叶子节点后面多出一个「0」）
           const meta = parseNodeText(e.node.text);
+          const label = e.depth === 0 ? (map.title || '未命名导图') : meta.label; // 中心主题显示导图标题（根文本不进大纲）
           return <div key={e.node.id}
             className={`mm-node${selId === e.node.id ? ' sel' : ''}${e.depth === 0 ? ' root' : ''}${hidden ? ' folded' : ''}${meta.color ? ' c-' + meta.color : ''}`}
-            style={{left: x, top: y, width: 150 * zoom}}
+            style={{left: x, top: y, width: 150 * zoom, minHeight: 34 * zoom, padding: `${5 * zoom}px ${9 * zoom}px`, borderRadius: 9 * zoom, fontSize: 12.5 * zoom}}
             draggable={editing !== e.node.id}
             onDragStart={ev => { dragId.current = e.node.id; ev.dataTransfer.effectAllowed = 'move'; try { ev.dataTransfer.setData('text/plain', e.node.id); } catch {} }}
             onDragOver={ev => { const src = dragId.current; if (src && src !== e.node.id && !isAncestorId(src, e.node.id)) ev.preventDefault(); }}
             onDrop={ev => { ev.preventDefault(); const src = dragId.current || ev.dataTransfer.getData('text/plain'); dragId.current = null; moveNodeTo(src, e.node.id); }}
             onDragEnd={() => { dragId.current = null; }}
             onClick={ev => { ev.stopPropagation(); setSelId(e.node.id); if (editing && editing !== e.node.id) commitText(); }}
-            onDoubleClick={() => { setEditing(e.node.id); setEditVal(meta.label); }}
-            title={`${meta.label}${meta.note ? `\n备注：${meta.note}` : ''}\n双击改文字 · 拖动可重排`}>
+            onDoubleClick={() => { setEditing(e.node.id); setEditVal(label); }}
+            title={`${label}${meta.note ? `\n备注：${meta.note}` : ''}\n双击改文字 · 拖动可重排`}>
             {editing === e.node.id
               ? <input autoFocus value={editVal} onChange={ev => setEditVal(ev.target.value)} onBlur={commitText}
                   onKeyDown={ev => { if (ev.key === 'Enter' && !ev.isComposing) commitText(); if (ev.key === 'Escape') setEditing(null); }}
                   onClick={ev => ev.stopPropagation()} aria-label="节点文字"/>
-              : <span className="mm-text">{meta.label || '　'}</span>}
+              : <span className="mm-text">{label || '　'}</span>}
             {meta.note && <i className="mm-note-dot" title={`备注：${meta.note}`} aria-hidden="true">•</i>}
             {hidden && <em className="mm-badge">+{kids}</em>}
           </div>;
@@ -385,7 +390,7 @@ function MapCanvas({map, onChange, onOpenSource}) {
 }
 
 // —— 浮动窗口：拖拽标题栏移动、右下角拉伸调整大小，位置尺寸记忆 ——
-export function MindMapWindow({open, onClose, onOpenContent, initialSel}) {
+export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDraft}) {
   const store = mindmapStore.use();
   const list = Array.isArray(store.list) ? store.list : [];
   const [sel, setSel] = useState(null);
@@ -393,6 +398,25 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel}) {
   const [name, setName] = useState('');
   const [win, setWin] = useState(loadWinPos);
   const [sideOpen, setSideOpen] = useState(true);
+  // 大纲面板：可收起，宽度可拖拽（记忆在 localStorage）
+  const OUTLINE_KEY = CONFIG.storagePrefix + '-mm-outline-v1';
+  const OUTLINE_W_KEY = CONFIG.storagePrefix + '-mm-outline-w-v1';
+  const [outlineOpen, setOutlineOpen] = useState(() => { try { return JSON.parse(localStorage.getItem(OUTLINE_KEY)) === true; } catch { return false; } });
+  const [outlineW, setOutlineW] = useState(() => { try { const v = JSON.parse(localStorage.getItem(OUTLINE_W_KEY)); return Number.isFinite(v) ? Math.max(160, Math.min(480, v)) : 240; } catch { return 240; } });
+  useEffect(() => { try { localStorage.setItem(OUTLINE_KEY, JSON.stringify(outlineOpen)); } catch {} }, [OUTLINE_KEY, outlineOpen]);
+  useEffect(() => { try { localStorage.setItem(OUTLINE_W_KEY, JSON.stringify(outlineW)); } catch {} }, [OUTLINE_W_KEY, outlineW]);
+  const outlineWRef = useRef(outlineW);
+  outlineWRef.current = outlineW;
+  // 分割线拖拽：向右拖变窄、向左拖变宽（面板在右侧），钳制 160–480
+  const onSplitDown = e => {
+    e.preventDefault();
+    const sx = e.clientX, ow = outlineWRef.current;
+    const move = ev => setOutlineW(Math.max(160, Math.min(480, ow - (ev.clientX - sx))));
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  };
   const headRef = useRef(null);
   const resizeRef = useRef(null);
   const winRef = useRef(win);
@@ -491,8 +515,20 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel}) {
           {!list.length && !creating && <p className="empty-line">还没有导图<em>No maps</em></p>}
         </aside>}
         {cur
-          ? <MapCanvas map={cur} onChange={changeMap} onOpenSource={gid => { onClose(); onOpenContent(gid); }}/>
+          ? <MapCanvas map={cur} onChange={changeMap} onOpenSource={gid => { onClose(); onOpenContent(gid); }}
+              outlineOpen={outlineOpen} onToggleOutline={() => setOutlineOpen(o => !o)} onToDraft={onToDraft}/>
           : <section className="mm-canvas empty"><p className="empty-line">选一张导图或点 ＋ 新建<em>Pick or create</em></p></section>}
+        {cur && outlineOpen && <>
+          <div className="mm-split" role="separator" aria-orientation="vertical" aria-label="调整大纲宽度"
+            title="拖动调整大纲宽度 Drag to resize" onPointerDown={onSplitDown}/>
+          <aside className="mm-outline" style={{width: outlineW}} aria-label="文本大纲">
+            <header className="mm-outline-head"><span>大纲 <em>Outline</em></span><span>与画布双向同步</span></header>
+            <textarea value={cur.outline} aria-label="大纲文本（缩进表示层级）"
+              placeholder={'每行一个节点，行首两个空格表示缩进一级\n- 也可以直接粘贴列表'}
+              onChange={e => changeMap({...cur, outline: e.target.value})}
+              onKeyDown={e => e.stopPropagation()}/>
+          </aside>
+        </>}
       </div>
       <div className="mm-resize" ref={resizeRef} title="拖动调整窗口大小" aria-hidden="true"/>
     </div>

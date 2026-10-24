@@ -26,6 +26,7 @@ import {T} from './theme';
 import {Modal} from './Modal.jsx';
 import {DailyRecall, ReplaceModal, PomodoroFab, loadPomoSettings} from './mainModals.jsx';
 import {MindMapWindow, makeMapFromItem} from './MindMaps.jsx';
+import {mapToDraftMarkdown} from './mindmap';
 import {PrivateNotes} from './PrivateNotes.jsx';
 import {playRing} from './ring.js';
 import {noiseStart, noiseStop} from './noise.js';
@@ -1646,6 +1647,16 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
     setToast('思维导图已生成 / 更新 · Mind map ready');
   }
 
+  // 导图 → 草稿：一级分支转小节、深层转列表、备注转引用行；生成后跳到创作台
+  function mmToDraft(map) {
+    const body = mapToDraftMarkdown(map);
+    if (!body) { setToast('导图还没有内容，先在画布或大纲里加几个节点 · Map is empty'); return; }
+    const id = 'draft-' + Date.now();
+    setDrafts(ds => [{id, title: map.title || '未命名导图', body, source: null}, ...ds]);
+    setActive(id); setPage('drafts'); setMmOpen(false);
+    setToast(`已把导图《${map.title || '未命名导图'}》转成新草稿 · Converted to draft`);
+  }
+
   // 桌面版打开软件自动同步：已连接知识库文件夹时重新读取文件夹内容（文件夹是唯一事实来源，
   // 应用内的编辑本来就会写回文件夹）。选题池同样落盘（04-选题池），随文件夹全量对齐。
   // 比对只看会写进文件的字段（忽略 updatedAt / capturedAt 等应用内字段），完全一致时静默返回。
@@ -1945,7 +1956,7 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
     </div>
 
     {/* 思维导图浮动窗口 */}
-    <MindMapWindow open={mmOpen} onClose={() => setMmOpen(false)} onOpenContent={openContent} initialSel={mmSel}/>
+    <MindMapWindow open={mmOpen} onClose={() => setMmOpen(false)} onOpenContent={openContent} initialSel={mmSel} onToDraft={mmToDraft}/>
 
     {/* ⌘K 全局命令面板：全文搜索 + 新建 / 跳转 / 导入导出 */}
     <CommandPalette open={palette} onClose={() => setPalette(false)} graph={graph} actions={paletteActions} onOpenContent={openContent}/>

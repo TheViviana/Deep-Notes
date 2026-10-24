@@ -582,6 +582,19 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .drafts-layout.unfocusing .draft-links { animation: focusReturnR .34s cubic-bezier(.2, .8, .2, 1) both; }
 @keyframes focusReturnL { from { opacity: 0; transform: translateX(-14px); } to { opacity: 1; transform: none; } }
 @keyframes focusReturnR { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
+/* 方法库只有两栏（列表 + 编辑器），覆盖三栏模板避免右侧空出一条 320px 轨道 */
+.drafts-layout.methods-page { grid-template-columns: 250px minmax(0, 1fr); }
+/* 左侧列表可收起：只留一条细导轨，正文区左移占满（方便边看内容边开思维导图浮动窗） */
+.drafts-layout.list-hidden { grid-template-columns: 40px minmax(0, 1fr) 320px; }
+.drafts-layout.methods-page.list-hidden { grid-template-columns: 40px minmax(0, 1fr); }
+.drafts-layout.list-hidden .draft-list { display: none; }
+.drafts-layout.focused.list-hidden { grid-template-columns: minmax(0, 1fr); }
+.drafts-layout.focused .list-rail { display: none; }
+.list-rail { position: sticky; top: 80px; width: 40px; min-height: 140px; display: grid; place-items: center; padding: 0; color: var(--text-2); cursor: pointer; }
+.list-rail:hover { color: var(--gold); border-color: rgba(232, 180, 90, .45); }
+.list-toggle { flex: none; display: grid; place-items: center; width: 22px; height: 22px; margin-left: 4px; border: 0; border-radius: 7px; background: none; color: var(--muted); cursor: pointer; }
+.list-toggle:hover { color: var(--gold); background: rgba(255, 255, 255, .05); }
+.list-toggle svg { transform: rotate(180deg); }
 .editor-area.split { display: grid; grid-template-columns: minmax(0, var(--cmp-split, 50%)) 10px minmax(0, 1fr); align-items: stretch; }
 .editor-main { position: relative; display: block; }
 .read-view, .cmp-view { min-height: 40vh; max-height: 64vh; overflow: auto; font-size: 15px; line-height: 1.9; padding: 10px 0; }
@@ -757,7 +770,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .mm-overlay { position: fixed; inset: 0; z-index: 70; background: transparent; pointer-events: auto; }
 .mm-window { position: fixed; z-index: 75; display: flex; flex-direction: column; border-radius: 16px; overflow: hidden; box-shadow: 0 16px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.06); min-width: 400px; min-height: 300px; }
 .mm-window-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); cursor: move; user-select: none; flex: none; }
-.mm-window-head b { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; }
+.mm-window-head b { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .mm-window-tools { display: flex; align-items: center; gap: 4px; }
 .mm-window-body { display: flex; flex: 1; min-height: 0; }
 .mm-window .mm-list { width: 200px; flex: none; border-right: 1px solid var(--line); overflow: auto; padding: 8px; display: grid; gap: 3px; align-content: start; }
@@ -809,7 +822,14 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .mm-bar-title input { font: inherit; font-size: 15px; padding: 3px 8px; border-radius: 7px; border: 1px solid var(--gold); background: none; color: var(--text); outline: none; }
 .mm-bar-title small { color: var(--muted); font-size: 11.5px; }
 .mm-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.mm-tools .pill { padding: 3px 10px; font-size: 11.5px; }
+.mm-tools .pill { padding: 3px 10px; font-size: 11.5px; white-space: nowrap; flex: none; }
+.mm-tools .pill.on { border-color: rgba(232, 180, 90, .55); color: var(--gold); background: rgba(232, 180, 90, .1); }
+/* 大纲面板：右侧可收起、分割线可拖拽调宽 */
+.mm-split { flex: none; width: 6px; margin: 0 -1px 0 -1px; cursor: col-resize; z-index: 2; }
+.mm-split:hover, .mm-split:active { background: rgba(232, 180, 90, .25); }
+.mm-outline { flex: none; display: flex; flex-direction: column; border-left: 1px solid var(--line); min-width: 160px; background: rgba(16, 18, 18, .5); }
+.mm-outline-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+.mm-outline textarea { flex: 1; width: 100%; resize: none; border: 0; outline: none; background: none; color: var(--text); padding: 10px 12px; font: 12px/1.75 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .mm-zoom { display: inline-flex; align-items: center; gap: 5px; margin-left: 6px; }
 .mm-zoom b { font-size: 11.5px; color: var(--text-2); min-width: 38px; text-align: center; }
 .mm-viewport { position: relative; overflow: auto; min-height: 0; cursor: grab; background: radial-gradient(circle at 1px 1px, rgba(255,255,255,.05) 1px, transparent 1.5px) 0 0 / 26px 26px; }
@@ -1086,6 +1106,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 /* —— 响应式 —— */
 @media (max-width: 1180px) {
   .drafts-layout { grid-template-columns: 220px minmax(0, 1fr); }
+  .drafts-layout.list-hidden, .drafts-layout.methods-page.list-hidden { grid-template-columns: 40px minmax(0, 1fr); }
   .draft-links { grid-column: 1 / -1; position: static; }
   .topbar nav button { padding: 6px 11px; }
   .brand-text small { display: none; }
@@ -1112,6 +1133,8 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
   .kpi-band div:nth-child(3) { border-left: 0; }
   .kpi-band strong { font-size: 26px; }
   .drafts-layout { grid-template-columns: 1fr; }
+  .drafts-layout.list-hidden, .drafts-layout.methods-page.list-hidden { grid-template-columns: 1fr; }
+  .list-rail { position: static; width: 100%; min-height: 34px; }
   .draft-list { position: static; }
   .hub-copy { left: 16px; top: 68px; right: 16px; }
   .hub-copy h1 { font-size: 22px; }
@@ -1188,6 +1211,10 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .rf-add:hover { color: var(--text); border-color: rgba(118, 216, 245, .4); }
 .rf-add em { margin-left: auto; opacity: .6; font-size: 10px; }
 .rf-hint { margin: 12px 6px 2px; color: var(--muted); font-size: 10.5px; line-height: 1.7; }
+/* 阅读区分类目录可收起（与方法库 / 创作台同一套交互） */
+.readings-layout.list-hidden { grid-template-columns: 40px minmax(0, 1fr) clamp(380px, 32vw, 460px); }
+.readings-layout.list-hidden .read-folders { display: none; }
+.read-folders h3 .list-toggle { margin-left: auto; }
 .rf-hint em { display: block; opacity: .7; }
 .read-card.dragging { opacity: .35; }
 .read-folders h3 em, .rf-name em { font-style: normal; }
@@ -1197,7 +1224,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .intro-veil.fade { opacity: 0; transition: opacity .62s ease; pointer-events: none; }
 @media (prefers-reduced-motion: reduce) { .intro-veil { display: none; } }
 @media (max-width: 960px) {
-  .readings-layout { grid-template-columns: 1fr; }
+  .readings-layout, .readings-layout.list-hidden { grid-template-columns: 1fr; }
   .read-folders { position: static; max-height: none; }
 }
 

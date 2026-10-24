@@ -167,6 +167,8 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
   const [splitPct, setSplitPct] = useLocalState(CONFIG.storagePrefix + '-drafts-split-v1', 50); // 对照分屏左栏宽度（25–75%）
   const [dragSplit, setDragSplit] = useState(false);
   const [inboxOpen, setInboxOpen] = useState(false); // 闪念箱抽屉
+  // 左侧草稿列表可收起：收起后正文区左移占满，方便边读边开思维导图浮动窗
+  const [listHidden, setListHidden] = useLocalState(CONFIG.storagePrefix + '-drafts-list-v1', false);
   const change = (key, value) => setDrafts(drafts.map(d => d.id === draft.id ? {...d, [key]: value} : d));
   const titles = useMemo(() => graph.nodes.filter(n => CONTENT.has(n.kind) && n.id !== 'draft:' + draft?.id).map(n => ({id: n.id, title: n.path?.split('/').pop().replace(/\.md$/, '') || n.title, short: n.short || n.title, kind: n.kind})), [graph, draft?.id]);
   const heads = useMemo(() => headingMap(graph), [graph]);
@@ -231,9 +233,13 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
       <button className="pill primary" onClick={() => onNew()}><Icon name="plus" size={15}/>新建草稿 <em>New draft</em></button>
     </PageHead>
     {inboxOpen && <InboxPanel items={inbox} setItems={setInbox} onToDraft={onFlashToDraft} onToNote={onFlashToNote} onDaily={onDaily} onClose={() => setInboxOpen(false)}/>}
-    <div className={`drafts-layout${focusMode ? ' focused' : ''}${unfocusing ? ' unfocusing' : ''}`}>
+    <div className={`drafts-layout${focusMode ? ' focused' : ''}${unfocusing ? ' unfocusing' : ''}${listHidden ? ' list-hidden' : ''}`}>
+      {listHidden && <button className="list-rail glass" aria-label="展开草稿列表" aria-expanded="false"
+        title="展开草稿列表 · Show draft list" onClick={() => setListHidden(false)}><Icon name="chevron" size={14}/></button>}
       <aside className="draft-list glass">
-        <h3>我的草稿 <em>My drafts</em><b>{drafts.length}</b></h3>
+        <h3>我的草稿 <em>My drafts</em><b>{drafts.length}</b>
+          <button className="list-toggle" aria-label="收起草稿列表" title="收起列表，正文区左移占满（边栏再点可展开） · Collapse list" onClick={() => setListHidden(true)}><Icon name="chevron" size={12}/></button>
+        </h3>
         {drafts.map(d => <button key={d.id} className={d.id === draft?.id ? 'active' : ''} onClick={() => setActive(d.id)}>
           <i/><span>{d.title || '未命名草稿'}<small>{(d.body || '').length} 字 chars · {graph.index.get('draft:' + d.id)?.deg || 0} 连接 links</small></span>
         </button>)}
@@ -336,6 +342,8 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
   const [mergeB, setMergeB] = useState('');
   // 专注模式：与创作台同一套机制（隐藏左列表 + focusIn 动画 + 退出滑回），位置单独持久化
   const [focusMode, setFocusMode] = useLocalState(CONFIG.storagePrefix + '-methods-focus-v1', false);
+  // 左侧笔记列表可收起：收起后正文区左移占满，方便边读边开思维导图浮动窗
+  const [listHidden, setListHidden] = useLocalState(CONFIG.storagePrefix + '-methods-list-v1', false);
   const focusFx = useRef(null);
   const [unfocusing, setUnfocusing] = useState(false);
   const toggleFocus = () => {
@@ -408,9 +416,13 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
       {notes.length >= 2 && <button className="pill" onClick={() => { setMerging(true); setMergeA(note?.id || notes[0].id); setMergeB(notes.find(n => n.id !== (note?.id || notes[0].id))?.id || ''); }} title="把两篇笔记合并成一篇 · Merge two notes"><Icon name="draft" size={15}/>合并 <em>Merge</em></button>}
       <button className="pill primary" onClick={onNew}><Icon name="plus" size={15}/>新建笔记 <em>New note</em></button>
     </PageHead>
-    <div className={`drafts-layout methods-page${focusMode ? ' focused' : ''}${unfocusing ? ' unfocusing' : ''}`}>
+    <div className={`drafts-layout methods-page${focusMode ? ' focused' : ''}${unfocusing ? ' unfocusing' : ''}${listHidden ? ' list-hidden' : ''}`}>
+      {listHidden && <button className="list-rail glass" aria-label="展开笔记列表" aria-expanded="false"
+        title="展开笔记列表 · Show note list" onClick={() => setListHidden(false)}><Icon name="chevron" size={14}/></button>}
       <aside className="draft-list glass">
-        <h3>方法笔记 <em>Method notes</em><b>{notes.length}</b></h3>
+        <h3>方法笔记 <em>Method notes</em><b>{notes.length}</b>
+          <button className="list-toggle" aria-label="收起笔记列表" title="收起列表，正文区左移占满（边栏再点可展开） · Collapse list" onClick={() => setListHidden(true)}><Icon name="chevron" size={12}/></button>
+        </h3>
         <label className="search"><Icon name="search" size={14}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索笔记… Search notes" aria-label="搜索方法笔记"/></label>
         {groups.map(g => {
           const open = !collapsed[g.name];
@@ -531,6 +543,8 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
 export function Readings({graph, readings, selected, setSelected, openReading, setOpenReading, onGo, onJumpContent, onAction, onNew, onUpdate, onDelete, readFolders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder, onLinkify, onImportFiles, onMakeMap}) {
   const [q, setQ] = useState('');
   const [curFolder, setCurFolder] = useState(null); // null = 全部；「未分类」是删除分类时的兜底去处
+  // 左侧分类目录可收起：收起后内容区左移占满，方便边读边开思维导图浮动窗
+  const [listHidden, setListHidden] = useLocalState(CONFIG.storagePrefix + '-readings-list-v1', false);
   const [renaming, setRenaming] = useState(null);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
@@ -592,9 +606,13 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
       <button className="pill primary" onClick={onNew}><Icon name="plus" size={15}/>添加阅读 <em>New reading</em></button>
     </PageHead>
     <input ref={fileRef} type="file" accept=".pdf,.docx,.html,.htm,.md,.markdown,.txt" multiple hidden onChange={onPickFiles} aria-hidden="true"/>
-    <div className="library-layout readings-layout">
+    <div className={`library-layout readings-layout${listHidden ? ' list-hidden' : ''}`}>
+      {listHidden && <button className="list-rail glass" aria-label="展开分类目录" aria-expanded="false"
+        title="展开分类目录 · Show folders" onClick={() => setListHidden(false)}><Icon name="chevron" size={14}/></button>}
       <aside className="read-folders glass" aria-label="阅读分类目录">
-        <h3>分类 <em>Folders</em></h3>
+        <h3>分类 <em>Folders</em>
+          <button className="list-toggle" aria-label="收起分类目录" title="收起分类目录，内容区左移占满（边栏再点可展开） · Collapse folders" onClick={() => setListHidden(true)}><Icon name="chevron" size={12}/></button>
+        </h3>
         <div className={`rf-row${curFolder == null ? ' active' : ''}`}>
           <button className="rf-name" onClick={() => setCurFolder(null)}><Icon name="book" size={12}/><span>全部阅读</span><b>{readings.length}</b></button>
         </div>
