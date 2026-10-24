@@ -24,7 +24,11 @@ import {totalChars, recordDaily, loadStats, dailyDeltas, streakDays, knownVaults
 import {resolveTarget, scrollToAnchor} from './wiki';
 import {T} from './theme';
 import {Modal} from './Modal.jsx';
-import {DailyRecall, ReplaceModal} from './mainModals.jsx';
+import {DailyRecall, ReplaceModal, PomodoroFab, loadPomoSettings} from './mainModals.jsx';
+import {MindMaps, makeMapFromItem} from './MindMaps.jsx';
+import {PrivateNotes} from './PrivateNotes.jsx';
+import {playRing} from './ring.js';
+import {noiseStart, noiseStop} from './noise.js';
 import './neural.css';
 
 // 选题、草稿与目标保存在当前浏览器（localStorage）——仅网页版 / 未连接知识库时如此。
@@ -303,7 +307,7 @@ const MOVE_EN = {works: 'Works', methods: 'Methods', drafts: 'Drafts', ideas: 'I
 // 各类内容的常驻模块（移动弹窗里禁用当前所在项）
 const HOME_OF = {post: 'works', note: 'methods', draft: 'drafts', idea: 'ideas', reading: 'readings', archive: 'archives'};
 // 初始页面取自 URL hash；概念网络不在 navs（顶栏独立入口）但同样是合法页面
-const PAGES = [...navs.map(n => n[0]), 'concepts'];
+const PAGES = [...navs.map(n => n[0]), 'concepts', 'mindmaps', 'private'];
 const initialPage = () => { const h = location.hash.slice(1); return PAGES.includes(h) ? h : 'home'; };
 
 // 联网开关：默认断网；打开后仅「沉浸式翻译」插件会访问翻译服务，其余功能依然全本地。
@@ -430,6 +434,7 @@ function App() {
   const monthPosts = useMemo(() => monthWorks(works), [works]);
   const [toast, setToast] = useState('');
   const [palette, setPalette] = useState(false); // ⌘K 全局命令面板
+  const [mmSel, setMmSel] = useState(null); // 从文章生成的导图：跳进导图页后要选中的 id
   const reduced = useMemo(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches, []);
   // 手动概念关键词（概念内页编辑）并入词表：与导入概念按名字合并去重，随图谱一起参与正文提及匹配
   const extras = conceptExtras.use();
@@ -1603,6 +1608,20 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
     printArticle({title: cur.item.title || '未命名', meta: curMeta(cur), html: renderMarkdown(cur.item.body || '')});
   }
 
+  // —— 文章 / 笔记 / 阅读 / 档案 → 思维导图：按标题层级建树（同源重复生成是更新），
+  // 段落收为「¶ 摘句」叶节点；生成后跳导图页并选中，导图里可一键返回原文。
+  function makeMapFor(kind, item) {
+    if (!item) return;
+    // source 用 openContent 认识的图谱 id 前缀（works→post 等），导图里「返回原文」才能直达
+    const KIND_GID = {works: 'post', notes: 'note', drafts: 'draft', readings: 'reading', archives: 'archive'};
+    const gid = (KIND_GID[kind] || kind) + ':' + item.id;
+    const id = makeMapFromItem(gid, item.title, item.body || '');
+    if (!id) return; // 用户取消了重新生成
+    setMmSel(id);
+    setPage('mindmaps');
+    setToast('思维导图已生成 / 更新 · Mind map ready');
+  }
+
   // 桌面版打开软件自动同步：已连接知识库文件夹时重新读取文件夹内容（文件夹是唯一事实来源，
   // 应用内的编辑本来就会写回文件夹）。选题池同样落盘（04-选题池），随文件夹全量对齐。
   // 比对只看会写进文件的字段（忽略 updatedAt / capturedAt 等应用内字段），完全一致时静默返回。
@@ -1701,15 +1720,21 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
   // 刷新只在创作台的徽标组件里做，App 树不必每秒重渲染。本轮写字数 = 草稿总字数相对起点增量。
   const [pomo, setPomo] = useState(null); // {phase: 'focus'|'break', endTs, baseChars}
   const draftsChars = () => drafts.reduce((s, d) => s + (d.body || '').length, 0);
-  const startPomo = () => setPomo({phase: 'focus', endTs: Date.now() + 25 * 60_000, baseChars: draftsChars()});
+  const startPomo = (focusMin = 25, breakMin = 5) => {
+    const set = loadPomoSettings();
+    if (set.noise && set.noise !== 'none') noiseStart(set.noise); // 专注期间白噪音，结束即停
+    setPomo({phase: 'focus', endTs: Date.now() + focusMin * 60_000, baseChars: draftsChars(), breakMin});
+  };
   useEffect(() => {
     if (!pomo) return;
     const t = setTimeout(() => {
-      // 经 ref 读最新草稿字数：effect 闭包里的 draftsChars 是开始那一刻的快照，25 分钟后早已过期
+      // 经 ref 读最新草稿字数：effect 闭包里的 draftsChars 是开始那一刻的快照，番茄钟走完早已过期
       const curChars = (contentRef.current.drafts || []).reduce((s, d) => s + (d.body || '').length, 0);
+      noiseStop(); // 白噪音随专注结束停止（休息段保持安静）
+      playRing(loadPomoSettings().sound); // 到时间响铃：默认滴滴（WebAudio 合成）或用户导入的音频
       if (pomo.phase === 'focus') {
-        setToast(`🍅 专注 25 分钟完成（本轮 +${Math.max(0, curChars - pomo.baseChars).toLocaleString('zh-CN')} 字），休息 5 分钟 · Focus done`);
-        setPomo({phase: 'break', endTs: Date.now() + 5 * 60_000, baseChars: pomo.baseChars});
+        setToast(`🍅 专注完成（本轮 +${Math.max(0, curChars - pomo.baseChars).toLocaleString('zh-CN')} 字），休息 ${pomo.breakMin || 5} 分钟 · Focus done`);
+        setPomo({phase: 'break', endTs: Date.now() + (pomo.breakMin || 5) * 60_000, baseChars: pomo.baseChars, breakMin: pomo.breakMin});
       } else { setToast('☕ 休息结束，继续写吧 · Break over, back to writing'); setPomo(null); }
     }, Math.max(0, pomo.endTs - Date.now()));
     return () => clearTimeout(t);
@@ -1786,6 +1811,8 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
     {group: '新建 New', icon: 'archive', zh: '新建档案', en: 'New archive', run: newArchive},
     ...navs.map(([id, zh, en]) => ({group: '跳转 Go', icon: MODULE_ICON[id], zh: `打开${zh}`, en: `Go to ${en}`, run: () => setPage(id)})),
     {group: '跳转 Go', icon: 'concept', zh: '打开概念网络', en: 'Go to Concepts', run: () => setPage('concepts')},
+    {group: '跳转 Go', icon: 'file', zh: '打开思维导图', en: 'Go to Mind maps', run: () => { setMmSel(null); setPage('mindmaps'); }},
+    {group: '跳转 Go', icon: 'file', zh: '打开隐私笔记', en: 'Go to Private notes', run: () => setPage('private')},
     {group: '数据 Data', icon: 'file', zh: '导入知识库文件夹', en: 'Import vault folder', run: () => setModal('import')},
     {group: '数据 Data', icon: 'outlink', zh: '导入选定内容', en: 'Import selected files', run: () => setModal('import-files')},
     {group: '数据 Data', icon: 'search', zh: '批量替换', en: 'Find & replace', run: () => setModal('replace')},
@@ -1858,13 +1885,15 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
         <Home graph={graph} layout={layout} focus={focus} setFocus={setFocus} onAction={onAction} onAbout={() => setModal('about')} reduced={reduced} name={wsName} onRename={setWsName} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions}/>
         <Snapshot goal={goal} onGoal={() => { setGoalInput(String(goal)); setModal('goal'); }} ideas={ideas} drafts={drafts} works={works} notes={notes} onIdea={editIdea} onDraft={id => { setActive(id); setPage('drafts'); }} onLibrary={id => { if (typeof id === 'string') setLibSel(id); setPage('library'); }} snap={snap} graph={graph}/>
       </>}
-      {page === 'library' && <Library graph={graph} works={works} selected={libSel} setSelected={setLibSel} openArticle={openArticle} setOpenArticle={setOpenArticle} onNewWork={newWork} onUpdateWork={updateWork} onDeleteWork={deleteWork} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions}/>}
+      {page === 'library' && <Library graph={graph} works={works} selected={libSel} setSelected={setLibSel} openArticle={openArticle} setOpenArticle={setOpenArticle} onNewWork={newWork} onUpdateWork={updateWork} onDeleteWork={deleteWork} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions} onMakeMap={makeMapFor}/>}
       {page === 'methods' && <Methods graph={graph} notes={notes} setNotes={setNotes} selected={methSel} setSelected={setMethSel} onGo={openInGraph} onJumpContent={openContent} onNew={addNote} onDelete={deleteNote} onUpdate={updateNote} onMove={id => setModal({move: {kind: 'note', id}})} onMerge={mergeNotes} folders={folders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveNoteToFolder} onCreateFolder={createFolder} onRenameFolder={renameFolder} onDeleteFolder={deleteFolder}/>}
-      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onGo={openInGraph} onJumpContent={openContent} works={works} notes={notes} onMove={id => setModal({move: {kind: 'draft', id}})} inbox={inbox} setInbox={setInbox} onFlashToDraft={flashToDraft} onFlashToNote={flashToNote} onDaily={openDaily} pomo={pomo} onPomoStart={startPomo} onPomoStop={() => setPomo(null)}/>}
+      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onGo={openInGraph} onJumpContent={openContent} works={works} notes={notes} onMove={id => setModal({move: {kind: 'draft', id}})} inbox={inbox} setInbox={setInbox} onFlashToDraft={flashToDraft} onFlashToNote={flashToNote} onDaily={openDaily}/>}
       {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onNew={() => editIdea({id: nextIdeaId(ideas), title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
-      {page === 'readings' && <Readings graph={graph} readings={readings} selected={readSel} setSelected={setReadSel} openReading={readOpen} setOpenReading={setReadOpen} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onNew={newReading} onUpdate={updateReading} onDelete={deleteReading} readFolders={readFolders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveReadingToFolder} onCreateFolder={createReadingFolder} onRenameFolder={renameReadingFolder} onDeleteFolder={deleteReadingFolder} onLinkify={linkifyMentions} onImportFiles={importReadingItems}/>}
-      {page === 'archives' && <Archives graph={graph} archives={archives} selected={arcSel} setSelected={setArcSel} openArchive={arcOpen} setOpenArchive={setArcOpen} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onNew={newArchive} onUpdate={updateArchive} onDelete={deleteArchive} onLinkify={linkifyMentions}/>}
+      {page === 'readings' && <Readings graph={graph} readings={readings} selected={readSel} setSelected={setReadSel} openReading={readOpen} setOpenReading={setReadOpen} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onNew={newReading} onUpdate={updateReading} onDelete={deleteReading} readFolders={readFolders} dragging={dragging} setDragging={setDragging} onMoveToFolder={moveReadingToFolder} onCreateFolder={createReadingFolder} onRenameFolder={renameReadingFolder} onDeleteFolder={deleteReadingFolder} onLinkify={linkifyMentions} onImportFiles={importReadingItems} onMakeMap={makeMapFor}/>}
+      {page === 'archives' && <Archives graph={graph} archives={archives} selected={arcSel} setSelected={setArcSel} openArchive={arcOpen} setOpenArchive={setArcOpen} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onNew={newArchive} onUpdate={updateArchive} onDelete={deleteArchive} onLinkify={linkifyMentions} onMakeMap={makeMapFor}/>}
       {page === 'concepts' && <Concepts graph={graph} onGo={openInGraph} onJumpContent={openContent}/>}
+      {page === 'mindmaps' && <MindMaps initialSel={mmSel} onOpenContent={openContent}/>}
+      {page === 'private' && <PrivateNotes/>}
     </main>
 
     <footer className="site-foot">
@@ -1880,8 +1909,17 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
     {toast && <div className="toast glass" role="status"><Icon name="check" size={15}/>{toast}</div>}
     {/* AI 助手浮动入口：工作台已有 dock 常驻对话，其余页面用右下角按钮唤起同一个会话 */}
     {page !== 'home' && <AiFab/>}
-    {/* 每日随机回顾：左下角浮动入口（本会话可隐藏） */}
-    <DailyRecall works={works} notes={notes} readings={readings} archives={archives} onOpen={openContent}/>
+    {/* 左下角常驻角标：每日随机回顾 + 番茄钟并排 */}
+    <div className="corner-dock">
+      <DailyRecall works={works} notes={notes} readings={readings} archives={archives} onOpen={openContent}/>
+      <PomodoroFab pomo={pomo} written={pomo?.phase === 'focus' ? Math.max(0, draftsChars() - pomo.baseChars) : 0} onStart={startPomo} onStop={() => { noiseStop(); setPomo(null); }}/>
+      <button className="pomo-fab dock-extra" onClick={() => { setMmSel(null); setPage('mindmaps'); }} title="思维导图：独立导图分类，可从文章 / 笔记生成 · Mind maps" aria-label="打开思维导图">
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="6" cy="6" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.7"/><circle cx="6" cy="18" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.7"/><circle cx="18" cy="12" r="2.6" fill="none" stroke="currentColor" strokeWidth="1.7"/><path d="M8.2 7 15.4 11M8.2 17 15.4 13" fill="none" stroke="currentColor" strokeWidth="1.7"/></svg>
+      </button>
+      <button className="pomo-fab dock-extra" onClick={() => setPage('private')} title="隐私区：本地加密笔记 · Private notes" aria-label="打开隐私笔记">
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="5.5" y="10.5" width="13" height="9" rx="2.2" fill="none" stroke="currentColor" strokeWidth="1.7"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" fill="none" stroke="currentColor" strokeWidth="1.7"/></svg>
+      </button>
+    </div>
 
     {/* ⌘K 全局命令面板：全文搜索 + 新建 / 跳转 / 导入导出 */}
     <CommandPalette open={palette} onClose={() => setPalette(false)} graph={graph} actions={paletteActions} onOpenContent={openContent}/>
@@ -1897,23 +1935,31 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
           <button className="pill" onClick={() => setModal('stats')}><Icon name="pulse" size={14}/>写作统计 <em>Stats</em></button>
           <button className="pill ghost" onClick={resetToSample}>切回示例数据 <em>Reset</em></button>
         </div>
-        <p className="quiet">随时按 <kbd>⌘K</kbd>（Windows 为 <kbd>Ctrl K</kbd>）呼出命令面板：全文搜索、新建、跳转、导出全部 Markdown、恢复数据快照都在那里。「导入选定内容」挑几个 .md 文件合并进某个模块（同标题更新、其余追加，不动其他内容），整体替换请用「导入知识库文件夹」；「导出当前」是正在看的那篇（文章全文 / 草稿 / 方法笔记 / 阅读 / 档案），PDF 经系统打印对话框「另存为 PDF」。任何整体替换之前都会自动存一份快照，可从 ⌘K 恢复；内容被意外覆盖时（外部同步、同名顶掉等），用「文件恢复」从两层快照网里找回旧版本。<em>Press ⌘K anywhere; imports are snapshotted first and reversible; overwritten versions live in File recovery.</em></p>
         <p>知识库 <em>Vault</em>：<strong>{snap.account}</strong> · 导入日期 <em>Imported</em>：{snap.capturedAt}</p>
         <p>数据来源 <em>Source</em>：{snap.source}{snap.publishedFrom ? `；内容时间跨度 ${snap.publishedFrom} — ${snap.publishedTo}` : ''}。</p>
         {capable() && getRoot() && <p>文件夹知识库 <em>Vault folder</em>：<code>{getRoot()}</code><br/>编辑会实时写回此文件夹里的 .md 文件，被删除的内容移入 <code>.trash</code>；网页版则只保存在浏览器里。</p>}
-        <hr/>
-        <h3>图谱怎么来的 <em>How the graph is built</em></h3>
-        <p>{snap.source === '导入自本地笔记' ? '全部由导入的本地笔记在浏览器中推导，不读取选择范围之外的文件：' : <>全部由 <code>src/data/sample.js</code> 里的资料在浏览器中推导，不读取外部 Obsidian 仓库：</>}</p>
-        <ul>
-          <li><b>[[双链]] Wikilinks</b>：文章、方法笔记与草稿正文中的双链；找不到对应笔记的记为「未创建」。</li>
-          <li><b>话题 Topics</b>：文章正文里的 # 话题标签。</li>
-          <li><b>正文提及 Mentions</b>：内容中出现概念词（导入时自动从重复出现的话题里提取），且至少两条内容提及才成为概念节点。</li>
-          <li><b>双向共振 Resonance</b>：两条内容共同提及 ≥2 个概念，或选题与草稿互相记录。</li>
-          <li><b>选题来源 Source</b>：草稿记录来源选题；选题状态为「已转草稿」时反向成立。</li>
-        </ul>
-        <p>作品库：{works.length} 篇文章<b>保存在此浏览器</b>{capable() && getRoot() ? '，并实时写回上面的知识库文件夹' : ''}，可自由新建、编辑、删除；导入知识库会整体替换，命令行导入（npm run import）仍然可用。</p>
-        <p>当前：{s.content} 条内容 · {s.links} 条连接 · {s.mutual} 组双向 · {s.ghosts} 个未创建双链。</p>
-        <p className="quiet">图谱分析是本地规则检索，未调用 AI。选题、草稿与目标保存在当前浏览器，不写入 Obsidian、不发布到平台。<em>Local rules only · no AI · nothing is published.</em></p>
+        <p className="about-mini">当前：{s.content} 条内容 · {s.links} 条连接 · {s.mutual} 组双向 · {s.ghosts} 个未创建双链。</p>
+        <details className="about-fold">
+          <summary>使用说明 <em>Instructions</em></summary>
+          <div className="about-fold-body">
+            <p className="quiet">随时按 <kbd>⌘K</kbd>（Windows 为 <kbd>Ctrl K</kbd>）呼出命令面板：全文搜索、新建、跳转、导出全部 Markdown、恢复数据快照都在那里。「导入选定内容」挑几个 .md 文件合并进某个模块（同标题更新、其余追加，不动其他内容），整体替换请用「导入知识库文件夹」；「导出当前」是正在看的那篇（文章全文 / 草稿 / 方法笔记 / 阅读 / 档案），PDF 经系统打印对话框「另存为 PDF」。任何整体替换之前都会自动存一份快照，可从 ⌘K 恢复；内容被意外覆盖时（外部同步、同名顶掉等），用「文件恢复」从两层快照网里找回旧版本。<em>Press ⌘K anywhere; imports are snapshotted first and reversible; overwritten versions live in File recovery.</em></p>
+          </div>
+        </details>
+        <details className="about-fold">
+          <summary>图谱怎么来的 <em>How the graph is built</em></summary>
+          <div className="about-fold-body">
+            <p>{snap.source === '导入自本地笔记' ? '全部由导入的本地笔记在浏览器中推导，不读取选择范围之外的文件：' : <>全部由 <code>src/data/sample.js</code> 里的资料在浏览器中推导，不读取外部 Obsidian 仓库：</>}</p>
+            <ul>
+              <li><b>[[双链]] Wikilinks</b>：文章、方法笔记与草稿正文中的双链；找不到对应笔记的记为「未创建」。</li>
+              <li><b>话题 Topics</b>：文章正文里的 # 话题标签。</li>
+              <li><b>正文提及 Mentions</b>：内容中出现概念词（导入时自动从重复出现的话题里提取），且至少两条内容提及才成为概念节点。</li>
+              <li><b>双向共振 Resonance</b>：两条内容共同提及 ≥2 个概念，或选题与草稿互相记录。</li>
+              <li><b>选题来源 Source</b>：草稿记录来源选题；选题状态为「已转草稿」时反向成立。</li>
+            </ul>
+            <p>作品库：{works.length} 篇文章<b>保存在此浏览器</b>{capable() && getRoot() ? '，并实时写回上面的知识库文件夹' : ''}，可自由新建、编辑、删除；导入知识库会整体替换，命令行导入（npm run import）仍然可用。</p>
+            <p className="quiet">图谱分析是本地规则检索，未调用 AI。选题、草稿与目标保存在当前浏览器，不写入 Obsidian、不发布到平台。<em>Local rules only · no AI · nothing is published.</em></p>
+          </div>
+        </details>
       </div>
     </Modal>}
     {modal === 'recovery' && <RecoveryModal onClose={close} onRestoreSnap={restoreSnapVersion} onRestoreCopy={restoreFileCopy} currentBodyOf={(kind, id) => { const arr = {works, notes, drafts, readings, archives}[kind] || []; const it = arr.find(x => String(x.id) === String(id)); return it ? (it.body || '') : null; }}/>}

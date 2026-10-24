@@ -24,7 +24,7 @@ if (typeof window !== 'undefined') {
     const snap = e.detail;
     if (snap && typeof snap === 'object') {
       const sh = readShadow();
-      for (const k of ['conceptExtras', 'conceptReview', 'paraCards', 'paraReview', 'aiMemory', 'aiPersona']) {
+      for (const k of ['conceptExtras', 'conceptReview', 'paraCards', 'paraReview', 'aiMemory', 'aiPersona', 'mindmaps', 'private']) {
         if (snap[k] && typeof snap[k] === 'object') sh[k] = snap[k];
       }
       writeShadow(sh);
@@ -117,6 +117,10 @@ export const paraReview = makeStore('-para-review-v1', 'paraReview');
 // aiPersona：{enabled: bool, text: string}——用户自定义人设，随时启停，启用时注入系统提示。
 export const aiMemory = makeStore('-ai-memory-v1', 'aiMemory');
 export const aiPersona = makeStore('-ai-persona-v1', 'aiPersona');
+// 思维导图：{list: [{id, title, outline, source, updatedAt}]}——独立分类，随库走，不进图谱
+export const mindmaps = makeStore('-mindmaps-v1', 'mindmaps');
+// 隐私笔记（密文整块存储）：{salt, check, notes:[{id, enc, ts}]}，加解密在 privateNotes.js
+export const privateStore = makeStore('-private-v1', 'private');
 const AI_MEM_MAX = 300;        // 条数上限（超出删最旧）
 const AI_MEM_TEXT_MAX = 2000;  // 单条字数上限（超出截断并标注）
 export function saveAiMemory(text) {
@@ -168,7 +172,7 @@ export function gradePara(id, grade) { gradeIn(paraReview, id, grade); }
 // 审计 B7）；没有 shadow（老用户首次升级 / 从未写盘成功过）退化为本地优先，与旧行为一致。
 export function hydrateConceptMeta(meta) {
   if (!meta || typeof meta !== 'object') return;
-  const pairs = [[conceptExtras, 'conceptExtras'], [conceptReview, 'conceptReview'], [paraCards, 'paraCards'], [paraReview, 'paraReview'], [aiMemory, 'aiMemory'], [aiPersona, 'aiPersona']];
+  const pairs = [[conceptExtras, 'conceptExtras'], [conceptReview, 'conceptReview'], [paraCards, 'paraCards'], [paraReview, 'paraReview'], [aiMemory, 'aiMemory'], [aiPersona, 'aiPersona'], [mindmaps, 'mindmaps'], [privateStore, 'private']];
   const shadow = readShadow();
   const hasShadow = shadow && typeof shadow === 'object';
   hydrating = true;

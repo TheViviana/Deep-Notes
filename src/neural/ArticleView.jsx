@@ -828,7 +828,7 @@ export function buildMirrorHtml(text, sel) {
   return out.join('');
 }
 
-export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent, onEditInfo, eyebrow = ['ARTICLE', '文章全文'], exportKind = 'works', progressId = ''}) {
+export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent, onEditInfo, onMakeMap, eyebrow = ['ARTICLE', '文章全文'], exportKind = 'works', progressId = ''}) {
   const [mode, setMode] = useState('edit');
   // 专注模式：隐藏头部信息与页脚，正文区占满（浮层本身已全屏，这里是榨出最后的可视空间）
   const [focusMode, setFocusMode] = useState(false);
@@ -893,7 +893,34 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
   const [tts, setTts] = useState(null); // {idx, rate}
   const [ttsPaused, setTtsPaused] = useState(false);
   const ttsEls = useRef([]);
-  const ttsGen = useRef(0); // 换段 / 改语速会 cancel 当前语音并触发异步 onend：代数守卫拦住过期回调
+  const ttsGen = useRef(0);
+  // —— 朗读音色：列出系统全部语音（中文排前，婷婷/升级版优先做默认），选择持久化并可试听 ——
+  // 系统里装了更好的音色（如 macOS 的婷婷升级版）会自动出现在这里；想要短视频风格的
+  // 女声，到 系统设置→辅助功能→朗读内容→系统声音→管理声音 安装后即可选用
+  const TTS_VOICE_KEY = CONFIG.storagePrefix + '-tts-voice-v1';
+  const [ttsVoices, setTtsVoices] = useState(() => { try { return window.speechSynthesis?.getVoices?.() || []; } catch { return []; } });
+  const [ttsVoiceURI, setTtsVoiceURI] = useState(() => { try { return localStorage.getItem(TTS_VOICE_KEY) || ''; } catch { return ''; } });
+  useEffect(() => {
+    if (!('speechSynthesis' in window)) return;
+    const up = () => setTtsVoices([...speechSynthesis.getVoices()]);
+    speechSynthesis.onvoiceschanged = up;
+    up();
+    return () => { speechSynthesis.onvoiceschanged = null; };
+  }, []);
+  const voiceSorted = useMemo(() => [...ttsVoices].sort((a, b) => (/^zh/i.test(b.lang) ? 1 : 0) - (/^zh/i.test(a.lang) ? 1 : 0)), [ttsVoices]);
+  const ttsVoicePick = () => ttsVoices.find(v => v.voiceURI === ttsVoiceURI)
+    || ttsVoices.find(v => /婷婷|Tingting/i.test(v.name))
+    || ttsVoices.find(v => /^zh[-_]CN/i.test(v.lang)) || null;
+  const ttsPreview = () => {
+    if (!('speechSynthesis' in window)) return;
+    ttsGen.current++; // cancel 会异步派发 end：不推进代数，朗读中的旧 onend 会把试听当成「念完」跳段
+    try { speechSynthesis.cancel(); } catch {}
+    if (ttsPaused) { try { speechSynthesis.resume(); } catch {} } // 暂停态 speak 只入队不发声
+    const u = new SpeechSynthesisUtterance('你好，这是当前语音的试听。');
+    const v = ttsVoicePick();
+    if (v) { u.voice = v; u.lang = v.lang || 'zh-CN'; } else u.lang = 'zh-CN';
+    speechSynthesis.speak(u);
+  }; // 换段 / 改语速会 cancel 当前语音并触发异步 onend：代数守卫拦住过期回调
   const ttsStop = () => {
     try { window.speechSynthesis?.cancel(); } catch {}
     ttsEls.current.forEach(el => el.classList.remove('tts-reading')); // 主动停止时高亮不随 effect 清理，这里必须显式摘掉
@@ -924,8 +951,8 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
     const u = new SpeechSynthesisUtterance(cur.textContent);
     u.lang = 'zh-CN';
     u.rate = tts.rate;
-    const zh = speechSynthesis.getVoices().find(v => /zh[-_]CN/i.test(v.lang));
-    if (zh) u.voice = zh;
+    const picked = ttsVoicePick();
+    if (picked) { u.voice = picked; u.lang = picked.lang || 'zh-CN'; }
     // 被 cancel 的语音（调速 / 换段）也会异步派发 end：代数不匹配说明是过期回调，不推进
     u.onend = () => { if (ttsGen.current === gen) setTts(t => (t ? {...t, idx: t.idx + 1} : null)); };
     u.onerror = () => { if (ttsGen.current === gen) setTts(t => (t ? {...t, idx: t.idx + 1} : null)); };
@@ -1093,6 +1120,14 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
               <button type="button" className="pill ghost" onClick={ttsPauseToggle} title={ttsPaused ? '继续朗读 · Resume' : '暂停朗读 · Pause'}>{ttsPaused ? '继续' : '暂停'} <em>{ttsPaused ? 'Resume' : 'Pause'}</em></button>
               <button type="button" className="pill ghost" title="循环切换语速 · Cycle speed"
                 onClick={() => setTts(t => ({...t, rate: TTS_RATES[(TTS_RATES.indexOf(t.rate) + 1) % TTS_RATES.length]}))}>语速 ×{tts.rate} <em>Rate</em></button>
+              <label className="tts-voice" title="选择朗读音色（中文排前；想要更好听的女声，可在系统的语音管理里安装更多音色）· Voice">
+                <select value={voiceSorted.some(v => v.voiceURI === ttsVoiceURI) ? ttsVoiceURI : ''} aria-label="朗读音色 Voice"
+                  onChange={e => { setTtsVoiceURI(e.target.value); try { localStorage.setItem(TTS_VOICE_KEY, e.target.value); } catch {} }}>
+                  <option value="">自动（优先中文女声）</option>
+                  {voiceSorted.map(v => <option key={v.voiceURI} value={v.voiceURI}>{v.name}（{v.lang}）</option>)}
+                </select>
+              </label>
+              <button type="button" className="pill ghost" onClick={ttsPreview} title="用当前音色试听一句话 · Preview">试听 <em>试听</em></button>
             </>
             : <button type="button" className="pill ghost" onClick={ttsStart} title="用系统本地语音朗读正文（离线）· Read aloud with the local system voice">朗读 <em>TTS</em></button>}
         </>}
@@ -1105,6 +1140,7 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
           {hint && <span className="av-trans-hint" role="status">{hint}</span>}
         </>}
         {expHint && <span className="av-trans-hint" role="status">{expHint === 'busy' ? '导出中… Exporting' : expHint}</span>}
+        {onMakeMap && <button className="icon-btn" onClick={() => onMakeMap(exportKind, work)} title="从标题结构生成思维导图（已生成过则更新）· Make mind map" aria-label="生成思维导图"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="6" cy="6" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.6"/><circle cx="6" cy="18" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.6"/><circle cx="18" cy="12" r="2.6" fill="none" stroke="currentColor" strokeWidth="1.6"/><path d="M8.2 7 15.4 11M8.2 17 15.4 13" fill="none" stroke="currentColor" strokeWidth="1.6"/></svg></button>}
         <button className="icon-btn" onClick={doExport} disabled={expHint === 'busy'} title="导出为 Markdown Export as Markdown" aria-label="导出为 Markdown"><Icon name="save" size={15}/></button>
         {onEditInfo && <button className="icon-btn" onClick={onEditInfo} title="编辑文章信息 Edit article info" aria-label="编辑文章信息"><Icon name="draft" size={15}/></button>}
         <button className="icon-btn" onClick={onClose} aria-label="收起文章全文"><Icon name="close" size={15}/></button>

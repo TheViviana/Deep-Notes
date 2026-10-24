@@ -1,11 +1,100 @@
-// 从 main.jsx 拆出的两个独立弹窗组件：每日随机回顾 与 全库批量替换。
+// 从 main.jsx 拆出的独立组件：每日随机回顾、全库批量替换、左下角番茄钟。
 // main.jsx 由此回到以应用壳 / 数据流为主的职责，弹窗组件独立可测。
-import React, {useDeferredValue, useEffect, useMemo, useState} from 'react';
+import React, {useDeferredValue, useEffect, useMemo, useRef, useState} from 'react';
 import {Icon} from './icons';
 import {CONFIG} from '../config';
 import {Modal} from './Modal.jsx';
+import {playRing} from './ring.js';
+import {noiseStart, noiseStop} from './noise.js';
 
 const KIND_ZH = {works: '作品库', methods: '方法库', readings: '阅读区', archives: '档案区'};
+
+// —— 番茄钟设置（时长与铃声持久化在本机；自定义铃声以 dataURL 存 localStorage，限 2MB） ——
+const POMO_KEY = CONFIG.storagePrefix + '-pomo-settings-v1';
+export function loadPomoSettings() {
+  try {
+    const v = JSON.parse(localStorage.getItem(POMO_KEY));
+    const num = (x, d) => Number.isFinite(Number(x)) && Number(x) > 0 ? Number(x) : d;
+    return {focus: num(v?.focus, 25), break: num(v?.break, 5), sound: typeof v?.sound === 'string' ? v.sound : '', noise: ['rain', 'stream', 'cafe'].includes(v?.noise) ? v.noise : 'none'};
+  } catch { return {focus: 25, break: 5, sound: '', noise: 'none'}; }
+}
+
+// —— 番茄钟（左下角常驻，与今日回顾并排）：空闲是线条小钟，运行时显示倒计时；
+// 点击展开设置面板——专注/休息时长随意定（含快捷档），铃声用默认滴滴或导入任意音频 ——
+export function PomodoroFab({pomo, written, onStart, onStop}) {
+  const [open, setOpen] = useState(false);
+  const [set, setSet] = useState(loadPomoSettings);
+  const [left, setLeft] = useState(0);
+  const soundPick = useRef(null);
+  useEffect(() => {
+    if (!pomo) { setLeft(0); return; }
+    const tick = () => setLeft(Math.max(0, Math.ceil((pomo.endTs - Date.now()) / 1000)));
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [pomo?.endTs, pomo?.phase, !!pomo]); // eslint-disable-line react-hooks/exhaustive-deps
+  const save = patch => {
+    const next = {...set, ...patch};
+    setSet(next);
+    try { localStorage.setItem(POMO_KEY, JSON.stringify(next)); } catch {
+      window.showGlobalNotice?.('番茄钟设置没能保存到本机（存储可能已满）· Pomodoro settings not saved');
+    }
+  };
+  const onPickSound = e => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    if (f.size > 2 * 1024 * 1024) { window.showGlobalNotice?.('铃声文件请控制在 2MB 以内 · Keep the ringtone under 2MB'); return; }
+    const r = new FileReader();
+    r.onload = () => { save({sound: String(r.result || '')}); playRing(String(r.result || '')); }; // 选中即试听
+    r.onerror = () => window.showGlobalNotice?.('铃声文件读取失败 · Failed to read audio');
+    r.readAsDataURL(f);
+  };
+  const mm = String(Math.floor(left / 60)).padStart(2, '0'), ss = String(left % 60).padStart(2, '0');
+  const focus = pomo?.phase === 'focus';
+  return <div className="pomo-wrap">
+    <button className={`pomo-fab${pomo ? (focus ? ' focus' : ' break') : ''}`} onClick={() => setOpen(o => !o)}
+      aria-expanded={open} aria-label={pomo ? `${focus ? '专注' : '休息'}剩余 ${mm} 分 ${ss} 秒，打开番茄钟设置` : '打开番茄钟 Pomodoro'}
+      title={pomo ? `${focus ? '专注中' : '休息中'} ${mm}:${ss} · 点击设置` : '番茄钟：自定义时长与铃声 · Pomodoro'}>
+      {pomo
+        ? <span className="pomo-time">{focus ? '🍅' : '☕'} {mm}:{ss}</span>
+        : <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.7"/><path d="M12 7.2v4.8l3.4 2.1" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"/></svg>}
+    </button>
+    {open && <div className="pomo-panel glass" role="dialog" aria-label="番茄钟设置 Pomodoro settings">
+      <header><b>番茄钟</b><em>Pomodoro</em><button className="icon-btn" onClick={() => setOpen(false)} aria-label="关闭设置"><Icon name="close" size={13}/></button></header>
+      <div className="pomo-row">
+        <label>专注 <em>Focus</em><input type="number" min="1" max="180" value={set.focus}
+          onChange={e => save({focus: Math.max(1, Math.min(180, Math.round(Number(e.target.value) || 25)))})}/> 分</label>
+        <label>休息 <em>Break</em><input type="number" min="1" max="60" value={set.break}
+          onChange={e => save({break: Math.max(1, Math.min(60, Math.round(Number(e.target.value) || 5)))})}/> 分</label>
+      </div>
+      <div className="pomo-presets" role="group" aria-label="专注时长快捷档">
+        {[15, 25, 45, 60].map(m => <button key={m} className={`pill${set.focus === m ? ' primary' : ''}`} onClick={() => save({focus: m})}>{m} 分</button>)}
+      </div>
+      <div className="pomo-sound">
+        <span className="pomo-sound-label">铃声 <em>Ring</em></span>
+        <button className={`pill${set.sound ? '' : ' primary'}`} onClick={() => { save({sound: ''}); playRing(''); }} title="WebAudio 现场合成的滴滴声">滴滴声</button>
+        <button className="pill" onClick={() => soundPick.current?.click()} title="选择本机任意音频（≤2MB）">{set.sound ? '更换铃声' : '自定义铃声'}</button>
+        <button className="pill ghost" onClick={() => playRing(set.sound)} title="播放当前铃声"><Icon name="pulse" size={12}/>试听</button>
+        <input ref={soundPick} type="file" accept="audio/*" hidden aria-hidden="true" onChange={onPickSound}/>
+      </div>
+      {set.sound && <p className="quiet pomo-sound-note">已用自定义铃声 · <button className="text-btn" onClick={() => save({sound: ''})}>恢复滴滴声</button></p>}
+      <div className="pomo-sound">
+        <span className="pomo-sound-label">白噪音 <em>Ambient</em></span>
+        {[['none', '关闭'], ['rain', '雨声'], ['stream', '溪流'], ['cafe', '咖啡馆']].map(([k, zh]) =>
+          <button key={k} className={`pill${set.noise === k ? ' primary' : ''}`} title={k === 'none' ? '专注时不播放环境音' : '本地合成，专注期间自动播放、结束即停'}
+            onClick={() => { save({noise: k}); if (k !== 'none') noiseStart(k); else noiseStop(); }}>{zh}</button>)}
+      </div>
+      {pomo
+        ? <div className="pomo-running">
+            <span>{focus ? '🍅 专注中' : '☕ 休息中'} · 剩余 {mm}:{ss}{focus && written > 0 ? <> · 本轮 +{written.toLocaleString('zh-CN')} 字</> : null}</span>
+            <button className="pill ghost" onClick={onStop}>结束本轮 <em>Stop</em></button>
+          </div>
+        : <button className="pill primary pomo-start" onClick={() => { onStart(set.focus, set.break); setOpen(false); }}><Icon name="pulse" size={13}/>开始专注 {set.focus} 分钟 <em>Start</em></button>}
+      <p className="quiet">计时在后台持续（切页不影响）；专注结束响铃并自动进入 {set.break} 分钟休息；白噪音在专注期间播放、休息与结束时停止（选中即试听，选「关闭」停止）。</p>
+    </div>}
+  </div>;
+}
 
 // —— 每日随机回顾：每天首次启动按日期种子确定性挑 3 条旧内容，浮动入口 + 弹窗速览 ——
 // 同一天多次启动抽到同三篇；点条目直接跳转打开。防止导入的旧笔记/书籍章节石沉大海。

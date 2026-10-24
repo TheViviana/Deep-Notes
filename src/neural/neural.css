@@ -754,8 +754,13 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .md-preview mark.av-find.cur { background: var(--gold); color: #16130c; }
 /* 本地语音朗读：当前正在朗读的段落 */
 .md-preview .tts-reading { background: rgba(232, 180, 90, .14); outline: 1px solid rgba(232, 180, 90, .35); border-radius: 4px; box-shadow: 0 0 0 3px rgba(232, 180, 90, .06); }
+/* 朗读音色下拉（朗读控件行内，紧凑） */
+.tts-voice select { max-width: 150px; height: 26px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255, 255, 255, .05); color: var(--text); font-size: 11.5px; outline: none; cursor: pointer; }
 /* 每日随机回顾：左下角浮动入口 + 弹窗条目 */
-.recall-fab { position: fixed; left: 16px; bottom: 16px; z-index: 80; display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); background: rgba(20, 20, 22, .85); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; backdrop-filter: blur(6px); }
+/* 左下角角标容器：今日回顾 + 番茄钟并排 */
+.corner-dock { position: fixed; left: 16px; bottom: 16px; z-index: 80; display: flex; align-items: center; gap: 8px; }
+.corner-dock .recall-fab { position: static; }
+.recall-fab { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); background: rgba(20, 20, 22, .85); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; backdrop-filter: blur(6px); }
 .recall-fab:hover { border-color: var(--gold); color: var(--gold); }
 .recall-fab em { color: var(--gold); font-style: normal; }
 .recall-item { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; border-bottom: 1px dashed var(--line); }
@@ -764,12 +769,68 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .recall-open { flex: 1; min-width: 0; display: grid; gap: 3px; border: 0; background: none; color: var(--text); text-align: left; cursor: pointer; font: inherit; }
 .recall-open:hover b { color: var(--gold); }
 .recall-open small { color: var(--text-2); font-size: 12px; line-height: 1.6; word-break: break-all; }
-/* 写作番茄钟徽标：创作台工具行内 */
-.editor-pomo { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--text-2); }
-.editor-pomo.focus { border-color: rgba(224, 145, 61, .5); color: #e0913d; }
-.editor-pomo.break { border-color: rgba(91, 143, 201, .5); color: #5b8fc9; }
-.editor-pomo button { border: 0; background: none; color: inherit; cursor: pointer; font-size: 10px; padding: 1px 2px; opacity: .7; }
-.editor-pomo button:hover { opacity: 1; }
+/* 思维导图页：清单 + 画布 */
+.mm-layout { display: grid; grid-template-columns: 260px 1fr; gap: 14px; align-items: start; }
+.mm-list { padding: 14px; display: grid; gap: 4px; }
+.mm-list h3 { margin: 0 0 6px; font-size: 13px; display: flex; align-items: baseline; gap: 6px; }
+.mm-list h3 b { margin-left: auto; color: var(--muted); font-size: 12px; }
+.mm-new input { width: 100%; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--gold); background: rgba(255,255,255,.04); color: var(--text); font: inherit; outline: none; }
+.mm-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 10px; cursor: pointer; border: 1px solid transparent; }
+.mm-item:hover { background: rgba(255,255,255,.04); }
+.mm-item.active { border-color: var(--gold); background: rgba(232,180,90,.07); }
+.mm-item-body { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.mm-item-body b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-item-body small { color: var(--muted); font-size: 11px; }
+.mm-canvas { padding: 0; overflow: hidden; display: grid; grid-template-rows: auto 1fr; min-height: 62vh; }
+.mm-canvas.empty { place-items: center; }
+.mm-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.mm-bar-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.mm-bar-title b { font-size: 15px; }
+.mm-bar-title input { font: inherit; font-size: 15px; padding: 3px 8px; border-radius: 7px; border: 1px solid var(--gold); background: none; color: var(--text); outline: none; }
+.mm-bar-title small { color: var(--muted); font-size: 11.5px; }
+.mm-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mm-tools .pill { padding: 3px 10px; font-size: 11.5px; }
+.mm-zoom { display: inline-flex; align-items: center; gap: 5px; margin-left: 6px; }
+.mm-zoom b { font-size: 11.5px; color: var(--text-2); min-width: 38px; text-align: center; }
+.mm-viewport { position: relative; overflow: auto; min-height: 0; cursor: grab; background: radial-gradient(circle at 1px 1px, rgba(255,255,255,.05) 1px, transparent 1.5px) 0 0 / 26px 26px; }
+.mm-viewport:active { cursor: grabbing; }
+.mm-inner { position: relative; }
+.mm-node { position: absolute; display: flex; align-items: center; min-height: 34px; padding: 5px 9px; border-radius: 9px; border: 1px solid var(--line); background: rgba(20,22,22,.9); font-size: 12.5px; line-height: 1.4; cursor: pointer; }
+.mm-node .mm-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-node:hover { border-color: rgba(232,180,90,.5); }
+.mm-node.sel { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(232,180,90,.12); }
+.mm-node.root { background: rgba(232,180,90,.12); font-weight: 600; }
+.mm-node.folded { opacity: .92; }
+.mm-node input { width: 100%; font: inherit; background: none; border: 0; outline: none; color: var(--text); }
+.mm-badge { margin-left: 6px; flex: none; font-size: 10px; color: var(--gold); }
+.mm-lines { position: absolute; inset: 0 auto auto 0; pointer-events: none; }
+.mm-lines path { fill: none; stroke: rgba(205,208,204,.4); stroke-width: 1.4; }
+.mm-lines path.on { stroke: rgba(232,180,90,.8); }
+.mm-hint { position: sticky; bottom: 0; margin: 0; padding: 6px 12px; font-size: 11px; color: var(--muted); background: linear-gradient(transparent, rgba(13,14,14,.9) 40%); pointer-events: none; }
+
+/* 番茄钟角标与设置面板 */
+.pomo-wrap { position: relative; }
+.pomo-fab { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 34px; height: 34px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--line); background: rgba(20, 20, 22, .85); color: var(--text-2); cursor: pointer; backdrop-filter: blur(6px); font: inherit; font-size: 12.5px; }
+.pomo-fab:hover { color: var(--gold); border-color: var(--gold); }
+.pomo-fab.focus { color: #e0913d; border-color: rgba(224, 145, 61, .55); }
+.pomo-fab.break { color: #5b8fc9; border-color: rgba(91, 143, 201, .55); }
+.pomo-fab .pomo-time { font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+.pomo-panel { position: absolute; left: 0; bottom: 44px; width: 272px; padding: 12px 14px; border-radius: 14px; display: grid; gap: 10px; }
+.pomo-panel header { display: flex; align-items: center; gap: 8px; }
+.pomo-panel header b { font-size: 14px; }
+.pomo-panel header .icon-btn { margin-left: auto; }
+.pomo-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pomo-row label { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-2); }
+.pomo-row input { width: 46px; padding: 4px 6px; border-radius: 7px; border: 1px solid var(--line); background: rgba(255,255,255,.05); color: var(--text); font: inherit; text-align: center; outline: none; }
+.pomo-presets { display: flex; gap: 5px; flex-wrap: wrap; }
+.pomo-presets .pill { padding: 3px 10px; font-size: 11.5px; }
+.pomo-sound { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.pomo-sound-label { font-size: 12px; color: var(--text-2); margin-right: 2px; }
+.pomo-sound .pill { padding: 3px 9px; font-size: 11.5px; }
+.pomo-sound-note { margin: -4px 0 0; font-size: 11.5px; }
+.pomo-sound-note .text-btn { border: 0; background: none; color: var(--gold); cursor: pointer; font: inherit; padding: 0; }
+.pomo-running { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--text); border-top: 1px solid var(--line); padding-top: 9px; }
+.pomo-start { justify-content: center; }
 /* 写作统计弹窗：14 天增量条形 + 模块分布 */
 .stats-bars { display: flex; align-items: flex-end; gap: 6px; min-height: 90px; padding: 10px 0 2px; }
 .stats-bar { flex: 1; display: grid; align-content: end; justify-items: center; gap: 4px; min-width: 0; }
@@ -804,6 +865,20 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .rep-hit-head { font-size: 12.5px; color: var(--text); }
 .rep-hit-head b { color: var(--gold); margin-left: 6px; }
 .rep-hit small { color: var(--muted); font-size: 11.5px; word-break: break-all; }
+/* 关于弹窗：按钮等宽两列网格（长短一致），文字段落折叠（details/summary） */
+.about .form-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
+.about .form-actions .pill { justify-content: center; text-align: center; white-space: nowrap; }
+.about-mini { font-size: 12.5px; color: var(--text-2); margin: 4px 0 2px; }
+.about-fold { border: 1px solid var(--line); border-radius: 11px; margin-top: 8px; overflow: hidden; }
+.about-fold summary { list-style: none; cursor: pointer; padding: 9px 12px; font-size: 13px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 8px; user-select: none; }
+.about-fold summary::-webkit-details-marker { display: none; }
+.about-fold summary::before { content: ''; width: 7px; height: 7px; border-right: 1.6px solid var(--muted); border-bottom: 1.6px solid var(--muted); transform: rotate(-45deg); transition: transform .18s; flex: none; margin-top: -2px; }
+.about-fold[open] summary::before { transform: rotate(45deg); margin-top: 0; }
+.about-fold summary em { margin-left: auto; }
+.about-fold summary:hover { color: var(--gold); }
+.about-fold-body { padding: 2px 14px 12px; border-top: 1px solid var(--line); }
+.about-fold-body p:first-child { margin-top: 10px; }
+
 /* 版本对比视图（文件恢复弹窗内） */
 .snap-actions { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .diff-body { max-height: 320px; overflow: auto; font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }

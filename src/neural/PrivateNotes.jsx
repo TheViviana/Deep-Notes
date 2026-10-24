@@ -1,0 +1,123 @@
+// 隐私笔记页：锁定 / 未启用时是密码界面，解锁后是加密笔记的清单与编辑器。
+// 加解密在 privateNotes.js（WebCrypto），密钥仅在解锁后驻内存，本页不触碰密码以外任何凭据。
+import React, {useEffect, useRef, useState} from 'react';
+import {Icon} from './icons';
+import {hasVault, isUnlocked, setupVault, unlock, relock, listNotes, upsertNote, deleteNote} from './privateNotes';
+
+function PasswordGate({mode, onDone, onBack}) {
+  // mode: 'setup'（首次设置，输两遍） | 'unlock'
+  const [p1, setP1] = useState('');
+  const [p2, setP2] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    setErr('');
+    if (p1.length < 4) { setErr('密码至少 4 位'); return; }
+    if (mode === 'setup' && p1 !== p2) { setErr('两次输入不一致'); return; }
+    setBusy(true);
+    try {
+      if (mode === 'setup') await setupVault(p1);
+      else await unlock(p1);
+      onDone();
+    } catch (e) { setErr(String(e?.message || e)); }
+    finally { setBusy(false); }
+  };
+  return <section className="pn-gate glass" aria-label="隐私区密码">
+    <header><b>{mode === 'setup' ? '启用隐私区' : '解锁隐私区'}</b><em>{mode === 'setup' ? 'Set up' : 'Unlock'}</em></header>
+    <p className="quiet">{mode === 'setup'
+      ? '为隐私笔记设置一个密码。笔记以 AES-GCM 加密存放在本机与知识库附属数据里，密码不落盘——忘记密码将无法找回内容，请务必记牢。'
+      : '输入密码解锁。密钥只在内存中，关闭软件或点「上锁」后需要重新解锁。'}<em>End-to-end local encryption.</em></p>
+    <label>密码 <em>Password</em><input type="password" autoFocus value={p1} autoComplete="new-password"
+      onChange={e => setP1(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.isComposing) submit(); }}/></label>
+    {mode === 'setup' && <label>再输一遍 <em>Repeat</em><input type="password" value={p2} autoComplete="new-password"
+      onChange={e => setP2(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.isComposing) submit(); }}/></label>}
+    {err && <p className="quiet" role="alert">{err}</p>}
+    <div className="form-actions">
+      {onBack && <button className="pill ghost" onClick={onBack}>返回 <em>Back</em></button>}
+      <button className="pill primary" disabled={busy} onClick={submit}>{mode === 'setup' ? '启用' : '解锁'} <em>Go</em></button>
+    </div>
+  </section>;
+}
+
+export function PrivateNotes() {
+  const [unlocked, setUnlocked] = useState(isUnlocked());
+  const [vault, setVault] = useState(hasVault());
+  const [notes, setNotes] = useState([]);
+  const [sel, setSel] = useState(null);
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [hint, setHint] = useState('');
+  const saveTimer = useRef(null);
+  const pending = useRef(null); // 待落盘的编辑快照：切笔记 / 上锁 / 卸载前必须 flush，防抖窗口内的输入不能丢
+  const cur = sel ? notes.find(n => n.id === sel) : null;
+
+  const reload = () => { if (isUnlocked()) listNotes().then(setNotes).catch(() => setNotes([])); };
+  useEffect(() => { if (unlocked) reload(); }, [unlocked]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 依赖 cur?.id（而非 sel）：新建后 notes 异步解密回来 cur 才有值，此时再回填标题正文
+  useEffect(() => { setTitle(cur?.title || ''); setBody(cur?.body || ''); }, [cur?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 编辑防抖自动加密保存（800ms 静默）；cleanup 把挂起的编辑立即落盘
+  const flushSave = async snapshot => {
+    if (!snapshot || !isUnlocked()) return;
+    try {
+      await upsertNote(snapshot);
+      setHint(`已加密保存 · ${new Date().toLocaleTimeString()}`);
+      reload();
+    } catch (e) { setHint(`保存失败：${e?.message || e}`); }
+  };
+  useEffect(() => {
+    if (!unlocked || !sel || !cur) return; // cur 未就绪（新建瞬间）不启动防抖，避免把空值写进新笔记
+    clearTimeout(saveTimer.current);
+    const snapshot = {id: sel, title, body};
+    pending.current = snapshot;
+    saveTimer.current = setTimeout(() => { pending.current = null; flushSave(snapshot); }, 800);
+    return () => {
+      clearTimeout(saveTimer.current);
+      if (pending.current) { const p = pending.current; pending.current = null; flushSave(p); }
+    };
+  }, [sel, title, body, unlocked, !!cur]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const createNote = async () => {
+    const id = await upsertNote({title: '新建隐私笔记', body: ''});
+    setSel(null); // 先清选中，避免旧选中笔记的防抖把内容追写过来
+    reload();
+    setTimeout(() => setSel(id), 50); // 等解密列表落地后再选中新笔记
+  };
+
+  if (!vault || !unlocked) {
+    return <div className="page page-private">
+      <header className="page-head"><div><p className="eyebrow">PRIVATE <span>隐私区</span></p><h1>只属于你的加密笔记。</h1><p className="page-sub">AES-GCM 本地加密，不上锁谁也看不见。</p></div></header>
+      <PasswordGate mode={vault ? 'unlock' : 'setup'} onDone={() => { setUnlocked(true); setVault(true); }} onBack={vault ? () => setUnlocked(false) : null}/>
+    </div>;
+  }
+
+  return <div className="page page-private">
+    <header className="page-head">
+      <div><p className="eyebrow">PRIVATE <span>隐私区</span></p><h1>已解锁。</h1><p className="page-sub">离开前记得上锁；密文随知识库同步，换机后用同一密码解锁。</p></div>
+      <div className="page-head-actions">
+        <button className="pill primary" onClick={createNote}><Icon name="plus" size={15}/>新建隐私笔记 <em>New</em></button>
+        <button className="pill ghost" onClick={async () => { if (pending.current) { const p = pending.current; pending.current = null; await flushSave(p); } relock(); setUnlocked(false); setSel(null); }}><Icon name="close" size={14}/>上锁 <em>Lock</em></button>
+      </div>
+    </header>
+    <div className="pn-layout">
+      <aside className="pn-list glass" aria-label="隐私笔记清单">
+        <h3>隐私笔记 <em>Notes</em><b>{notes.length}</b></h3>
+        {notes.map(n => <div key={n.id} className={`pn-item${sel === n.id ? ' active' : ''}`} onClick={() => setSel(n.id)} role="button" tabIndex={0}
+          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSel(n.id); } }}>
+          <span><b>{n.title || '未命名'}</b><small>{new Date(n.ts || Date.now()).toLocaleString()}</small></span>
+          <button className="icon-btn" aria-label={`删除 ${n.title || ''}`} title="删除（不可恢复）"
+            onClick={e => { e.stopPropagation(); if (window.confirm(`彻底删除隐私笔记「${n.title || '未命名'}」？加密内容无法找回。`)) { deleteNote(n.id); reload(); if (sel === n.id) setSel(null); } }}><Icon name="trash" size={13}/></button>
+        </div>)}
+        {!notes.length && <p className="empty-line">还没有隐私笔记 <em>Nothing yet</em></p>}
+      </aside>
+      {cur
+        ? <section className="pn-editor glass" aria-label="隐私笔记编辑器">
+            <input className="editor-title" value={title} onChange={e => setTitle(e.target.value)} placeholder="标题" aria-label="隐私笔记标题"/>
+            <div className="editor-area"><textarea className="editor-input" value={body} onChange={e => setBody(e.target.value)}
+              placeholder="写下只属于你的内容…（自动加密保存）" aria-label="隐私笔记正文"/></div>
+            <footer className="editor-foot"><span>{hint} · 内容加密后存本机与知识库附属数据</span></footer>
+          </section>
+        : <section className="pn-editor glass empty"><p className="empty-line">选一条笔记，或新建一条。<em>Pick or create.</em></p></section>}
+    </div>
+  </div>;
+}

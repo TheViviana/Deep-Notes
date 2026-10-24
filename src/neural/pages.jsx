@@ -28,7 +28,7 @@ export function PageHead({zh, en, sub, subEn, children}) {
 }
 
 // —— 作品库 Works ——
-export function Library({graph, works, selected, setSelected, openArticle, setOpenArticle, onNewWork, onUpdateWork, onDeleteWork, onGo, onJumpContent, onAction, onBody, onNoteTitle, onConcept, concepts, onLinkify}) {
+export function Library({graph, works, selected, setSelected, openArticle, setOpenArticle, onNewWork, onUpdateWork, onDeleteWork, onGo, onJumpContent, onAction, onBody, onNoteTitle, onConcept, concepts, onLinkify, onMakeMap}) {
   const [q, setQ] = useState('');
   const [sort, setSort] = useState('date');
   const charsOf = p => (p.body || '').length;
@@ -79,7 +79,7 @@ export function Library({graph, works, selected, setSelected, openArticle, setOp
       </section>
       {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES[0]} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={concepts} onLinkify={onLinkify}/></aside>}
     </div>
-    {openWork && <ArticleView key={openWork.id} work={openWork} graph={graph} onChange={patch => onUpdateWork(openWork.id, patch)} onClose={() => setOpenArticle(null)} onGo={onGo} onOpenContent={onJumpContent} onEditInfo={() => onAction({type: 'editWork', id: openWork.id})}/>}
+    {openWork && <ArticleView key={openWork.id} work={openWork} graph={graph} onChange={patch => onUpdateWork(openWork.id, patch)} onClose={() => setOpenArticle(null)} onGo={onGo} onOpenContent={onJumpContent} onEditInfo={() => onAction({type: 'editWork', id: openWork.id})} onMakeMap={onMakeMap}/>}
   </div>;
 }
 
@@ -155,22 +155,7 @@ function InboxPanel({items, setItems, onToDraft, onToNote, onDaily, onClose}) {
   </aside>;
 }
 
-// —— 写作番茄钟徽标：每秒本地刷新倒计时（不动整棵树），本轮专注新增字数实时显示 ——
-function PomoBadge({pomo, written, onStop}) {
-  const [, tick] = useState(0);
-  useEffect(() => { const t = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(t); }, []);
-  const left = Math.max(0, Math.ceil((pomo.endTs - Date.now()) / 1000));
-  const mm = String(Math.floor(left / 60)).padStart(2, '0'), ss = String(left % 60).padStart(2, '0');
-  const focus = pomo.phase === 'focus';
-  return <span className={`editor-pomo${focus ? ' focus' : ' break'}`} role="timer"
-    aria-label={focus ? `专注剩余 ${mm} 分 ${ss} 秒，本轮新增 ${written} 字` : `休息剩余 ${mm} 分 ${ss} 秒`}
-    title={focus ? '25 分钟专注进行中 · Focus running' : '5 分钟休息中 · On break'}>
-    {focus ? '🍅' : '☕'} {mm}:{ss}{focus && written > 0 ? <> · +{written.toLocaleString('zh-CN')} 字</> : null}
-    <button type="button" onClick={onStop} aria-label="结束本轮番茄 Stop pomodoro" title="结束本轮 · Stop">■</button>
-  </span>;
-}
-
-export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onGo, onJumpContent, works, notes, onMove, inbox, setInbox, onFlashToDraft, onFlashToNote, onDaily, pomo, onPomoStart, onPomoStop}) {
+export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onGo, onJumpContent, works, notes, onMove, inbox, setInbox, onFlashToDraft, onFlashToNote, onDaily}) {
   const draft = drafts.find(d => d.id === active) || drafts[0];
   const area = useRef(null);
   const pv = useRef(null); // 阅读模式渲染容器（浮动目录在阅读下跳转/高亮用）
@@ -258,8 +243,6 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
         <div className="editor-meta">
           <span>03-创作台 / 正在写 <em>Writing</em></span>
           <span className="editor-tools" role="group" aria-label="编辑器视图 Editor views">
-            {pomo ? <PomoBadge pomo={pomo} written={pomo.phase === 'focus' ? Math.max(0, drafts.reduce((s, d) => s + (d.body || '').length, 0) - pomo.baseChars) : 0} onStop={onPomoStop}/>
-              : onPomoStart && <button type="button" title="开始 25 分钟专注 + 5 分钟休息的番茄钟 · Start a 25/5 pomodoro" onClick={onPomoStart}>番茄 <em>Pomodoro</em></button>}
             {onMove && <button type="button" title="把这篇草稿移到其他模块（作品库 / 方法库 / 选题池） · Move this draft to another module" onClick={() => onMove(draft.id)}>移动到 <em>Move</em></button>}
             <button type="button" className={focusMode ? 'on' : ''} aria-pressed={focusMode}
               title="隐藏左右卡片，编辑区占满，可与对照/阅读叠加 · Hide side cards and widen the editor; stacks with Compare/Read" onClick={toggleFocus}>专注 <em>Focus</em></button>
@@ -545,7 +528,7 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
 }
 
 // —— 阅读区 Readings：放别人写好的内容，自己拿来阅读（可批注编辑），左侧分类目录管理 ——
-export function Readings({graph, readings, selected, setSelected, openReading, setOpenReading, onGo, onJumpContent, onAction, onNew, onUpdate, onDelete, readFolders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder, onLinkify, onImportFiles}) {
+export function Readings({graph, readings, selected, setSelected, openReading, setOpenReading, onGo, onJumpContent, onAction, onNew, onUpdate, onDelete, readFolders, dragging, setDragging, onMoveToFolder, onCreateFolder, onRenameFolder, onDeleteFolder, onLinkify, onImportFiles, onMakeMap}) {
   const [q, setQ] = useState('');
   const [curFolder, setCurFolder] = useState(null); // null = 全部；「未分类」是删除分类时的兜底去处
   const [renaming, setRenaming] = useState(null);
@@ -678,12 +661,12 @@ export function Readings({graph, readings, selected, setSelected, openReading, s
       </section>
       {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'readings')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} onLinkify={onLinkify}/></aside>}
     </div>
-    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenReading(null)} onGo={onGo} onOpenContent={onJumpContent} eyebrow={['READING', '阅读全文']} exportKind="readings" progressId={cur.id}/>}
+    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenReading(null)} onGo={onGo} onOpenContent={onJumpContent} eyebrow={['READING', '阅读全文']} exportKind="readings" progressId={cur.id} onMakeMap={onMakeMap}/>}
   </div>;
 }
 
 // —— 档案区 Archives：放创作者自己的个人档案（简介、回顾、清单等），与阅读区同构，双链汇入图谱 ——
-export function Archives({graph, archives, selected, setSelected, openArchive, setOpenArchive, onGo, onJumpContent, onAction, onNew, onUpdate, onDelete, onLinkify}) {
+export function Archives({graph, archives, selected, setSelected, openArchive, setOpenArchive, onGo, onJumpContent, onAction, onNew, onUpdate, onDelete, onLinkify, onMakeMap}) {
   const [q, setQ] = useState('');
   const rows = archives.filter(a => ((a.title || '') + ' ' + (a.body || '')).toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
@@ -724,7 +707,7 @@ export function Archives({graph, archives, selected, setSelected, openArchive, s
       </section>
       {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES.find(m => m.id === 'archives')} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} onLinkify={onLinkify}/></aside>}
     </div>
-    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenArchive(null)} onGo={onGo} onOpenContent={onJumpContent} eyebrow={['ARCHIVE', '档案全文']} exportKind="archives"/>}
+    {cur && <ArticleView key={cur.id} work={asWork(cur)} graph={graph} onChange={p => onUpdate(cur.id, p)} onClose={() => setOpenArchive(null)} onGo={onGo} onOpenContent={onJumpContent} eyebrow={['ARCHIVE', '档案全文']} exportKind="archives" onMakeMap={onMakeMap}/>}
   </div>;
 }
 
