@@ -879,12 +879,61 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [mode]);
-  // 正文重渲染（切预览 / 翻译插入等）后旧高亮随 innerHTML 消失，计数一并归零
+  // 正文重渲染（切预览 / 翻译插入等）后旧高亮随 innerHTML 消失，计数一并归零；朗读段落快照同样失效
   useEffect(() => {
     if (mode !== 'preview') return;
+    ttsStop();
     setFind(f => (f && (f.total || f.idx >= 0) ? {...f, total: 0, idx: -1} : f));
   }, [html, mode]);
   useEffect(() => () => { clearTimeout(findTimer.current); clearFindMarks(previewRef.current); }, []);
+  // —— 本地语音朗读（预览模式）：系统语音离线朗读，逐段跟随高亮，可暂停 / 调语速 ——
+  // 段落快照存在 ref；paused 不进朗读 effect 的依赖，暂停走原生 pause/resume——
+  // 否则 effect 重跑的 cleanup 会 cancel 掉正在暂停的语音
+  const TTS_RATES = [1, 1.25, 1.5, 0.75];
+  const [tts, setTts] = useState(null); // {idx, rate}
+  const [ttsPaused, setTtsPaused] = useState(false);
+  const ttsEls = useRef([]);
+  const ttsGen = useRef(0); // 换段 / 改语速会 cancel 当前语音并触发异步 onend：代数守卫拦住过期回调
+  const ttsStop = () => {
+    try { window.speechSynthesis?.cancel(); } catch {}
+    ttsEls.current.forEach(el => el.classList.remove('tts-reading')); // 主动停止时高亮不随 effect 清理，这里必须显式摘掉
+    ttsEls.current = [];
+    setTts(null); setTtsPaused(false);
+  };
+  const ttsStart = () => {
+    const box = previewRef.current;
+    if (!box || !('speechSynthesis' in window)) return;
+    const els = [...box.querySelectorAll('p, li, h1, h2, h3, h4, blockquote')].filter(el => el.textContent.trim());
+    if (!els.length) return;
+    ttsEls.current = els;
+    setTts({idx: 0, rate: 1});
+  };
+  const ttsPauseToggle = () => {
+    if (!tts) return;
+    if (ttsPaused) { try { speechSynthesis.resume(); } catch {} setTtsPaused(false); }
+    else { try { speechSynthesis.pause(); } catch {} setTtsPaused(true); }
+  };
+  useEffect(() => {
+    if (!tts) return;
+    const els = ttsEls.current;
+    els.forEach((el, i) => el.classList.toggle('tts-reading', i === tts.idx));
+    const cur = els[tts.idx];
+    if (!cur) { ttsStop(); return; } // 全部念完
+    cur.scrollIntoView({block: 'center'});
+    const gen = ++ttsGen.current;
+    const u = new SpeechSynthesisUtterance(cur.textContent);
+    u.lang = 'zh-CN';
+    u.rate = tts.rate;
+    const zh = speechSynthesis.getVoices().find(v => /zh[-_]CN/i.test(v.lang));
+    if (zh) u.voice = zh;
+    // 被 cancel 的语音（调速 / 换段）也会异步派发 end：代数不匹配说明是过期回调，不推进
+    u.onend = () => { if (ttsGen.current === gen) setTts(t => (t ? {...t, idx: t.idx + 1} : null)); };
+    u.onerror = () => { if (ttsGen.current === gen) setTts(t => (t ? {...t, idx: t.idx + 1} : null)); };
+    speechSynthesis.speak(u);
+    return () => { try { speechSynthesis.cancel(); } catch {} }; // 换段 / 改语速 / 卸载时停掉上一段
+  }, [tts?.idx, tts?.rate]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => { try { window.speechSynthesis?.cancel(); } catch {} }, []);
+  useEffect(() => { if (mode !== 'preview') ttsStop(); }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
   // —— 反向链接：哪些内容用 [[双链]] 指向了这篇（编辑时无需去分析栏翻找）——
   const selfGid = useMemo(() => ['post', 'reading', 'archive', 'draft', 'note'].map(k => k + ':' + work.id).find(x => graph.index.has(x)) || null, [graph, work.id]);
   const backlinks = useMemo(() => selfGid
@@ -1037,6 +1086,16 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
         </div>
         <button type="button" className={`av-focus${focusMode ? ' on' : ''}`} aria-pressed={focusMode}
           title="隐藏头部信息与页脚，正文占满 · Hide header/footer and maximize the text area" onClick={() => setFocusMode(v => !v)}>专注 <em>Focus</em></button>
+        {mode === 'preview' && 'speechSynthesis' in window && <>
+          {tts
+            ? <>
+              <button type="button" className="pill ghost" onClick={ttsStop} title="停止朗读 · Stop">停止 <em>Stop</em></button>
+              <button type="button" className="pill ghost" onClick={ttsPauseToggle} title={ttsPaused ? '继续朗读 · Resume' : '暂停朗读 · Pause'}>{ttsPaused ? '继续' : '暂停'} <em>{ttsPaused ? 'Resume' : 'Pause'}</em></button>
+              <button type="button" className="pill ghost" title="循环切换语速 · Cycle speed"
+                onClick={() => setTts(t => ({...t, rate: TTS_RATES[(TTS_RATES.indexOf(t.rate) + 1) % TTS_RATES.length]}))}>语速 ×{tts.rate} <em>Rate</em></button>
+            </>
+            : <button type="button" className="pill ghost" onClick={ttsStart} title="用系统本地语音朗读正文（离线）· Read aloud with the local system voice">朗读 <em>TTS</em></button>}
+        </>}
         {mode === 'preview' && immersive && <>
           <button className="pill ghost av-trans" onClick={trans.phase === 'running' ? undefined : trans.phase === 'done' ? restoreTrans : runTranslate}
             disabled={trans.phase === 'running'} aria-label="沉浸式翻译 Immersive translate">

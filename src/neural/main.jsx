@@ -6,7 +6,7 @@ import {pickVaultFolder, pickMdFiles, parseVault} from './importer';
 import {capable, getRoot, setRoot, getTarget, setTarget, queueSync, flush, flushAll, flushSyncNow, chooseDir, readVaultFiles, prepareCopy, resolveRels, setErrorHandler, serialize, exportFiles, shortId, pathOf, uniqueNotePath, safeName, hasPendingWrites, retryPending, clearPendingWrites, pendingReady, snapshotBeforeAdopt, readFileSnapshot, loadMeta, patchMeta, VAULT_MODE, verifyIntegrity} from './fileStore';
 import {sameVaultContent} from './vaultCompare';
 import {CONFIG, asset} from '../config';
-import {buildGraph, forceLayout, radialLayout, stats, KINDS, nameIndex} from './graph';
+import {buildGraph, forceLayout, stats, KINDS, nameIndex} from './graph';
 import {renderMarkdown} from './ArticleView';
 import {Home} from './Home';
 import {Library, Drafts, Ideas, Methods, Readings, Archives, Concepts} from './pages';
@@ -23,6 +23,8 @@ import {useVaultImages, resolveAllInDoc} from './images';
 import {totalChars, recordDaily, loadStats, dailyDeltas, streakDays, knownVaults} from './writingStats';
 import {resolveTarget, scrollToAnchor} from './wiki';
 import {T} from './theme';
+import {Modal} from './Modal.jsx';
+import {DailyRecall, ReplaceModal} from './mainModals.jsx';
 import './neural.css';
 
 // 选题、草稿与目标保存在当前浏览器（localStorage）——仅网页版 / 未连接知识库时如此。
@@ -163,31 +165,6 @@ const deleteScopeNote = () => capable() && getRoot()
   ? '桌面版会同步把该文件移入知识库的 .trash（30 天后自动清理）。'
   : '此操作只影响当前浏览器。';
 
-function Modal({title, en, onClose, children, wide}) {
-  const ref = useRef(null), closeRef = useRef(onClose);
-  closeRef.current = onClose;
-  useEffect(() => {
-    const before = document.activeElement;
-    ref.current?.focus({preventScroll: true});
-    const key = e => {
-      if (e.key === 'Escape' && !e.isComposing) closeRef.current();
-      if (e.key === 'Tab') {
-        const list = [...ref.current.querySelectorAll('button,input,textarea,select,a[href]')].filter(n => !n.disabled);
-        const first = list[0], last = list[list.length - 1];
-        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-      }
-    };
-    window.addEventListener('keydown', key);
-    return () => { window.removeEventListener('keydown', key); if (before?.isConnected) before.focus({preventScroll: true}); };
-  }, []);
-  return <div className="veil" onClick={onClose}>
-    <section ref={ref} tabIndex={-1} className={`modal glass ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()}>
-      <header><h2>{title} <em>{en}</em></h2><button className="icon-btn" onClick={onClose} aria-label="关闭弹窗"><Icon name="close" size={16}/></button></header>
-      {children}
-    </section>
-  </div>;
-}
 
 // —— 导出 PDF：把正文排成打印版 HTML 塞进隐藏 iframe，调起系统打印（目标选「另存为 PDF」）。
 // 全程本地渲染，不新增联网出口；Electron 桌面版与浏览器通用 ——
@@ -396,142 +373,7 @@ const mergeFolders = (incoming, local) => [...new Set(
 // [[B]]——否则改名后旧双链当场变成断链。六类正文全部扫一遍，改动经全局 diff 自动写盘。
 const escapeRe = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// —— 每日随机回顾：每天首次启动按日期种子确定性挑 3 条旧内容，浮动入口 + 弹窗速览 ——
-// 同一天多次启动抽到同三篇；点条目直接跳转打开。防止导入的旧笔记/书籍章节石沉大海。
-const RECALL_KEY = CONFIG.storagePrefix + '-daily-recall-v1';
-function todayRecall(pool) {
-  if (!pool.length) return [];
-  const d = new Date();
-  const day = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
-  let cached = null;
-  try { cached = JSON.parse(localStorage.getItem(RECALL_KEY)); } catch {}
-  if (cached?.day === day && Array.isArray(cached.ids)) {
-    const byId = new Map(pool.map(x => [x.id, x]));
-    const items = cached.ids.map(id => byId.get(id)).filter(Boolean);
-    if (items.length) return items;
-  }
-  // 日期做种子的确定性洗牌：清了缓存 / 重装后同一天抽到的仍是同三篇
-  let s = 0; for (const c of day) s = (s * 31 + c.charCodeAt(0)) >>> 0;
-  const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
-  const arr = [...pool];
-  for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; }
-  const picked = arr.slice(0, Math.min(3, arr.length));
-  try { localStorage.setItem(RECALL_KEY, JSON.stringify({day, ids: picked.map(x => x.id)})); } catch {}
-  return picked;
-}
-function DailyRecall({works, notes, readings, archives, onOpen}) {
-  // 池子用延迟值构建：编辑打字不必每个按键全库重建摘录（大库 O(全库字符数)）
-  const dWorks = useDeferredValue(works);
-  const dNotes = useDeferredValue(notes);
-  const dReadings = useDeferredValue(readings);
-  const dArchives = useDeferredValue(archives);
-  const pool = useMemo(() => [
-    ...dWorks.map(w => ({id: 'post:' + w.id, kind: 'works', title: w.title, excerpt: (w.body || '').replace(/\s+/g, ' ')})),
-    ...dNotes.map(n => ({id: 'note:' + n.id, kind: 'methods', title: n.title, excerpt: (n.body || '').replace(/\s+/g, ' ')})),
-    ...dReadings.map(r => ({id: 'reading:' + r.id, kind: 'readings', title: r.title, excerpt: (r.body || '').replace(/\s+/g, ' ')})),
-    ...dArchives.map(a => ({id: 'archive:' + a.id, kind: 'archives', title: a.title, excerpt: (a.body || '').replace(/\s+/g, ' ')})),
-  ].filter(x => x.excerpt.trim().length >= 20), [dWorks, dNotes, dReadings, dArchives]);
-  // 池子随编辑变化，但当天抽中的三篇由缓存钉死（必须校验 day：否则缓存永不轮换，「每日」变「永远同三篇」）
-  const cachedIds = useMemo(() => {
-    try {
-      const c = JSON.parse(localStorage.getItem(RECALL_KEY));
-      const d = new Date(), p = n => String(n).padStart(2, '0');
-      const day = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
-      return c?.day === day && Array.isArray(c.ids) ? c.ids : null;
-    } catch { return null; }
-  }, [pool]);
-  const picks = useMemo(() => {
-    const byId = new Map(pool.map(x => [x.id, x]));
-    if (cachedIds) { const hit = cachedIds.map(id => byId.get(id)).filter(Boolean); if (hit.length) return hit; }
-    return todayRecall(pool);
-  }, [pool, cachedIds]);
-  const [open, setOpen] = useState(false);
-  const [dismissed, setDismissed] = useState(false); // 仅本会话隐藏，明天照常出现
-  if (dismissed || !picks.length) return null;
-  return <>
-    <button className="recall-fab" onClick={() => setOpen(o => !o)} aria-expanded={open}
-      title="每天随机回顾三条旧内容 · Daily random recall">
-      <Icon name="replay" size={14}/>今日回顾 <em>{picks.length}</em>
-    </button>
-    {open && <div className="veil" onClick={() => setOpen(false)}>
-      <section className="modal glass" role="dialog" aria-modal="true" aria-label="今日回顾 Daily recall" onClick={e => e.stopPropagation()}>
-        <header><h2>今日回顾 <em>Daily recall</em></h2><button className="icon-btn" onClick={() => setOpen(false)} aria-label="关闭弹窗"><Icon name="close" size={16}/></button></header>
-        <div className="about">
-          <p className="quiet">每天随机捞三条旧内容回来见一面，同一天内固定不变；点条目直接打开原文。<em>Three random pieces a day — same all day. Click to open.</em></p>
-          {picks.map(p => <div className="recall-item" key={p.id}>
-            <span className="recall-kind">{MOVE_ZH[p.kind]}</span>
-            <button className="recall-open" onClick={() => { setOpen(false); onOpen(p.id); }}>
-              <b>{p.title || '未命名'}</b>
-              <small>{p.excerpt.slice(0, 110)}{p.excerpt.length > 110 ? '…' : ''}</small>
-            </button>
-          </div>)}
-          <div className="form-actions"><button className="pill ghost" onClick={() => setDismissed(true)}>本次启动不再显示 <em>Hide for now</em></button></div>
-        </div>
-      </section>
-    </div>}
-  </>;
-}
 
-// —— 全库批量替换：范围（全部 / 单模块）+ 普通文本或正则，先预览逐条命中数，确认后应用 ——
-const REPLACE_SCOPES = [['all', '全部 All'], ['works', '作品库'], ['notes', '方法库'], ['drafts', '创作台'], ['readings', '阅读区'], ['archives', '档案区']];
-function ReplaceModal({works, notes, drafts, readings, archives, onClose, onApply}) {
-  const [scope, setScope] = useState('all');
-  const [find, setFind] = useState('');
-  const [repl, setRepl] = useState('');
-  const [useRe, setUseRe] = useState(false);
-  const [armed, setArmed] = useState(false);
-  let re = null, reErr = '';
-  if (useRe && find) { try { re = new RegExp(find, 'g'); } catch (e) { reErr = String(e?.message || e); } }
-  const plain = find.toLowerCase();
-  const data = [['works', works], ['notes', notes], ['drafts', drafts], ['readings', readings], ['archives', archives]];
-  const hits = useMemo(() => {
-    if (!find || (useRe && !re)) return [];
-    const out = [];
-    for (const [kind, items] of data) {
-      if (scope !== 'all' && scope !== kind) continue;
-      for (const x of items) {
-        const body = String(x.body || '');
-        const c = useRe ? (body.match(re) || []).length : (body.toLowerCase().split(plain).length - 1);
-        if (!c) continue;
-        const at = useRe ? body.search(re) : body.toLowerCase().indexOf(plain);
-        out.push({kind, title: x.title || '未命名', count: c,
-          snippet: body.slice(Math.max(0, at - 20), Math.min(body.length, Math.max(0, at - 20) + 90)).replace(/\s+/g, ' ')});
-      }
-    }
-    return out;
-  }, [find, scope, useRe, works, notes, drafts, readings, archives]); // eslint-disable-line react-hooks/exhaustive-deps
-  const total = hits.reduce((s, x) => s + x.count, 0);
-  const SCOPE_ZH = Object.fromEntries(REPLACE_SCOPES);
-  return <Modal title="批量替换" en="Find & replace" onClose={onClose}>
-    <div className="form">
-      <p className="quiet">在所选范围的正文里查找并替换（标题不动）。先预览命中，确认后写入；改动会照常写回知识库，且可用 ⌘K「恢复数据快照」回退。<em>Preview first, then apply.</em></p>
-      <label>范围 <em>Scope</em>
-        <select value={scope} onChange={e => setScope(e.target.value)} aria-label="替换范围">
-          {REPLACE_SCOPES.map(([k, zh]) => <option key={k} value={k}>{zh}</option>)}
-        </select></label>
-      <div className="form-row">
-        <label>查找 <em>Find</em><input autoFocus value={find} onChange={e => { setFind(e.target.value); setArmed(false); }} placeholder="要替换的文本"/></label>
-        <label>替换为 <em>Replace</em><input value={repl} onChange={e => { setRepl(e.target.value); setArmed(false); }} placeholder="新文本（可留空删除）"/></label>
-      </div>
-      <label className="rep-regex"><input type="checkbox" checked={useRe} onChange={e => { setUseRe(e.target.checked); setArmed(false); }}/>按正则表达式查找（替换串支持 $1 等分组引用）</label>
-      {reErr && <p className="quiet" role="alert">正则无效：{reErr}</p>}
-      {find && !reErr && <div className="rep-preview">
-        <p className="quiet">{hits.length ? `${hits.length} 条内容、共 ${total} 处命中：` : '没有命中。'}</p>
-        <div className="rep-hits">{hits.slice(0, 30).map((h, i) => <div key={i} className="rep-hit">
-          <span className="rep-hit-head">[{SCOPE_ZH[h.kind]}] {h.title} <b>×{h.count}</b></span>
-          <small>…{h.snippet}…</small>
-        </div>)}
-        {hits.length > 30 && <p className="quiet">…还有 {hits.length - 30} 条未列出</p>}</div>
-      </div>}
-      <div className="form-actions">
-        <button className="pill ghost" onClick={onClose}>取消 <em>Cancel</em></button>
-        {armed
-          ? <button className="pill danger" disabled={!total} onClick={() => { onApply(scope, find, repl, useRe); onClose(); }}><Icon name="check" size={14}/>确认替换 {total} 处 <em>Apply</em></button>
-          : <button className="pill primary" disabled={!total} onClick={() => setArmed(true)}>预览并准备替换 <em>Arm</em></button>}
-      </div>
-    </div>
-  </Modal>;
-}
 
 function App() {
   // 知识库引用图（![[名字]] / 相对路径）：所有 .md-preview 里新出现的 <img> 自动经 vault:asset 回填
@@ -606,14 +448,13 @@ function App() {
   const graph = useMemo(() => buildGraph({works: slowWorks, notes: slowNotes, ideas: slowIdeas, drafts: slowDrafts, readings: slowReadings, archives: slowArchives, concepts: mergedConcepts}), [slowWorks, slowNotes, slowIdeas, slowDrafts, slowReadings, slowArchives, mergedConcepts]);
   // 布局按「节点 + 连接」签名缓存：改定义 / 改正文 / 移动文件不改变图的拓扑，复用上一次
   // 布局结果（力导向迭代是 O(迭代×节点²)，大库重算一次要数秒，视觉上就是整体刷新）
-  const [layoutMode, setLayoutMode] = useSaved(CONFIG.storagePrefix + '-layout-mode-v1', 'force'); // force | radial
-  const layoutKey = useMemo(() => graph.nodes.map(n => n.id).join('\u0001') + '\u0002' + graph.links.map(l => l.a + '|' + l.b + '|' + l.kind).join('\u0001') + '\u0003' + layoutMode, [graph, layoutMode]);
+  const layoutKey = useMemo(() => graph.nodes.map(n => n.id).join('\u0001') + '\u0002' + graph.links.map(l => l.a + '|' + l.b + '|' + l.kind).join('\u0001'), [graph]);
   const layoutCache = useRef({key: null, val: null});
   const layout = useMemo(() => {
     if (layoutCache.current.key === layoutKey) return layoutCache.current.val;
-    layoutCache.current = {key: layoutKey, val: layoutMode === 'radial' ? radialLayout(graph) : forceLayout(graph)};
+    layoutCache.current = {key: layoutKey, val: forceLayout(graph)};
     return layoutCache.current.val;
-  }, [layoutKey, graph, layoutMode]);
+  }, [layoutKey, graph]);
 
   // 页面切换：保留各页面的滚动位置（sessionStorage，刷新后仍能回到上次位置），首次进入该页才回到顶部
   useEffect(() => {
@@ -1909,8 +1750,15 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
     const v = window.deepnotes?.vault;
     const root = getRoot();
     if (v?.watch && root) v.watch(root); // 换库 / 断开由 importVault 与切示例流程重设
-    if (v?.onChanged) v.onChanged(() => { clearTimeout(t); t = setTimeout(() => syncRef.current(), 3000); });
-    return () => { alive = false; clearTimeout(t); };
+    const offChanged = v?.onChanged?.(() => { clearTimeout(t); t = setTimeout(() => syncRef.current(), 3000); });
+    // 剪贴板快速捕获（桌面版 ⌘/Ctrl+Alt+V）：文本进闪念箱，随时沉淀为草稿/笔记
+    const offCapture = window.deepnotes?.clipboardCapture?.(text => {
+      const txt = String(text || '').trim();
+      if (!txt) return;
+      setInbox(list => [{id: 'i-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), text: txt, ts: Date.now()}, ...list]);
+      setToast('剪贴板内容已存入闪念箱 · Captured to inbox');
+    });
+    return () => { alive = false; clearTimeout(t); offChanged?.(); offCapture?.(); };
   }, []);
 
   const openInGraph = id => { const n = graph.index.get(id); const mod = {post: 'works', note: 'methods', idea: 'ideas', draft: 'drafts', reading: 'readings', archive: 'archives', concept: 'concepts'}[n?.kind]; if (mod) { setFocus({mod, sel: id}); setPage('home'); } };
@@ -2007,7 +1855,7 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
 
     <main>
       {page === 'home' && <>
-        <Home graph={graph} layout={layout} focus={focus} setFocus={setFocus} onAction={onAction} onAbout={() => setModal('about')} reduced={reduced} name={wsName} onRename={setWsName} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions} layoutMode={layoutMode} onToggleLayout={() => setLayoutMode(m => m === 'force' ? 'radial' : 'force')}/>
+        <Home graph={graph} layout={layout} focus={focus} setFocus={setFocus} onAction={onAction} onAbout={() => setModal('about')} reduced={reduced} name={wsName} onRename={setWsName} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions}/>
         <Snapshot goal={goal} onGoal={() => { setGoalInput(String(goal)); setModal('goal'); }} ideas={ideas} drafts={drafts} works={works} notes={notes} onIdea={editIdea} onDraft={id => { setActive(id); setPage('drafts'); }} onLibrary={id => { if (typeof id === 'string') setLibSel(id); setPage('library'); }} snap={snap} graph={graph}/>
       </>}
       {page === 'library' && <Library graph={graph} works={works} selected={libSel} setSelected={setLibSel} openArticle={openArticle} setOpenArticle={setOpenArticle} onNewWork={newWork} onUpdateWork={updateWork} onDeleteWork={deleteWork} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onBody={onBody} onNoteTitle={onNoteTitle} onConcept={onConcept} concepts={kbConcepts} onLinkify={linkifyMentions}/>}
@@ -2068,7 +1916,7 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
         <p className="quiet">图谱分析是本地规则检索，未调用 AI。选题、草稿与目标保存在当前浏览器，不写入 Obsidian、不发布到平台。<em>Local rules only · no AI · nothing is published.</em></p>
       </div>
     </Modal>}
-    {modal === 'recovery' && <RecoveryModal onClose={close} onRestoreSnap={restoreSnapVersion} onRestoreCopy={restoreFileCopy}/>}
+    {modal === 'recovery' && <RecoveryModal onClose={close} onRestoreSnap={restoreSnapVersion} onRestoreCopy={restoreFileCopy} currentBodyOf={(kind, id) => { const arr = {works, notes, drafts, readings, archives}[kind] || []; const it = arr.find(x => String(x.id) === String(id)); return it ? (it.body || '') : null; }}/>}
     {/* 导入去向选择：自动按文件夹分类，或全部归入指定模块；选定后再挑文件夹 */}
     {modal === 'import' && <Modal title="导入知识库" en="Import vault" onClose={close}>
       <div className="about import-pick">

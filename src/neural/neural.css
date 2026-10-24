@@ -15,6 +15,12 @@
 html, body { margin: 0; background: #0d0e0e; }
 .neural *, .neural *::before, .neural *::after { box-sizing: border-box; }
 .neural button, .neural input, .neural textarea, .neural select { font: inherit; color: inherit; }
+/* 暗色主题下的原生控件适配：color-scheme 让下拉选项列表 / 滚动条 / 日期选择器都走深色，
+   select 全局兜底深色底 + 浅色字（此前合并弹窗等未包在 .form 里的 select 是原生白底，
+   浅色文字落在白底上完全看不见）；各处的专属 select 规则在文件后面照常覆盖 */
+.neural { color-scheme: dark; }
+.neural select { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: rgba(255, 255, 255, .05); color: var(--text); }
+.neural select option { background: #161717; color: var(--text); }
 .neural button { cursor: pointer; }
 .neural em { font-style: normal; color: var(--muted); font-size: .8em; margin-left: .38em; letter-spacing: .02em; font-weight: 400; }
 .neural :focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; border-radius: 8px; }
@@ -746,6 +752,8 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .av-find-prev svg { transform: rotate(180deg); }
 .md-preview mark.av-find { background: rgba(232, 180, 90, .26); color: inherit; padding: 0 1px; border-radius: 3px; }
 .md-preview mark.av-find.cur { background: var(--gold); color: #16130c; }
+/* 本地语音朗读：当前正在朗读的段落 */
+.md-preview .tts-reading { background: rgba(232, 180, 90, .14); outline: 1px solid rgba(232, 180, 90, .35); border-radius: 4px; box-shadow: 0 0 0 3px rgba(232, 180, 90, .06); }
 /* 每日随机回顾：左下角浮动入口 + 弹窗条目 */
 .recall-fab { position: fixed; left: 16px; bottom: 16px; z-index: 80; display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); background: rgba(20, 20, 22, .85); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; backdrop-filter: blur(6px); }
 .recall-fab:hover { border-color: var(--gold); color: var(--gold); }
@@ -796,6 +804,13 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .rep-hit-head { font-size: 12.5px; color: var(--text); }
 .rep-hit-head b { color: var(--gold); margin-left: 6px; }
 .rep-hit small { color: var(--muted); font-size: 11.5px; word-break: break-all; }
+/* 版本对比视图（文件恢复弹窗内） */
+.snap-actions { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.diff-body { max-height: 320px; overflow: auto; font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.dl { display: block; white-space: pre-wrap; word-break: break-all; padding: 0 6px; border-radius: 3px; }
+.dl.ctx { color: var(--text-2); opacity: .75; }
+.dl.minus { background: rgba(224, 93, 93, .13); color: #e8a1a1; }
+.dl.plus { background: rgba(127, 174, 90, .13); color: #b9d8a0; }
 .pill.danger { border-color: rgba(224, 93, 93, .55); color: #e05d5d; }
 .article-view .editor-area textarea { min-height: 300px; max-height: 60vh; font-size: 14.5px; }
 .md-preview { min-height: 200px; max-height: 68vh; overflow: auto; padding: 4px 2px 8px; font-size: 14.5px; line-height: 1.85; color: var(--text); }

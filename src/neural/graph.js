@@ -344,28 +344,6 @@ export function forceLayout(graph) {
   return Object.fromEntries(N.map(n => [n.id, [n.x, n.y * .82]]));
 }
 
-// 放射层级：以创作空间为圆心，按链接层数排成同心环。
-export function radialLayout(graph) {
-  const depth = new Map([['core', 0]]), parent = new Map(), q = ['core'];
-  const adj = new Map(graph.nodes.map(n => [n.id, []]));
-  const order = {contain: 0, source: 1, wiki: 1, tag: 2, mention: 3, resonance: 4};
-  for (const l of [...graph.links].sort((a, b) => order[a.kind] - order[b.kind])) { adj.get(l.a).push(l.b); adj.get(l.b).push(l.a); }
-  while (q.length) { const id = q.shift(); for (const o of adj.get(id)) if (!depth.has(o)) { depth.set(o, depth.get(id) + 1); parent.set(o, id); q.push(o); } }
-  const pos = {core: [0, 0]};
-  const kids = id => graph.nodes.filter(n => parent.get(n.id) === id).map(n => n.id);
-  const leaves = id => { const k = kids(id); return k.length ? k.reduce((s, c) => s + leaves(c), 0) : 1; };
-  const place = (id, a0, a1) => {
-    const k = kids(id); let a = a0; const total = k.reduce((s, c) => s + leaves(c), 0) || 1;
-    for (const c of k) {
-      const span = (a1 - a0) * leaves(c) / total, mid = a + span / 2, R = [0, 150, 290, 410, 520][Math.min(depth.get(c), 4)];
-      pos[c] = [Math.cos(mid) * R, Math.sin(mid) * R * .82];
-      place(c, a, a + span); a += span;
-    }
-  };
-  place('core', -Math.PI, Math.PI);
-  for (const n of graph.nodes) if (!pos[n.id]) pos[n.id] = [0, 560];
-  return pos;
-}
 
 // —— 本地图谱检索（规则匹配，未调用 AI）——
 export function askGraph(graph, question, scope) {

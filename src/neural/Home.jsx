@@ -431,7 +431,7 @@ function Dock({graph, onGo}) {
   </div>;
 }
 
-export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced, name, onRename, onBody, onNoteTitle, onConcept, concepts, onLinkify, layoutMode = 'force', onToggleLayout}) {
+export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced, name, onRename, onBody, onNoteTitle, onConcept, concepts, onLinkify}) {
   const stageRef = useRef(null);
   const [size, setSize] = useState({w: 1280, h: 760});
   const [paused, setPaused] = useState(false);
@@ -559,7 +559,6 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
 
     <div className="stage-tools glass" role="toolbar" aria-label="动画控制">
       <button onClick={replay} title="重播开场 Replay"><Icon name="replay" size={15}/><span>重播 <em>Replay</em></span></button>
-      {onToggleLayout && <button onClick={onToggleLayout} title="切换图谱布局：力导向 / 径向同心圆（大库更清晰）· Toggle layout: force / radial" aria-pressed={layoutMode === 'radial'}><Icon name="grid" size={15}/><span>布局 {layoutMode === 'radial' ? '径向' : '力导向'} <em>{layoutMode === 'radial' ? 'Radial' : 'Force'}</em></span></button>}
       <button onClick={() => setPaused(!paused)} title={paused ? '继续 Resume' : '暂停 Pause'} aria-pressed={paused}><Icon name={paused ? 'play' : 'pause'} size={15}/><span>{paused ? '继续' : '暂停'} <em>{paused ? 'Resume' : 'Pause'}</em></span></button>
       <button onClick={onAbout} title="关于图谱 About"><Icon name="info" size={15}/><span>数据来源 <em>Sources</em></span></button>
     </div>

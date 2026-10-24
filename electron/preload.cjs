@@ -35,6 +35,8 @@ contextBridge.exposeInMainWorld('deepnotes', {
     snapshotRead: (root, file) => ipcRenderer.invoke('vault:snapshot-read', { root, file }),
     // 文件监听：外部改动（Obsidian 等）经主进程防抖后回调 onChanged；watch 换库时重设监听目录
     watch: dir => ipcRenderer.send('vault:watch', dir),
-    onChanged: cb => ipcRenderer.on('vault:changed', () => cb()),
+    onChanged: cb => { const h = () => cb(); ipcRenderer.on('vault:changed', h); return () => ipcRenderer.off('vault:changed', h); },
   },
+  // 剪贴板快速捕获：主进程全局快捷键（⌘/Ctrl+Alt+V）读剪贴板后把文本回调给渲染层
+  clipboardCapture: cb => { const h = (_e, text) => cb(text); ipcRenderer.on('clipboard-capture', h); return () => ipcRenderer.off('clipboard-capture', h); },
 });

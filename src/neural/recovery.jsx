@@ -1,6 +1,7 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {Icon} from './icons';
 import {listSnapshots, listFileSnapshots, readFileSnapshot, snapReady} from './fileStore';
+import {lineDiff} from './lineDiff';
 
 // 「文件恢复」弹窗：两层快照网的统一查询界面。自包含弹窗结构（与 main.jsx 的 Modal 同形），
 // 避免互相 import 成环。
@@ -13,7 +14,7 @@ const fmtTs = ts => {
 };
 const baseName = rel => String(rel || '').split('/').pop().replace(/\.md$/i, '');
 
-export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy}) {
+export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy, currentBodyOf}) {
   const ref = useRef(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -39,6 +40,7 @@ export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy}) {
   const [openRel, setOpenRel] = useState(null);
   const [fileVer, setFileVer] = useState(null);
   const [fileBody, setFileBody] = useState(null);
+  const [fileErr, setFileErr] = useState(null); // 读取失败态独立存放：错误文案绝不能当正文参与对比
   useEffect(() => {
     let alive = true;
     listFileSnapshots().then(l => { if (alive) setFileList(l); }).catch(() => { if (alive) setFileList([]); });
@@ -60,9 +62,32 @@ export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy}) {
   const pickFileVer = e => {
     setFileVer(e);
     setFileBody(null); // null = 读取中
+    setFileErr(null);
     readFileSnapshot(e.file)
-      .then(body => setFileBody(body ?? '（读取失败 · Failed to read）'))
-      .catch(() => setFileBody('（读取失败 · Failed to read）'));
+      .then(body => { if (body == null) setFileErr('（读取失败 · Failed to read）'); else setFileBody(body); })
+      .catch(() => setFileErr('（读取失败 · Failed to read）'));
+  };
+
+  // —— 版本对比：应用内快照 ↔ 当前内容 / 文件历史相邻两份，行级 diff 高亮 ——
+  const [diff, setDiff] = useState(null); // {title, rows, note} | null
+  const showDiff = (rows, title) => setDiff(rows
+    ? {title, rows, add: rows.filter(r => r.t === '+').length, del: rows.filter(r => r.t === '-').length}
+    : {title, rows: null, note: '内容过长（单侧超 1500 行），暂不支持对比 · Too large to diff'});
+  const diffSnapVsCurrent = () => {
+    if (!selSnap) return;
+    const cur = currentBodyOf ? currentBodyOf(selSnap.kind, selSnap.id) : null;
+    if (cur == null) { setDiff({title: '无法对比', rows: null, note: '该内容已不存在于当前库中 · Item no longer exists'}); return; }
+    showDiff(lineDiff(selSnap.item?.body || '', cur), `${selSnap.title || '未命名'}：快照（${fmtTs(selSnap.ts)}）→ 当前`);
+  };
+  const diffFileVsPrev = async () => {
+    if (!fileVer) return;
+    const group = fileGroups.find(g => g[0].rel === fileVer.rel) || [];
+    const idx = group.findIndex(x => x.file === fileVer.file);
+    const prev = group[idx + 1]; // 列表新 → 旧，下一份即更早版本
+    if (!prev) { setDiff({title: '没有更早版本', rows: null, note: '这是该文件最早的一份快照 · Oldest snapshot'}); return; }
+    const prevBody = await readFileSnapshot(prev.file);
+    if (prevBody == null) { setDiff({title: '无法对比', rows: null, note: '上一份快照读取失败，无法参与对比 · Previous snapshot unreadable'}); return; }
+    showDiff(lineDiff(prevBody, fileBody || ''), `${baseName(fileVer.rel)}：${fmtTs(prev.ts)} → ${fmtTs(fileVer.ts)}`);
   };
 
   return <div className="veil" onClick={onClose}>
@@ -95,7 +120,10 @@ export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy}) {
         {selSnap && <div className="snap-preview">
           <div className="snap-preview-head">
             <span>{KIND_LABEL[selSnap.kind]} · {selSnap.title || '未命名'} · {fmtTs(selSnap.ts)}</span>
-            <button className="pill primary" onClick={() => onRestoreSnap(selSnap)}><Icon name="replay" size={13}/>恢复此版本 <em>Restore</em></button>
+            <span className="snap-actions">
+              {currentBodyOf && <button className="pill ghost" onClick={diffSnapVsCurrent} title="并排对比这份快照与当前内容的差异 · Diff against current"><Icon name="draft" size={13}/>对比当前 <em>Diff</em></button>}
+              <button className="pill primary" onClick={() => onRestoreSnap(selSnap)}><Icon name="replay" size={13}/>恢复此版本 <em>Restore</em></button>
+            </span>
           </div>
           <pre>{selSnap.item?.body || '（无正文 · Empty）'}</pre>
         </div>}
@@ -123,9 +151,21 @@ export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy}) {
         {fileVer && <div className="snap-preview">
           <div className="snap-preview-head">
             <span>{baseName(fileVer.rel)} · {fmtTs(fileVer.ts)}</span>
-            <button className="pill primary" onClick={() => onRestoreCopy(fileVer)}><Icon name="replay" size={13}/>恢复为副本 <em>Restore as copy</em></button>
+            <span className="snap-actions">
+              {fileBody != null && !fileErr && <button className="pill ghost" onClick={diffFileVsPrev} title="与更早一份快照对比差异 · Diff against previous"><Icon name="draft" size={13}/>与上一份对比 <em>Diff</em></button>}
+              <button className="pill primary" onClick={() => onRestoreCopy(fileVer)}><Icon name="replay" size={13}/>恢复为副本 <em>Restore as copy</em></button>
+            </span>
           </div>
-          <pre>{fileBody ?? '正在读取…'}</pre>
+          <pre>{fileErr || (fileBody ?? '正在读取…')}</pre>
+        </div>}
+        {diff && <div className="snap-preview diff-view">
+          <div className="snap-preview-head">
+            <span>{diff.title}{diff.rows ? ` · 新增 ${diff.add} 行 / 删除 ${diff.del} 行` : ''}</span>
+            <button className="icon-btn" onClick={() => setDiff(null)} aria-label="关闭对比 Close diff"><Icon name="close" size={14}/></button>
+          </div>
+          {diff.rows
+            ? <pre className="diff-body">{diff.rows.map((r, i) => <span key={i} className={`dl ${r.t === '-' ? 'minus' : r.t === '+' ? 'plus' : 'ctx'}`}>{r.t === ' ' ? '\u00a0' : r.t} {r.s || '\u00a0'}</span>)}</pre>
+            : <p className="quiet">{diff.note}</p>}
         </div>}
       </div>
     </section>

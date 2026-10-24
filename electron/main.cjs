@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, ipcMain, net, dialog, safeStorage, protocol, globalShortcut } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, net, dialog, safeStorage, protocol, globalShortcut, clipboard } = require('electron');
 const { Readable } = require('node:stream');
 const path = require('path');
 const fs = require('fs');
@@ -1046,6 +1046,16 @@ app.whenReady().then(() => {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show();
       mainWindow.focus();
+    });
+    // 剪贴板快速捕获：⌘/Ctrl+Alt+V 把剪贴板文本一键存进闪念箱（Alt 组合避开常用快捷键）。
+    // 只在本机读剪贴板经 IPC 转发一次，不联网；窗口在后台/最小化时同样可用
+    globalShortcut.register('CommandOrControl+Alt+V', () => {
+      try {
+        let text = clipboard.readText().trim();
+        if (!text) return;
+        if (text.length > 100000) text = text.slice(0, 100000) + '…（超长截断）';
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('clipboard-capture', text);
+      } catch {}
     });
   } catch (_) { /* 快捷键被其他应用占用时静默失败，不影响启动 */ }
   app.on('activate', () => {
