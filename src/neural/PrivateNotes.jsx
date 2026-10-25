@@ -79,11 +79,15 @@ export function PrivateNotes() {
     const snapshot = {id: sel, title, body, tags: parseTags(tagsInput)};
     pending.current = snapshot;
     saveTimer.current = setTimeout(() => { pending.current = null; flushSave(snapshot); }, 800);
-    return () => {
-      clearTimeout(saveTimer.current);
-      if (pending.current) { const p = pending.current; pending.current = null; flushSave(p); }
-    };
+    // cleanup 只清定时器不落盘：否则每次按键都触发一次加密保存 + 全量 reload，
+    // 防抖形同虚设；挂起的编辑由下方「切笔记 / 锁定 / 卸载」统一补写
+    return () => clearTimeout(saveTimer.current);
   }, [sel, title, body, tagsInput, unlocked, syncedId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 切换笔记、锁定、组件卸载时，把还在防抖窗口里的编辑立即落盘
+  useEffect(() => () => {
+    clearTimeout(saveTimer.current);
+    if (pending.current) { const p = pending.current; pending.current = null; flushSave(p); }
+  }, [sel, unlocked]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const createNote = async () => {
     const id = await upsertNote({title: '新建隐私笔记', body: ''});

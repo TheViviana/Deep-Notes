@@ -63,7 +63,7 @@ function walk(dir, out = []) {
     if (e.isSymbolicLink()) continue;
     const p = join(dir, e.name);
     if (e.isDirectory()) walk(p, out);
-    else if (e.isFile() && e.name.toLowerCase().endsWith('.md')) out.push(p);
+    else if (e.isFile() && /\.(md|markdown)$/i.test(e.name)) out.push(p); // 与软件内导入 isMd 同口径
   }
   return out;
 }
@@ -99,7 +99,7 @@ for (const file of files) {
   const rel = relative(VAULT, file), c = classify(rel);
   if (!c) continue;
   const {fm, body} = parse(readFileSync(file, 'utf8'));
-  const title = String(pick(fm, ['title', '标题', 'name']) || basename(file).replace(/\.md$/i, '')).trim();
+  const title = String(pick(fm, ['title', '标题', 'name']) || basename(file).replace(/\.(md|markdown)$/i, '')).trim();
   bucket[c.kind].push({file, rel, root: c.root, fm, body, title});
 }
 

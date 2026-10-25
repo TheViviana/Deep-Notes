@@ -20,7 +20,11 @@ export const unquote = s => {
 // 块标量需要在 serialize 时按 `|` 形式回写，用一个标记包装以便 render 识别
 export const isBlock = v => v && typeof v === 'object' && v.__block === true;
 export function parse(text) {
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  // UTF-8 BOM：外部编辑器（如 Windows 记事本）可能给文件头加 \uFEFF，
+  // 不剥掉会让 /^---/ 锚定失败，整个 frontmatter 被吞（deepnotes-id 丢失会触发误删重写）。
+  // match 与 body 切片都必须用剥过 BOM 的 src，否则带 BOM 时正文开头残留 \uFEFF
+  const src = String(text).replace(/^\uFEFF/, '');
+  const m = src.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   const fm = {};
   if (m) {
     const lines = m[1].split(/\r?\n/);
@@ -62,7 +66,7 @@ export function parse(text) {
     // 末尾收尾：最后一行若是块标量，去掉尾部多余换行
     if (key && isBlock(fm[key])) fm[key].text = fm[key].text.replace(/\n+$/, '');
   }
-  return {fm, body: m ? text.slice(m[0].length) : text};
+  return {fm, body: m ? src.slice(m[0].length) : src};
 }
 export const pick = (fm, keys) => {
   for (const k of keys) for (const f of Object.keys(fm)) {

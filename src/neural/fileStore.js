@@ -468,6 +468,9 @@ export async function retryPending() {
   try {
     // 只填空位：队列里可能已有本会话对同一文件的更新编辑，留底里的旧 body 不得顶掉它
     fillPending(list);
+    // 撞上在途 flush 时，await flush() 只会等到「不含本次留底」的旧一轮——
+    // 旧轮成功会让留底被误判为写成功而清除。先等在途结束，再起必含留底的新一轮。
+    if (flushing) { try { await flushing; } catch {} }
     const failed = (await flush()) || [];
     const failedKeys = new Set(failed.map(opKey));
     for (const op of list) if (!op.root) failedKeys.add(opKey(op)); // root 丢失写不了：视为仍失败，保留留底
@@ -484,7 +487,21 @@ function recordPending(ops) {
   savePending([...map.values()]);
 }
 
-export async function flush() {
+// 在途守卫：flush 是异步的，重试定时器与新编辑防抖都可能在上一轮仍 await IPC
+// （iCloud / 网盘慢盘）时触发第二轮——两轮交错会让「trash 旧文件」晚于「write 新文件」
+// 落执行，把刚重建的文件又移进回收站。串行化：在途期间直接复用同一 Promise。
+let flushing = null;
+export function flush() {
+  if (flushing) return flushing;
+  // finally 里补一轮：在途期间新入队的操作（防抖定时器撞上在途 Promise 时不会另排新定时器）
+  // 不能滞留到下一次编辑才落盘——慢盘（iCloud）上这批 op 既不在盘上也不在留底里
+  flushing = flushOnce().finally(() => {
+    flushing = null;
+    if (queue.size) { clearTimeout(timer); timer = setTimeout(flush, 800); }
+  });
+  return flushing;
+}
+async function flushOnce() {
   clearTimeout(timer);
   timer = null;
   const v = api();
@@ -627,6 +644,16 @@ export async function readFileSnapshot(file) {
 export function flushSyncNow() {
   const v = api();
   if (!v?.flushSync) return;
+  // meta 防抖窗口（400ms）内的改动搭同步通道落盘：撞上关窗时盘上 meta.json 不该丢这一笔。
+  // metaBlocked（读盘失败）时绝不整写，避免用不完整对象覆盖盘上其他键；localStorage 兜底仍在。
+  if (v.metaWriteSync && metaDirty.size && metaCache && !metaBlocked && getRoot()) {
+    clearTimeout(metaTimer);
+    metaTimer = null;
+    try {
+      const r = v.metaWriteSync(getRoot(), {...metaCache});
+      if (r?.ok) { metaDirty.clear(); metaBase = {...metaCache}; }
+    } catch {}
+  }
   clearTimeout(timer);
   timer = null;
   // 挂起写也搭上退出前的同步通道（最后一次机会）：排队进队列但留底先不清（审计 C2：
@@ -701,7 +728,7 @@ export function readVaultFiles(dir, res) {
   const files = res.files.map(f => ({
     name: f.relPath.split('/').pop(),
     webkitRelativePath: base + '/' + f.relPath,
-    lastModified: 0,
+    lastModified: f.mtimeMs || 0,
     text: async () => f.body,
   }));
   return {files, unreadable: res.unreadable || []};

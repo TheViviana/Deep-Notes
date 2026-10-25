@@ -1138,7 +1138,7 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
                   {voiceSorted.map(v => <option key={v.voiceURI} value={v.voiceURI}>{v.name}（{v.lang}）</option>)}
                 </select>
               </label>
-              <button type="button" className="pill ghost" onClick={ttsPreview} title="用当前音色试听一句话 · Preview">试听 <em>试听</em></button>
+              <button type="button" className="pill ghost" onClick={ttsPreview} title="用当前音色试听一句话 · Preview">试听 <em>Preview</em></button>
             </>
             : <button type="button" className="pill ghost" onClick={ttsStart} title="用系统本地语音朗读正文（离线）· Read aloud with the local system voice">朗读 <em>TTS</em></button>}
         </>}

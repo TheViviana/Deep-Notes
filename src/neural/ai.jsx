@@ -73,7 +73,8 @@ function loadAi() {
     cfg.apiKey = '';
     window.electronAPI.keyEncrypt(plain).then(res => {
       if (res?.ok) persistAi({...aiState, apiKey: ENC_PREFIX + res.data});
-    }).catch(() => {});
+      else persistAi({...aiState, apiKey: ''}); // 加密失败则清掉明文不落盘：重启后需重填（内存也不留，与上面 cfg.apiKey='' 一致）
+    }).catch(() => persistAi({...aiState, apiKey: ''}));
   }
   return cfg;
 }

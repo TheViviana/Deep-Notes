@@ -62,7 +62,14 @@ function parseWikis(body) {
   }
   return list;
 }
-const patchBody = (body, raw, next) => { const i = body.indexOf(raw); return i < 0 ? body : body.slice(0, i) + next + body.slice(i + raw.length); };
+// 同一篇正文里重复出现的同一 [[X]]：按第几次出现（occ）定位，否则 patchBody 永远只改第一处
+const patchBody = (body, raw, next, occ = 0) => {
+  let i = -1;
+  for (let k = 0; k <= occ; k++) { i = body.indexOf(raw, i + 1); if (i < 0) return body; }
+  return body.slice(0, i) + next + body.slice(i + raw.length);
+};
+// 双链目标名不能含 [ ] 和换行：用户输入里混入会产出不可解析的非法双链
+const cleanTarget = s => s.trim().replace(/[\[\]\n]/g, '');
 
 function WikiEditor({graph, node, onBody, onNoteTitle, onAction, onGo}) {
   const body = bodyOf(node);
@@ -77,7 +84,7 @@ function WikiEditor({graph, node, onBody, onNoteTitle, onAction, onGo}) {
   const resolve = name => nameMap.get(name.toLowerCase());
   const save = next => { onBody(node.kind, node.id, next); setMode(null); setVal(''); };
   const addWiki = () => {
-    const t = val.trim();
+    const t = cleanTarget(val);
     if (t) save(body.trim() ? body.replace(/\s*$/, '') + '\n\n' + `[[${t}]]` : `[[${t}]]`);
     else setMode(null);
   };
@@ -103,9 +110,10 @@ function WikiEditor({graph, node, onBody, onNoteTitle, onAction, onGo}) {
       {!wikis.length && <p className="quiet">正文里还没有 [[双链]]，添加后即刻入图。 <em>No wikilinks yet</em></p>}
       {wikis.map((w, i) => {
         const dup = wikis.filter(x => x.target.toLowerCase() === w.target.toLowerCase()).length;
-        if (mode?.type === 'rename' && mode.raw === w.raw) return <span className="le-edit on" key={i}>
-          <input autoFocus value={val} onChange={e => setVal(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && val.trim()) save(patchBody(body, w.raw, `[[${val.trim()}${w.alias ? '|' + w.alias : ''}]]`)); if (e.key === 'Escape') setMode(null); }} placeholder="新的目标名称…"/>
-          <button className="le-ok" onClick={() => val.trim() && save(patchBody(body, w.raw, `[[${val.trim()}${w.alias ? '|' + w.alias : ''}]]`))}><Icon name="check" size={12}/></button>
+        const occ = wikis.slice(0, i).filter(x => x.raw === w.raw).length; // 同一 raw 的第几次出现
+        if (mode?.type === 'rename' && mode.raw === w.raw && mode.occ === occ) return <span className="le-edit on" key={i}>
+          <input autoFocus value={val} onChange={e => setVal(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && cleanTarget(val)) save(patchBody(body, w.raw, `[[${cleanTarget(val)}${w.alias ? '|' + w.alias : ''}]]`, occ)); if (e.key === 'Escape') setMode(null); }} placeholder="新的目标名称…"/>
+          <button className="le-ok" onClick={() => { const t = cleanTarget(val); if (t) save(patchBody(body, w.raw, `[[${t}${w.alias ? '|' + w.alias : ''}]]`, occ)); }}><Icon name="check" size={12}/></button>
         </span>;
         // ghost 节点（图谱里的虚线占位）也算「未创建」——可重命名、删除，或一键创建为文章/笔记
         const t0 = resolve(w.target);
@@ -119,8 +127,8 @@ function WikiEditor({graph, node, onBody, onNoteTitle, onAction, onGo}) {
               <button className="le-btn" title={`创建文章「${w.target}」`} onClick={() => onAction({type: 'newFromGhost', kind: 'post', title: w.target})}><Icon name="file" size={12}/></button>
               <button className="le-btn" title={`创建方法笔记「${w.target}」`} onClick={() => onAction({type: 'newFromGhost', kind: 'note', title: w.target})}><Icon name="methods" size={12}/></button>
             </>}
-            <button className="le-btn" title="重命名目标" onClick={() => { setMode({type: 'rename', raw: w.raw}); setVal(w.target); }}><Icon name="draft" size={12}/></button>
-            <button className="le-btn" title="删除该双链" onClick={() => save(patchBody(body, w.raw, w.alias || ''))}><Icon name="close" size={12}/></button>
+            <button className="le-btn" title="重命名目标" onClick={() => { setMode({type: 'rename', raw: w.raw, occ}); setVal(w.target); }}><Icon name="draft" size={12}/></button>
+            <button className="le-btn" title="删除该双链" onClick={() => save(patchBody(body, w.raw, w.alias || '', occ))}><Icon name="close" size={12}/></button>
           </span>
         </span>;
       })}

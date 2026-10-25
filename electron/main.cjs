@@ -293,7 +293,7 @@ async function readMd(root) {
       // iCloud 未下载的文件在盘上是「.原名.icloud」占位（带前导点）：不能当成不存在——
       // 上层靠 unreadable 区分「读不到」与「已删除」，漏报会把云盘文件当成删除写回、真删掉
       const cloud = e.name.match(/^\.+(.+)\.icloud$/i);
-      if (cloud && /\.md$/i.test(cloud[1])) {
+      if (cloud && /\.(md|markdown)$/i.test(cloud[1])) {
         unreadable.push(path.relative(root, path.join(dir, cloud[1])).split(path.sep).join('/'));
         continue;
       }
@@ -307,10 +307,13 @@ async function readMd(root) {
       }
       const full = path.join(dir, e.name);
       if (e.isDirectory()) await walk(full);
-      else if (e.isFile() && /\.md$/i.test(e.name)) {
+      else if (e.isFile() && /\.(md|markdown)$/i.test(e.name)) { // 与软件内导入 isMd 同口径
         const relPath = path.relative(root, full).split(path.sep).join('/');
         try {
-          out.push({ relPath, body: await fsp.readFile(full, 'utf8') });
+          // mtime 一并带回：无 date frontmatter 的内容导入时按文件修改时间定日期，
+          // 否则桌面端导入/同步会把日期全算成「导入那一刻」，且跨天重算导致无谓 adopt
+          const [body, st] = await Promise.all([fsp.readFile(full, 'utf8'), fsp.stat(full)]);
+          out.push({ relPath, body, mtimeMs: st.mtimeMs || 0 });
         } catch { unreadable.push(relPath); }
       }
     }
@@ -649,6 +652,7 @@ function sourceRootOf(root) {
 }
 
 // 按文件名全库搜（跳过隐藏文件与应用目录）。目录读不到（iCloud 未下载等）静默跳过。
+// 比较前统一 NFC：macOS 盘上文件名可能是 NFD，正文引用通常是 NFC，码点相等但字节不等会误判找不到
 async function walkByName(dir, base) {
   let entries;
   try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return null; }
@@ -658,7 +662,7 @@ async function walkByName(dir, base) {
     if (e.isDirectory()) {
       const r = await walkByName(f, base);
       if (r) return r;
-    } else if (e.isFile() && e.name.toLowerCase() === base) return f;
+    } else if (e.isFile() && e.name.normalize('NFC').toLowerCase() === base) return f;
   }
   return null;
 }
@@ -690,7 +694,7 @@ async function findAsset(root, ref) {
   const src = sourceRootOf(root);
   if (src && src !== roots[0] && rootAuthorized(src)) roots.push(src);
   const key = roots[0] + '|' + clean;
-  const base = path.basename(clean).toLowerCase();
+  const base = path.basename(clean).normalize('NFC').toLowerCase();
   // 审计 B4：工作库直找永远先于缓存——缓存里可能躺着「源库同名文件」的旧命中，
   // 工作库后来放的真身必须优先被找到（直找只是一次 statSync，代价可忽略）
   const direct0 = path.resolve(roots[0], clean);
@@ -804,11 +808,25 @@ ipcMain.handle('vault:meta-write', async (_e, {root, data}) => {
     return {ok: true};
   } catch (err) { return {ok: false, error: String(err?.message || err)}; }
 });
+// 退出前的同步 meta 落盘：beforeunload 里异步 vault:meta-write 可能来不及执行，
+// 走 sendSync 阻塞通道（与 vault:flush-sync 同口径：只校验白名单，不弹框）
+ipcMain.on('vault:meta-write-sync', (e, {root, data} = {}) => {
+  try {
+    if (!root || !data || !rootAuthorized(root)) { e.returnValue = {ok: false, error: '未授权'}; return; }
+    const full = path.join(path.resolve(root), META_REL);
+    if (!inside(root, full)) { e.returnValue = {ok: false, error: '越界'}; return; }
+    fs.mkdirSync(path.dirname(full), {recursive: true});
+    const tmp = full + '.tmp-' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(data));
+    fs.renameSync(tmp, full); // 原子替换，与 atomicWrite 同思路
+    e.returnValue = {ok: true};
+  } catch (err) { e.returnValue = {ok: false, error: String(err?.message || err)}; }
+});
 
 // —— 知识库完整性校验：列出全部 .md，计算 sha256 与字节数，与渲染层传入的期望值比对 ——
 // 返回 changed（盘上与记录不一致，疑似损坏或外部改写）、missing（盘上有但无记录）、
 // extra（记录有但盘上无）。只报告、绝不自动覆盖盘上文件；修复需用户在恢复界面手动操作。
-const MD_LIKE = /\.md$/i;
+const MD_LIKE = /\.(md|markdown)$/i;
 ipcMain.handle('vault:verifyIntegrity', async (_e, {root, expected}) => {
   try {
     if (!root) return {ok: false, error: '参数错误'};

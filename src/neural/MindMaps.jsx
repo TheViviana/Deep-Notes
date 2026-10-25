@@ -229,6 +229,7 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
   const moveNodeTo = (srcId, dstId) => {
     if (!srcId || !dstId || srcId === dstId || srcId === tree.id) return;
     if (isAncestorId(srcId, dstId)) return; // 不能把父节点拖进自己的子树
+    if (!findParent(tree, srcId)) return; // 无效拖放：不落 onChange（否则空操作也压撤销栈、刷 updatedAt）
     let moved = false;
     applyTree(root => {
       const srcParent = findParent(root, srcId);
@@ -817,13 +818,19 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDra
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const cur = sel ? list.find(m => m.id === sel) : null;
-  // changeMap 包装：写入前把当前版本压进撤销栈（上限 50 步），重做栈清空
+  // changeMap 包装：写入前把当前版本压进撤销栈（上限 50 步），重做栈清空。
+  // 900ms 内的连续编辑合并为一步：逐键压栈会让 ⌘Z 一次只退一个字符，50 步迅速耗尽
+  const lastPushAt = useRef(0);
   const changeMap = next => {
     const curSnap = list.find(m => m.id === next.id);
     if (curSnap) {
-      undoStack.current = [...undoStack.current.slice(-49), curSnap];
-      redoStack.current = [];
-      setHist({undo: undoStack.current.length, redo: 0});
+      const now = Date.now();
+      if (now - lastPushAt.current > 900) {
+        undoStack.current = [...undoStack.current.slice(-49), curSnap];
+        redoStack.current = [];
+        setHist({undo: undoStack.current.length, redo: 0});
+        lastPushAt.current = now;
+      }
     }
     mindmapStore.write({list: list.map(m => m.id === next.id ? {...next, updatedAt: Date.now()} : m)});
   };
@@ -831,6 +838,7 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDra
     const curSnap = sel ? list.find(m => m.id === sel) : null;
     const prev = undoStack.current.pop();
     if (!curSnap || !prev) return;
+    lastPushAt.current = 0; // 撤销后的下一笔编辑必须重新压栈，不能被合并窗口吞掉
     redoStack.current.push(curSnap);
     mindmapStore.write({list: list.map(m => m.id === curSnap.id ? {...prev, updatedAt: Date.now()} : m)});
     setHist({undo: undoStack.current.length, redo: redoStack.current.length});
@@ -839,12 +847,13 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDra
     const curSnap = sel ? list.find(m => m.id === sel) : null;
     const next = redoStack.current.pop();
     if (!curSnap || !next) return;
+    lastPushAt.current = 0; // 同 undo：恢复压栈判定
     undoStack.current.push(curSnap);
     mindmapStore.write({list: list.map(m => m.id === curSnap.id ? {...next, updatedAt: Date.now()} : m)});
     setHist({undo: undoStack.current.length, redo: redoStack.current.length});
   };
   // 切换导图 / 关窗：清空历史（跨导图的撤销没有意义且会串图）
-  useEffect(() => { undoStack.current = []; redoStack.current = []; setHist({undo: 0, redo: 0}); }, [sel]);
+  useEffect(() => { undoStack.current = []; redoStack.current = []; lastPushAt.current = 0; setHist({undo: 0, redo: 0}); }, [sel]);
   // ⌘/Ctrl+Z 撤销、⌘/Ctrl+Shift+Z（或 ⌘Y）重做：输入框内不拦截
   const histRef = useRef(null); histRef.current = {undo, redo};
   useEffect(() => {

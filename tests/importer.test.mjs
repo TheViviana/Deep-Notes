@@ -214,3 +214,18 @@ test('frontmatter：块标量任意合法缩进不吃字符（1 空格 / 4 空�
   const p4 = fmParse('---\nnote: |\n    a\n      b\n---\n正文');
   assert.equal(fmPick(p4.fm, ['note']), 'a\n  b', '4 空格基准 + 更深行保留相对缩进');
 });
+
+// —— BOM / 日期回退回归 ——
+test('UTF-8 BOM 不吞 frontmatter：deepnotes-id 与正文正常读出', async () => {
+  const r = await parseVault([f('vault/01-作品库 works/带bom.md', '\uFEFF---\ntitle: 带bom\ndeepnotes-id: post-bom1\n---\n正文')]);
+  const w = r.works.find(x => x.title === '带bom');
+  assert.ok(w, '带 BOM 的文件也应解析出作品');
+  assert.equal(w.id, 'post-bom1', 'BOM 不该让 deepnotes-id 丢失（丢了会触发误删重写）');
+  assert.equal(w.body, '正文');
+});
+
+test('无 date frontmatter 时按文件 lastModified 定日期（桌面端 readMd 带回 mtime）', async () => {
+  const ms = new Date(2026, 2, 5, 8, 0).getTime();
+  const r = await parseVault([f('vault/06-阅读区 readings/无日期.md', '# 无日期\n正文', ms)]);
+  assert.equal(r.readings[0].date, '2026-03-05');
+});
