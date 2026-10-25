@@ -51,11 +51,12 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
   const ref = useRef(null);
   useEffect(() => {
     const canvas = ref.current, ctx = canvas.getContext('2d');
-    let raf, W = 0, H = 0, dpr = 1;
+    let raf, W = 0, H = 0, dpr = 1, drew = false;
     const resize = () => {
       dpr = Math.min(window.devicePixelRatio || 1, 2);
       W = canvas.clientWidth; H = canvas.clientHeight;
       canvas.width = W * dpr; canvas.height = H * dpr;
+      if (reduced && drew) draw(performance.now()); // 静态模式：尺寸变化后补画一帧
     };
     resize();
     const ro = new ResizeObserver(resize); ro.observe(canvas);
@@ -195,7 +196,21 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
     };
     // 每帧先排好下一帧再绘制：某一帧出错也不会让背景网络停住
     let warned = false;
-    const frame = now => { raf = requestAnimationFrame(frame); try { draw(now); } catch (err) { if (!warned) { warned = true; console.error(err); } } };
+    let lastChk = 0, lastSig = '';
+    const frame = now => {
+      raf = requestAnimationFrame(frame);
+      if (document.hidden) return; // 窗口隐藏 / 最小化：整帧跳过
+      if (reduced) {
+        // 减少动态效果：只画一帧静态画面，之后每 160ms 比对一次状态签名（舞台 / 选中 / 悬停 / 光球 / 过滤），变了才重画
+        if (now - lastChk < 160) return;
+        lastChk = now;
+        const L = live.current;
+        const sig = `${L.stage}|${L.sel}|${L.hover}|${L.orb.x}|${L.orb.y}|${L.orb.s}|${L.filter ? [...L.filter].join() : ''}`;
+        if (drew && sig === lastSig) return;
+        lastSig = sig;
+      }
+      try { draw(now); drew = true; } catch (err) { if (!warned) { warned = true; console.error(err); } }
+    };
     raf = requestAnimationFrame(frame);
     return () => { cancelAnimationFrame(raf); ro.disconnect(); };
   }, [graph, layout, live, reduced]);

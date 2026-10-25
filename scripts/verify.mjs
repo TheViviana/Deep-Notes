@@ -103,7 +103,8 @@ const core = [
   ['每个模块一只水母视频', /MODULES\.map\(m => \{[\s\S]{0,600}className=\{`jelly [\s\S]{0,600}<video [^>]*src=\{T\.media\.jelly\}/],
   ['视频逐帧画到画布显示（兼容不合成 <video> 的内置浏览器）', /function paintVideo\(pair\)[\s\S]*drawImage[\s\S]*for \(const pair of Object\.values\(vids\.current\)\) paintVideo\(pair\)/],
   ['光球与水母的逐帧动画', /const step = now => \{[\s\S]*orbRef\.current\.style\.transform[\s\S]*el\.style\.transform/],
-  ['动画循环防中断（先排下一帧、出错不停）', /const frame = now => \{ raf = requestAnimationFrame\(frame\); try \{ step\(now\); \}/],
+  ['动画循环防中断（先排下一帧、出错不停）', /const frame = now => \{[\s\S]*?raf = requestAnimationFrame\(frame\);[\s\S]*?try \{ step\(now\); \}/],
+  ['窗口隐藏或减少动态效果时停笔（省电）', /if \(document\.hidden\) return;[\s\S]*?if \(L\.reduced\) \{[\s\S]*?if \(sig === lastSig\) return;\n\s+lastSig = sig;\n\s+\}\n\s+try \{ step\(now\); \}/],
   ['时间差不为负', /const dt = Math\.max\(0,/]
 ];
 for (const [label, re] of core) if (!re.test(home)) fail(`Home.jsx 缺少核心动效：${label}`); else ok(label);

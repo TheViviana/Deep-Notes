@@ -194,18 +194,20 @@ function Scene({graph, items, onModule, onItem, live, sel}) {
       const L = live.current;
       // rAF 给的是帧开始时间，可能早于上面记录的 last；负的 dt 会让后续计算出现 NaN，所以限制为 ≥ 0
       const dt = Math.max(0, Math.min(1 / 30, (now - last) / 1000)); last = Math.max(last, now);
+      // 减少动态效果：弹簧直接到位——一帧即终态，配合帧循环里的状态签名看门狗，其余时间完全停笔
+      const SPR = L.reduced ? (st, tv) => { st.x = tv; st.v = 0; return tv; } : spring;
       if (!L.paused) L.time += dt;
       const t = L.time, since = (now - L.t0) / 1000;
       const T = targets(L, t);
       const intro = L.stage === 'hub' && !L.reduced;
       // 光球
       const orbS = intro && since < .15 ? T.orb.s * .35 : T.orb.s;
-      const ox = spring(S.orb.x, T.orb.x, dt), oy = spring(S.orb.y, T.orb.y, dt), os = spring(S.orb.s, orbS, dt, 40), oo = spring(S.orb.o, intro && since < .1 ? 0 : 1, dt, 30);
+      const ox = SPR(S.orb.x, T.orb.x, dt), oy = SPR(S.orb.y, T.orb.y, dt), os = SPR(S.orb.s, orbS, dt, 40), oo = SPR(S.orb.o, intro && since < .1 ? 0 : 1, dt, 30);
       L.orb = {x: ox, y: oy, s: os};
       if (orbRef.current) { orbRef.current.style.transform = `translate3d(${ox - os / 2}px,${oy - os / 2}px,0) scale(${os / 460})`; orbRef.current.style.opacity = clamp(oo, 0, 1); }
       const dust = dustRef.current;
       if (dust) {
-        const di = clamp(spring(S.dust, L.stage === 'hub' ? .3 : 1, dt, 18), 0, 1);
+        const di = clamp(SPR(S.dust, L.stage === 'hub' ? .3 : 1, dt, 18), 0, 1);
         const ctx = dust.getContext('2d');
         ctx.clearRect(0, 0, 1012, 1012);
         if (!L.reduced && di > .02) {
@@ -225,8 +227,8 @@ function Scene({graph, items, onModule, onItem, live, sel}) {
       MODULES.forEach((m, i) => {
         const j = S.jelly[m.id], tg = T.jelly[m.id];
         const gated = intro && since < 1 + i * .17;
-        const x = spring(j.x, gated ? ox : tg.x, dt), y = spring(j.y, gated ? oy : tg.y, dt), s = spring(j.s, gated ? 24 : tg.s, dt), o = spring(j.o, gated ? 0 : tg.o, dt, 40);
-        const lo = spring(j.lo, intro && since < 2 + i * .1 ? 0 : tg.o, dt, 40);
+        const x = SPR(j.x, gated ? ox : tg.x, dt), y = SPR(j.y, gated ? oy : tg.y, dt), s = SPR(j.s, gated ? 24 : tg.s, dt), o = SPR(j.o, gated ? 0 : tg.o, dt, 40);
+        const lo = SPR(j.lo, intro && since < 2 + i * .1 ? 0 : tg.o, dt, 40);
         j.cur = {x, y, s};
         const el = jellyRefs.current[m.id], inner = innerRefs.current[m.id], lab = labelRefs.current[m.id];
         if (el) { el.style.transform = `translate3d(${x - s / 2}px,${y - s * .375}px,0) scale(${s / 200})`; el.style.opacity = clamp(o, 0, 1); }
@@ -283,7 +285,7 @@ function Scene({graph, items, onModule, onItem, live, sel}) {
           // 触须一根一根依次长出（20 条约 1.8 秒），形成伞状开花的节奏
           const ready = L.reduced || now - L.fanStart > 160 + i * Math.min(90, 1800 / Math.max(items.length, 1));
           const tx = T.fan.x, ty = T.fan.y0 + i * T.fan.gap + (L.reduced ? 0 : Math.sin(t * .8 + i * .9) * 2);
-          const x = spring(st.x, ready ? tx : ox2, dt, 70), y = spring(st.y, ready ? ty : oy2, dt, 70), o = spring(st.o, ready ? 1 : 0, dt, 50);
+          const x = SPR(st.x, ready ? tx : ox2, dt, 70), y = SPR(st.y, ready ? ty : oy2, dt, 70), o = SPR(st.o, ready ? 1 : 0, dt, 50);
           const el = itemRefs.current[i];
           if (el) { el.style.transform = `translate3d(${x}px,${y - 15}px,0)`; el.style.opacity = clamp(o, 0, 1); }
           const p = fanRefs.current[i];
@@ -309,7 +311,22 @@ function Scene({graph, items, onModule, onItem, live, sel}) {
     };
     // 每帧先排好下一帧再执行：某一帧出错也不会让光球和水母停住
     let warned = false;
-    const frame = now => { raf = requestAnimationFrame(frame); try { step(now); } catch (err) { if (!warned) { warned = true; console.error(err); } } };
+    let lastChk = 0, lastSig = '';
+    const frame = now => {
+      raf = requestAnimationFrame(frame);
+      if (document.hidden) return; // 窗口隐藏 / 最小化：整帧跳过（视频由 visibilitychange 停掉）
+      const L = live.current;
+      if (L.reduced) {
+        // 减少动态效果：弹簧已直接到位，只在舞台 / 模块 / 悬停 / 选中 / 尺寸变化时画一帧，
+        // 其余时间完全停笔（每 160ms 比对一次签名，开销可忽略），不再 60fps 空转发烫
+        if (now - lastChk < 160) return;
+        lastChk = now;
+        const sig = `${L.stage}|${L.mod}|${L.hover}|${L.sel}|${L.size.w}x${L.size.h}`;
+        if (sig === lastSig) return;
+        lastSig = sig;
+      }
+      try { step(now); } catch (err) { if (!warned) { warned = true; console.error(err); } }
+    };
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
   }, [items, live, sel]);
