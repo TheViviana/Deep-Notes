@@ -28,6 +28,7 @@ import {DailyRecall, ReplaceModal, PomodoroFab, loadPomoSettings} from './mainMo
 import {MindMapWindow, makeMapFromItem} from './MindMaps.jsx';
 import {mapToDraftMarkdown} from './mindmap';
 import {PrivateNotes} from './PrivateNotes.jsx';
+import {Gallery} from './Gallery.jsx';
 import {playRing} from './ring.js';
 import {noiseStart, noiseStop} from './noise.js';
 import './neural.css';
@@ -326,7 +327,7 @@ const MOVE_EN = {works: 'Works', methods: 'Methods', drafts: 'Drafts', ideas: 'I
 // 各类内容的常驻模块（移动弹窗里禁用当前所在项）
 const HOME_OF = {post: 'works', note: 'methods', draft: 'drafts', idea: 'ideas', reading: 'readings', archive: 'archives'};
 // 初始页面取自 URL hash；概念网络不在 navs（顶栏独立入口）但同样是合法页面
-const PAGES = [...navs.map(n => n[0]), 'concepts', 'private'];
+const PAGES = [...navs.map(n => n[0]), 'concepts', 'private', 'gallery'];
 const initialPage = () => { const h = location.hash.slice(1); return PAGES.includes(h) ? h : 'home'; };
 
 // 联网开关：默认断网；打开后仅「沉浸式翻译」插件会访问翻译服务，其余功能依然全本地。
@@ -1879,6 +1880,7 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
     {group: '跳转 Go', icon: 'concept', zh: '打开概念网络', en: 'Go to Concepts', run: () => setPage('concepts')},
     {group: '跳转 Go', icon: 'file', zh: '思维导图浮动窗口', en: 'Mind map window', run: () => setMmOpen(o => !o)},
     {group: '跳转 Go', icon: 'file', zh: '打开隐私笔记', en: 'Go to Private notes', run: () => setPage('private')},
+    {group: '跳转 Go', icon: 'works', zh: '打开媒体库', en: 'Go to Gallery', run: () => setPage('gallery')},
     {group: '数据 Data', icon: 'file', zh: '导入知识库文件夹', en: 'Import vault folder', run: () => setModal('import')},
     {group: '数据 Data', icon: 'outlink', zh: '导入选定内容', en: 'Import selected files', run: () => setModal('import-files')},
     {group: '数据 Data', icon: 'search', zh: '批量替换', en: 'Find & replace', run: () => setModal('replace')},
@@ -1959,6 +1961,7 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
       {page === 'archives' && <Archives graph={graph} archives={archives} selected={arcSel} setSelected={setArcSel} openArchive={arcOpen} setOpenArchive={setArcOpen} onGo={openInGraph} onJumpContent={openContent} onAction={onAction} onNew={newArchive} onUpdate={updateArchive} onDelete={deleteArchive} onLinkify={linkifyMentions} onMakeMap={makeMapFor}/>}
       {page === 'concepts' && <Concepts graph={graph} onGo={openInGraph} onJumpContent={openContent}/>}
       {page === 'private' && <PrivateNotes/>}
+      {page === 'gallery' && <Gallery works={works} notes={notes} drafts={drafts} readings={readings} archives={archives} onOpenContent={openContent}/>}
     </main>
 
     <footer className="site-foot">
@@ -1984,10 +1987,13 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
       <button className="pomo-fab dock-extra" onClick={() => setPage('private')} title="隐私区：本地加密笔记 · Private notes" aria-label="打开隐私笔记">
         <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="5.5" y="10.5" width="13" height="9" rx="2.2" fill="none" stroke="currentColor" strokeWidth="1.7"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" fill="none" stroke="currentColor" strokeWidth="1.7"/></svg>
       </button>
+      <button className="pomo-fab dock-extra" onClick={() => setPage('gallery')} title="媒体库：全库正文图片一页浏览 · Gallery" aria-label="打开媒体库">
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2.4" fill="none" stroke="currentColor" strokeWidth="1.7"/><circle cx="9" cy="10" r="1.7" fill="none" stroke="currentColor" strokeWidth="1.6"/><path d="m6 17 4.2-4.6a1.4 1.4 0 0 1 2 0L18 18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round"/></svg>
+      </button>
     </div>
 
     {/* 思维导图浮动窗口 */}
-    <MindMapWindow open={mmOpen} onClose={() => setMmOpen(false)} onOpenContent={openContent} initialSel={mmSel} onToDraft={mmToDraft}/>
+    <MindMapWindow open={mmOpen} onClose={() => setMmOpen(false)} onOpenContent={openContent} initialSel={mmSel} onToDraft={mmToDraft} graph={graph}/>
 
     {/* ⌘K 全局命令面板：全文搜索 + 新建 / 跳转 / 导入导出 */}
     <CommandPalette open={palette} onClose={() => setPalette(false)} graph={graph} actions={paletteActions} onOpenContent={openContent}/>

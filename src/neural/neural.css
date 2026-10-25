@@ -864,7 +864,13 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .mm-viewport:active { cursor: grabbing; }
 .mm-inner { position: relative; }
 .mm-node { position: absolute; display: flex; align-items: center; min-height: 34px; padding: 5px 9px; border-radius: 9px; border: 1px solid var(--line); background: rgba(20,22,22,.9); font-size: 12.5px; line-height: 1.4; cursor: pointer; }
-.mm-node .mm-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 文字自动换行：长文本折行、框随内容增高（宽度由节点自身宽度决定，不再单行省略截断） */
+.mm-node .mm-text { word-break: break-word; white-space: normal; line-height: 1.4; min-width: 0; }
+/* 右缘调宽把手：6px 视觉条 + 8px 热区，悬停点亮；双击恢复默认宽 */
+.mm-node .mm-nw { position: absolute; right: -3px; top: 20%; bottom: 20%; width: 7px; border-radius: 4px; cursor: ew-resize; }
+.mm-node .mm-nw::after { content: ''; position: absolute; inset: 0 1px; border-radius: 3px; background: transparent; transition: background .15s; }
+.mm-node:hover .mm-nw::after, .mm-node .mm-nw:active::after { background: rgba(232, 180, 90, .55); }
+.mm-node.free { cursor: move; }
 .mm-node:hover { border-color: rgba(232,180,90,.5); }
 .mm-node.sel { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(232,180,90,.12); }
 .mm-node.root { background: rgba(232,180,90,.12); font-weight: 600; }
@@ -897,6 +903,31 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .mm-note-bar > span { flex: none; font-size: 12px; color: var(--text-2); }
 .mm-note-bar input { flex: 1; min-width: 0; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line-2); background: rgba(255, 255, 255, .05); color: var(--text); outline: none; font-size: 12.5px; }
 .mm-note-bar input:focus { border-color: rgba(232, 180, 90, .5); }
+
+/* 自由连线（「连线」模式建立的任意两节点曲线）：青色区分父子线，宽热区 path 负责点击命中 */
+.mm-userlines { position: absolute; left: 0; top: 0; pointer-events: none; }
+.mm-userlines .mm-uline { stroke: rgba(140, 200, 250, .75); stroke-width: 1.6; }
+.mm-userlines g.sel .mm-uline { stroke: #8cc8fa; stroke-width: 2.4; }
+.mm-userlines .mm-uline-hit { stroke: transparent; stroke-width: 14; cursor: pointer; pointer-events: stroke; }
+.mm-userlines .mm-uline.preview { stroke: rgba(140, 200, 250, .5); stroke-dasharray: 6 5; stroke-width: 1.6; }
+/* 连线模式下节点显示可下锚的十字光标 */
+.mm-node.linking { cursor: crosshair; }
+/* 节点文字里的 [[双链]]：金色小按钮，点击跳转对应内容；未创建的显示虚线占位 */
+.mm-node .mm-wikilink { border: 0; background: none; padding: 0; color: var(--gold); cursor: pointer; font: inherit; text-decoration: underline; text-decoration-color: rgba(212, 175, 110, .45); text-underline-offset: 2px; }
+.mm-node .mm-wikilink:hover { text-decoration-color: var(--gold); }
+.mm-node .mm-wikilink.unresolved { color: var(--muted); text-decoration: underline dashed; text-decoration-style: dashed; cursor: default; }
+.mm-node.free .mm-text { user-select: none; } /* 摆放模式拖动时不误选文字（双击编辑不受影响） */
+
+/* —— 媒体库（图片画廊）：瀑布流网格，图片点击放大、标题跳回原文 —— */
+.gallery-grid { columns: 5 210px; column-gap: 12px; }
+.gallery-card { break-inside: avoid; margin: 0 0 12px; padding: 8px; border-radius: 13px; display: grid; gap: 7px; }
+.gallery-img { display: block; padding: 0; border: 0; background: none; border-radius: 9px; overflow: hidden; cursor: zoom-in; }
+.gallery-img img { display: block; width: 100%; height: auto; max-height: 380px; object-fit: cover; border-radius: 9px; background: rgba(255, 255, 255, .04); }
+.gallery-card figcaption { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.gallery-src { flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 5px; border: 0; background: none; color: var(--text-2); font-size: 11.5px; cursor: pointer; text-align: left; padding: 0; }
+.gallery-src span, .gallery-src { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gallery-src:hover { color: var(--gold); }
+.gallery-kind { flex: none; font-size: 10px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
 
 /* 番茄钟角标与设置面板 */
 .pomo-wrap { position: relative; }

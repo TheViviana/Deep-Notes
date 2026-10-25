@@ -119,16 +119,19 @@ export function headingsToTree(title, body) {
 
 // —— 画布布局：经典横向树。叶子按序纵向排开，父节点纵坐标取首末可见子节点中点；x 按深度推进。
 // folded: {路径id: true}——折叠态持久化在导图记录里（不入大纲语法，往返不破坏文本）。
-const NODE_W = 150, NODE_GAP_X = 64, NODE_GAP_Y = 30; // 30：同级节点之间留足间距，12 太挤
-export function layoutTree(root, folded) {
+// heights: Map<id, 像素高>（按文字换行行数估算，由调用方传入）；gapY 为同级节点像素间距。
+// 输出 y/h 均为像素（此前以「行」为单位乘 ROW，长文字节点自适应高度后必须按真实高度排列）。
+export const NODE_W = 150, NODE_GAP_X = 64, NODE_GAP_Y = 12;
+export function layoutTree(root, folded, heights = null, gapY = NODE_GAP_Y) {
   const out = [];
-  let cursorY = 0;
+  let cursorY = 0; // px
+  const hOf = id => (heights && heights.get(id)) || 34;
   const fold = id => !!(folded && folded[id]);
   const walk = (node, depth, pid) => {
     const visible = fold(node.id) ? [] : (node.children || []);
-    const entry = {node, pid, depth, x: depth * (NODE_W + NODE_GAP_X), y: 0};
+    const entry = {node, pid, depth, x: depth * (NODE_W + NODE_GAP_X), y: 0, h: hOf(node.id)};
     out.push(entry);
-    if (!visible.length) { entry.y = cursorY; cursorY += 1 + NODE_GAP_Y / 34; }
+    if (!visible.length) { entry.y = cursorY; cursorY += entry.h + gapY; }
     else {
       let firstY = 0, lastY = 0;
       visible.forEach((c, i) => { const e = walk(c, depth + 1, node.id); if (i === 0) firstY = e.y; lastY = e.y; });
@@ -138,6 +141,21 @@ export function layoutTree(root, folded) {
   };
   walk(root, 0, null);
   return {entries: out, height: Math.max(1, cursorY)};
+}
+
+// 节点高度估算：按文字宽度（CJK 记 1em、其余记 0.55em）换算换行行数，
+// 高 = 行数 × 行高(1.4em) + 上下 padding。与 CSS 的 word-break 渲染基本一致（略保守多留一行空间）。
+export const MM_FONT = 12.5, MM_PAD_Y = 10, MM_MIN_H = 34;
+export function estimateNodeHeight(label, widthPx) {
+  const text = String(label || '');
+  const inner = Math.max(40, widthPx - 20); // 左右 padding 与边框
+  const cap = inner / MM_FONT;
+  let lines = 1, w = 0;
+  for (const ch of text) {
+    const cw = /[\u2E80-\u9FFF\uF900-\uFFEF\u3000-\u303F\uFF00-\uFF20]/.test(ch) ? 1 : 0.55;
+    if (w + cw > cap) { lines += 1; w = cw; } else w += cw;
+  }
+  return Math.max(MM_MIN_H, Math.round(lines * MM_FONT * 1.4 + MM_PAD_Y));
 }
 
 export const nodeCount = root => {

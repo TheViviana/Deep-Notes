@@ -5,10 +5,13 @@ import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {Icon} from './icons';
 import {CONFIG} from '../config';
 import {mindmaps as mindmapStore} from './conceptStore';
-import {outlineToTree, treeToOutline, headingsToTree, layoutTree, nodeCount, parseNodeText, formatNodeText, NODE_COLORS} from './mindmap';
+import {outlineToTree, treeToOutline, headingsToTree, layoutTree, nodeCount, parseNodeText, formatNodeText, estimateNodeHeight, NODE_W, NODE_GAP_Y, NODE_GAP_X} from './mindmap';
 
 const newId = () => 'mm-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const WIN_KEY = CONFIG.storagePrefix + '-mm-window-v1';
+const FREE_KEY = CONFIG.storagePrefix + '-mm-freeplace-v1'; // 「自由摆放」模式开关（会话记忆）
+const LINK_KEY = CONFIG.storagePrefix + '-mm-linkmode-v1';  // 「连线」模式开关（会话记忆）
+const NODE_W_MIN = 96, NODE_W_MAX = 460; // 手调节点宽度的上下限（逻辑 px）
 
 function loadWinPos() {
   try {
@@ -19,15 +22,43 @@ function loadWinPos() {
   } catch { return {w: 720, h: 500, x: 80, y: 60}; }
 }
 
+// 节点文字里的 [[双链]] 渲染成可点击跳转的小按钮（与正文双链同一套名称解析：标题 / 路径文件名，忽略大小写）；
+// 未创建的目标按纯文本 + 虚线显示，不产生死按钮
+function NodeLabel({label, nameMap, onJump}) {
+  const parts = String(label || '').split(/(\[\[[^\]\n]+\]\])/g);
+  return parts.map((seg, i) => {
+    const m = seg.match(/^\[\[([^\]\n]+)\]\]$/);
+    if (!m) return <React.Fragment key={i}>{seg}</React.Fragment>;
+    const raw = m[1].split('|')[0].trim();
+    const gid = nameMap && raw ? nameMap.get(raw.split('#')[0].toLowerCase()) : null;
+    if (!gid || !onJump) return <span key={i} className="mm-wikilink unresolved">{raw}</span>;
+    return <button key={i} type="button" className="mm-wikilink" title={`打开「${raw}」`}
+      onMouseDown={e => e.stopPropagation()}
+      onClick={e => { e.stopPropagation(); onJump(gid); }}>{raw}</button>;
+  });
+}
+
 // —— 画布：横向树，拖拽平移、⌘+滚轮缩放、选中节点的编辑与增删 ——
-function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, onToDraft}) {
+// 节点文字自动换行、框随内容增高；右缘把手可拖宽（sizes 记忆）；「摆放」模式下节点可自由拖位（pos 记忆）；
+// 「连线」模式下可在任意两节点间拉一条自由曲线（map.links，独立于父子层级）；节点文字里的 [[双链]] 可点击跳转。
+function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, onToDraft, onUndo, onRedo, canUndo, canRedo, nameMap, onJump}) {
   const tree = useMemo(() => outlineToTree(map.outline), [map.outline]);
   const folded = map.folded || {};
+  const sizes = map.sizes || {};   // {路径id: 逻辑宽 px}——右缘把手拖宽的记忆
+  const posMap = map.pos || {};    // {路径id: {x, y}}——「摆放」模式下的自由位置（逻辑坐标）
+  const userLinks = Array.isArray(map.links) ? map.links : []; // [{id, a, b}]——自由连线
   const [selId, setSelId] = useState(null);
+  const [selLink, setSelLink] = useState(null); // 选中的自由连线 id
   const [editing, setEditing] = useState(null);
   const [editVal, setEditVal] = useState('');
   const [noteEdit, setNoteEdit] = useState(null); // {id, val}：正在编辑的节点备注
   const [zoom, setZoom] = useState(1);
+  const [freePlace, setFreePlace] = useState(() => { try { return JSON.parse(localStorage.getItem(FREE_KEY)) === true; } catch { return false; } });
+  const [linkMode, setLinkMode] = useState(() => { try { return JSON.parse(localStorage.getItem(LINK_KEY)) === true; } catch { return false; } });
+  const [linkDrag, setLinkDrag] = useState(null); // 连线拖拽中：{a, mx, my}（鼠标画布逻辑坐标，实时预览）
+  const [live, setLive] = useState(null); // 拖动中的实时覆盖：{id, x, y}（自由拖位）或 {id, w}（调宽）
+  useEffect(() => { try { localStorage.setItem(FREE_KEY, JSON.stringify(freePlace)); } catch {} }, [freePlace]);
+  useEffect(() => { try { localStorage.setItem(LINK_KEY, JSON.stringify(linkMode)); } catch {} }, [linkMode]);
   const view = useRef({x: 40, y: 40});
   const drag = useRef(null);
   const dragId = useRef(null); // 拖动重排中的节点 id
@@ -75,9 +106,33 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
     startEdit(p.id + '-' + (idx + 1));
   };
   const addChild = () => { if (selId) addChildTo(selId); };
+  // 收集一棵子树的全部节点 id：删除节点时同步清掉 sizes/pos 残留——
+  // 否则同路径新建的节点（路径序号 id 会复用）会莫名继承被删节点的宽度/位置。
+  // 命中后只收集该子树：不能按「已收集非空」判断——深度优先回溯后会把兄弟子树也误收进来
+  const subtreeIds = (root, id) => {
+    const out = [];
+    const collect = n => { out.push(n.id); for (const c of n.children || []) collect(c); };
+    const walk = n => {
+      if (n.id === id) { collect(n); return true; }
+      for (const c of n.children || []) if (walk(c)) return true;
+      return false;
+    };
+    walk(root);
+    return out;
+  };
   const removeNode = () => {
+    if (selLink) { removeLink(selLink); return; } // 选中的是自由连线：删除该线
     if (!selId) return;
-    applyTree(root => { const p = findParent(root, selId); if (p) p.children = p.children.filter(c => c.id !== selId); });
+    const gone = new Set(subtreeIds(tree, selId));
+    const root = clone(tree);
+    const p = findParent(root, selId);
+    if (p) p.children = p.children.filter(c => c.id !== selId);
+    const sizes = {...(map.sizes || {})}, pos = {...(map.pos || {})};
+    for (const id of gone) { delete sizes[id]; delete pos[id]; }
+    // 连到被删节点（含其子树）的自由连线一并移除，不留悬空线
+    const links = userLinks.filter(l => !gone.has(l.a) && !gone.has(l.b));
+    // 一次提交：新大纲 + 清理后的 sizes/pos/links——分两次写会让第二次用旧 outline 把删除回滚掉
+    onChange({...map, outline: treeToOutline(root), sizes, pos, links});
     setSelId(null);
   };
   const toggleCollapse = () => {
@@ -85,6 +140,28 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
     const next = {...folded};
     if (next[selId]) delete next[selId]; else next[selId] = true;
     onChange({...map, folded: next});
+  };
+  // 一键展开 / 收起全部：收起折叠到一级（root 不折，否则整图只剩中心主题）
+  const expandAll = () => { if (Object.keys(folded).length) onChange({...map, folded: {}}); };
+  const collapseAll = () => {
+    const next = {};
+    const walk = (n, depth) => {
+      if (depth >= 1 && (n.children || []).length) next[n.id] = true;
+      for (const c of n.children || []) walk(c, depth + 1);
+    };
+    walk(tree, 0);
+    onChange({...map, folded: next});
+  };
+  // —— 自由连线：任意两节点之间拉一条曲线（独立于父子层级，随节点位置自动跟随） ——
+  const addLink = (a, b) => {
+    if (!a || !b || a === b) return;
+    const dup = userLinks.some(l => (l.a === a && l.b === b) || (l.a === b && l.b === a));
+    if (dup) return;
+    onChange({...map, links: [...userLinks, {id: 'lk-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), a, b}]});
+  };
+  const removeLink = id => {
+    onChange({...map, links: userLinks.filter(l => l.id !== id)});
+    setSelLink(null);
   };
   const commitText = () => {
     if (!editing) return;
@@ -144,9 +221,34 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
     if (moved) setSelId(null);
   };
 
-  const {entries} = useMemo(() => layoutTree(tree, folded), [tree, folded]);
-  const posOf = useMemo(() => Object.fromEntries(entries.map(e => [e.node.id, e])), [entries]);
-  const ROW = 46 * zoom, COL = (150 + 64) * zoom;
+  // —— 几何计算（三步）：每节点宽 → 估算高度 → 紧凑布局 → 渲染坐标（含自由摆放/调宽覆盖） ——
+  const labelOf = (id, text) => (id === tree.id ? (map.title || '未命名导图') : parseNodeText(text).label);
+  const widthOf = id => Math.max(NODE_W_MIN, Math.min(NODE_W_MAX, sizes[id] || NODE_W));
+  const heights = useMemo(() => {
+    const m = new Map();
+    const walk = n => {
+      m.set(n.id, estimateNodeHeight(labelOf(n.id, n.text), widthOf(n.id)));
+      for (const c of n.children || []) walk(c);
+    };
+    walk(tree);
+    return m;
+  }, [tree, map.title, map.sizes]); // eslint-disable-line react-hooks/exhaustive-deps
+  const {entries} = useMemo(() => layoutTree(tree, folded, heights, NODE_GAP_Y), [tree, folded, heights]);
+  // 渲染几何：逻辑坐标（画布原点相对），渲染时统一乘 zoom。自由拖位/调宽的实时值在此覆盖。
+  const geometry = useMemo(() => {
+    const g = new Map();
+    for (const e of entries) {
+      const id = e.node.id;
+      const w = live?.kind === 'w' && live.id === id ? live.w : widthOf(id);
+      const pos = live?.kind === 'p' && live.id === id ? {x: live.x, y: live.y} : posMap[id];
+      g.set(id, {
+        x: pos ? pos.x : e.depth * (NODE_W + NODE_GAP_X),
+        y: pos ? pos.y : e.y,
+        w, h: heights.get(id) || 34,
+      });
+    }
+    return g;
+  }, [entries, heights, map.pos, live]); // eslint-disable-line react-hooks/exhaustive-deps
   const CANVAS = 20000;
   const ORIGIN = CANVAS / 2;
 
@@ -154,24 +256,26 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
   // 打开导图 / 切换导图时若不定位，节点全在视口外——看起来就是「一张空导图」「两个找不到的节点」。
   const fitView = useCallback(() => {
     const vp = viewport.current;
-    if (!vp || !entries.length) return;
-    const xs = entries.map(e => e.depth * COL);
-    const ys = entries.map(e => e.y * ROW);
-    const minX = Math.min(...xs), maxX = Math.max(...xs) + 150 * zoom;
-    const minY = Math.min(...ys), maxY = Math.max(...ys) + 34 * zoom;
+    if (!vp || !geometry.size) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const g of geometry.values()) {
+      minX = Math.min(minX, g.x); maxX = Math.max(maxX, g.x + g.w);
+      minY = Math.min(minY, g.y); maxY = Math.max(maxY, g.y + g.h);
+    }
     const vw = vp.clientWidth || 640, vh = vp.clientHeight || 420;
+    const w = (maxX - minX) * zoom, h = (maxY - minY) * zoom;
     view.current = {
-      x: (vw - (maxX - minX)) / 2 - ORIGIN - minX,
-      y: (vh - (maxY - minY)) / 2 - ORIGIN - minY,
+      x: (vw - w) / 2 - ORIGIN - minX * zoom,
+      y: (vh - h) / 2 - ORIGIN - minY * zoom,
     };
     if (box.current) box.current.style.transform = `translate(${view.current.x}px, ${view.current.y}px)`;
-  }, [entries, COL, ROW, zoom, ORIGIN]);
+  }, [geometry, zoom, ORIGIN]);
   // 只在切换导图时自动定位；编辑过程中不抢视角
   const fitRef = useRef(fitView);
   fitRef.current = fitView;
   useEffect(() => {
-    // 换导图：清掉上一张的选中 / 编辑态（路径 id 在不同导图里可能撞名，残留会误删新导图的节点）
-    setSelId(null); setEditing(null); setNoteEdit(null);
+    // 换导图：清掉上一张的选中 / 编辑态（路径 id 在不同导图里可能撞名，残留会误删新导图的节点或连线）
+    setSelId(null); setEditing(null); setNoteEdit(null); setSelLink(null);
     const raf = requestAnimationFrame(() => fitRef.current());
     return () => cancelAnimationFrame(raf);
   }, [map.id]);
@@ -181,15 +285,15 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
     if (selId && !findNode(tree, selId)) setSelId(null);
   }, [tree, selId]);
 
-  // 键盘：Enter 加同级、Tab 加子级、F2 改名、Delete 删除（输入框内不拦截）
+  // 键盘：Enter 加同级、Tab 加子级、F2 改名、Delete 删除（选中的是自由连线时 Delete 删线；输入框内不拦截）
   useEffect(() => {
     const onKey = e => {
-      if (!selId) return;
+      if (!selId && !selLink) return;
       const t = e.target;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-      if (e.key === 'Enter') { e.preventDefault(); addSiblingTo(selId); }
-      else if (e.key === 'Tab') { e.preventDefault(); addChildTo(selId); }
-      else if (e.key === 'F2') { const n = findNode(tree, selId); if (n) { setEditing(selId); setEditVal(n.text); } }
+      if (e.key === 'Enter' && selId) { e.preventDefault(); addSiblingTo(selId); }
+      else if (e.key === 'Tab' && selId) { e.preventDefault(); addChildTo(selId); }
+      else if (e.key === 'F2' && selId) { const n = findNode(tree, selId); if (n) { setEditing(selId); setEditVal(n.text); } }
       else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); removeNode(); }
     };
     window.addEventListener('keydown', onKey);
@@ -199,13 +303,18 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
   // 双击空白画布：给选中节点（或中心主题）加子级，并直接进入文字编辑
   const onCanvasDblClick = e => {
     if (e.target.closest('.mm-node, .mm-bar, .mm-hint, button, input')) return;
-    addChildTo(selId && posOf[selId] ? selId : tree.id);
+    addChildTo(selId && geometry.get(selId) ? selId : tree.id);
   };
 
   const onWheel = useCallback(e => {
-    if (!(e.metaKey || e.ctrlKey)) return;
+    if (e.metaKey || e.ctrlKey) {
+      e.preventDefault();
+      setZoom(z => Math.max(0.35, Math.min(2, +(z + (e.deltaY < 0 ? 0.1 : -0.1)).toFixed(2))));
+      return;
+    }
+    // 普通滚轮转发给底层页面：导图窗口开着也能滚轮阅读身后的文章（平移画布用拖拽）
     e.preventDefault();
-    setZoom(z => Math.max(0.35, Math.min(2, +(z + (e.deltaY < 0 ? 0.1 : -0.1)).toFixed(2))));
+    window.scrollBy(0, e.deltaY);
   }, []);
   useEffect(() => {
     const vp = viewport.current;
@@ -214,8 +323,102 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
     return () => vp.removeEventListener('wheel', onWheel);
   }, [onWheel]);
 
+  // —— 自由摆放：拖节点任意移位（pos 记忆，子树仍自动排；线在落盘后由 geometry 重算） ——
+  const rafLive = useRef(0);
+  const setLiveRaf = next => { // rAF 合帧：拖动每帧至多一次重渲染，几百节点的大图也流畅
+    if (rafLive.current) cancelAnimationFrame(rafLive.current);
+    rafLive.current = requestAnimationFrame(() => { rafLive.current = 0; setLive(next); });
+  };
+  useEffect(() => () => { if (rafLive.current) cancelAnimationFrame(rafLive.current); }, []);
+  // 鼠标 → 画布逻辑坐标（inner 含 view 平移与 zoom 缩放）
+  const canvasPt = e => {
+    const r = box.current?.getBoundingClientRect();
+    if (!r) return {x: 0, y: 0};
+    return {x: (e.clientX - r.left) / zoom - ORIGIN, y: (e.clientY - r.top) / zoom - ORIGIN};
+  };
+  const onNodeDown = (e, id) => {
+    if (e.button !== 0 || e.target.closest('.mm-nw, input')) return;
+    const g = geometry.get(id);
+    if (!g) return;
+    if (linkMode) {
+      // 连线模式：mousedown 起点节点，拖到目标节点松手建一条自由曲线
+      e.preventDefault();
+      e.stopPropagation();
+      setSelId(id); setSelLink(null);
+      const move = ev => setLinkDrag({a: id, mx: canvasPt(ev).x, my: canvasPt(ev).y});
+      const up = ev => {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+        const t = ev.target.closest?.('.mm-node');
+        const bid = t?.dataset?.id;
+        if (bid && bid !== id) addLink(id, bid);
+        setLinkDrag(null);
+      };
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+      return;
+    }
+    if (freePlace) {
+      // 摆放模式：mousedown 即开始自由拖位（阻止 HTML5 reparent 拖拽与文本选择）
+      e.preventDefault();
+      e.stopPropagation();
+      setSelId(id);
+      const sx = e.clientX, sy = e.clientY, ox = g.x, oy = g.y;
+      const move = ev => setLiveRaf({kind: 'p', id, x: Math.round(ox + (ev.clientX - sx) / zoom), y: Math.round(oy + (ev.clientY - sy) / zoom)});
+      const up = () => {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+        setLive(cur => { // 落盘：与拖动中同一份实时值写成 pos；无位移则不产生写入
+          if (cur && cur.kind === 'p' && cur.id === id) {
+            const old = posMap[id];
+            if (!old || old.x !== cur.x || old.y !== cur.y) onChange({...map, pos: {...posMap, [id]: {x: cur.x, y: cur.y}}});
+          }
+          return null;
+        });
+      };
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+      return;
+    }
+    // 默认模式：点击选中（拖拽重排走 HTML5 draggable）
+    e.stopPropagation();
+    setSelId(id);
+    if (editing && editing !== id) commitText();
+  };
+  // 右缘把手拖宽（任何模式可用；双击恢复默认宽）
+  const onWidthDown = (e, id) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const g = geometry.get(id);
+    if (!g) return;
+    const sx = e.clientX, ow = g.w;
+    const move = ev => setLiveRaf({kind: 'w', id, w: Math.round(Math.max(NODE_W_MIN, Math.min(NODE_W_MAX, ow + (ev.clientX - sx) / zoom)))});
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      setLive(cur => {
+        if (cur && cur.kind === 'w' && cur.id === id) {
+          const nextSizes = {...sizes};
+          if (cur.w === NODE_W) delete nextSizes[id]; else nextSizes[id] = cur.w;
+          const changed = JSON.stringify(nextSizes) !== JSON.stringify(sizes);
+          if (changed) onChange({...map, sizes: nextSizes});
+        }
+        return null;
+      });
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+  const resetPlacement = () => {
+    if (!Object.keys(posMap).length && !userLinks.length) return;
+    onChange({...map, pos: {}, links: []}); // 复位：清自由位置与自由连线，回到纯自动布局
+    setSelLink(null);
+  };
+
   const onDown = e => {
     if (e.button !== 0 || e.target.closest('.mm-node')) return;
+    setSelLink(null); // 点空白：取消连线选中
     drag.current = {sx: e.clientX, sy: e.clientY, ox: view.current.x, oy: view.current.y};
     const move = ev => {
       if (!drag.current) return;
@@ -272,6 +475,22 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
       ctx.bezierCurveTo((x1 + x2) / 2, y1, (x1 + x2) / 2, y2, x2, y2);
       ctx.stroke();
     });
+    // 自由连线（青色，与父子线区分）
+    const upaths = [...vp.querySelectorAll('.mm-userlines .mm-uline')];
+    ctx.strokeStyle = 'rgba(140,200,250,.75)';
+    ctx.lineWidth = 1.6;
+    upaths.forEach(p => {
+      const d = p.getAttribute('d');
+      if (!d) return;
+      const nums = d.match(/[-\d.]+/g);
+      if (!nums || nums.length < 6) return;
+      const x1 = +nums[0] + view.current.x - minX + pad, y1 = +nums[1] + view.current.y - minY + pad;
+      const x2 = +nums[nums.length - 2] + view.current.x - minX + pad, y2 = +nums[nums.length - 1] + view.current.y - minY + pad;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.bezierCurveTo((x1 + x2) / 2, y1, (x1 + x2) / 2, y2, x2, y2);
+      ctx.stroke();
+    });
     // 节点
     ctx.font = '12.5px -apple-system, "PingFang SC", sans-serif';
     nodes.forEach(n => {
@@ -314,11 +533,21 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
         <small>{nodeCount(tree)} 节点</small>
       </div>
       <div className="mm-tools" role="group" aria-label="导图工具">
+        <button className="pill ghost" disabled={!canUndo} onClick={onUndo} title="撤销（⌘/Ctrl+Z）"><Icon name="replay" size={13}/>撤销</button>
+        <button className="pill ghost" disabled={!canRedo} onClick={onRedo} title="重做（⌘/Ctrl+Shift+Z）"><Icon name="replay" size={13}/>重做</button>
         {map.source && <button className="pill ghost" onClick={() => onOpenSource(map.source)} title="打开原文"><Icon name="file" size={13}/>原文 <em>Src</em></button>}
         <button className="pill ghost" disabled={!selId} onClick={addChild} title="给选中节点加子级（Tab）"><Icon name="plus" size={13}/>子</button>
         <button className="pill ghost" disabled={!selId || selId === tree.id} onClick={() => addSiblingTo(selId)} title="加同级节点（Enter）">同级</button>
         <button className="pill ghost" disabled={!selId} onClick={toggleCollapse} title="收起/展开">折叠</button>
-        <button className="pill ghost danger" disabled={!selId || selId === tree.id} onClick={removeNode} title="删除选中节点"><Icon name="trash" size={13}/></button>
+        <button className="pill ghost" onClick={expandAll} disabled={!Object.keys(folded).length} title="展开全部节点">展开</button>
+        <button className="pill ghost" onClick={collapseAll} title="收起全部（折叠到一级分支）">收全</button>
+        <button className={`pill ghost${freePlace ? ' on' : ''}`} aria-pressed={freePlace} onClick={() => setFreePlace(v => !v)}
+          title={freePlace ? '自由摆放中：拖动节点放到任意位置（点此恢复自动布局）' : '开启自由摆放：拖动节点放到任意位置（宽度把手不受影响）'}>摆放</button>
+        <button className={`pill ghost${linkMode ? ' on' : ''}`} aria-pressed={linkMode} onClick={() => setLinkMode(v => !v)}
+          title={linkMode ? '连线中：从节点 A 拖到节点 B 建一条自由曲线（点此退出）' : '连线模式：在任意两个节点之间拉一条自由曲线（Delete 删除选中的线）'}>连线</button>
+        <button className="pill ghost" disabled={!Object.keys(posMap).length && !userLinks.length} onClick={resetPlacement}
+          title="清除全部自由摆放的位置与自由连线，回到自动布局">复位</button>
+        <button className="pill ghost danger" disabled={!selLink && (!selId || selId === tree.id)} onClick={removeNode} title="删除选中节点 / 连线"><Icon name="trash" size={13}/></button>
         <span className="mm-colors" role="group" aria-label="节点颜色">
           {NODE_COLORS.map(c => <button key={c} type="button" disabled={!selId} onClick={() => setNodeColor(c)}
             className={`mm-dot c-${c}${selMeta.color === c ? ' on' : ''}`} title={`标记颜色 ${c}（再点一次取消）`} aria-label={`节点颜色 ${c}`}/>)}
@@ -348,49 +577,81 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
       </div>}
       <div className="mm-inner" ref={box} style={{width: CANVAS, height: CANVAS}}>
         <svg className="mm-lines" width={CANVAS} height={CANVAS} aria-hidden="true">
-          {entries.filter(e => e.depth > 0 && posOf[e.pid]).map(e => {
-            const p = posOf[e.pid];
-            const x1 = ORIGIN + p.depth * COL + 150 * zoom, y1 = ORIGIN + p.y * ROW + 18 * zoom;
-            const x2 = ORIGIN + e.depth * COL, y2 = ORIGIN + e.y * ROW + 18 * zoom;
+          {entries.filter(e => e.depth > 0 && geometry.get(e.pid)).map(e => {
+            const P = geometry.get(e.pid), C = geometry.get(e.node.id);
+            // 线锚在节点框的真实边缘：父右缘中点 → 子左缘中点（节点高度随文字自适应后不再用固定 18px 偏移）
+            const x1 = ORIGIN + (P.x + P.w) * zoom, y1 = ORIGIN + (P.y + P.h / 2) * zoom;
+            const x2 = ORIGIN + C.x * zoom, y2 = ORIGIN + (C.y + C.h / 2) * zoom;
             const mx = (x1 + x2) / 2;
             return <path key={e.node.id} className={selId === e.node.id || selId === e.pid ? 'on' : ''}
               d={`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`}/>;
           })}
         </svg>
+        {/* 自由连线：独立于父子层级，可点击选中、Delete 删除；宽热区 path 负责命中 */}
+        <svg className="mm-userlines" width={CANVAS} height={CANVAS}>
+          {userLinks.map(l => {
+            const A = geometry.get(l.a), B = geometry.get(l.b);
+            if (!A || !B) return null;
+            const a2b = A.x + A.w <= B.x, b2a = B.x + B.w <= A.x;
+            const [x1, y1, x2, y2] = a2b ? [ORIGIN + (A.x + A.w) * zoom, ORIGIN + (A.y + A.h / 2) * zoom, ORIGIN + B.x * zoom, ORIGIN + (B.y + B.h / 2) * zoom]
+              : b2a ? [ORIGIN + (B.x + B.w) * zoom, ORIGIN + (B.y + B.h / 2) * zoom, ORIGIN + A.x * zoom, ORIGIN + (A.y + A.h / 2) * zoom]
+              : [ORIGIN + (A.x + A.w / 2) * zoom, ORIGIN + (A.y + (A.y <= B.y ? A.h : 0)) * zoom, ORIGIN + (B.x + B.w / 2) * zoom, ORIGIN + (B.y + (A.y <= B.y ? 0 : B.h)) * zoom];
+            const mx = (x1 + x2) / 2;
+            const d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+            return <g key={l.id} className={selLink === l.id ? 'sel' : ''}>
+              <path className="mm-uline-hit" d={d} fill="none" onClick={e => { e.stopPropagation(); setSelLink(l.id); setSelId(null); }}/>
+              <path className="mm-uline" d={d} fill="none" pointerEvents="none"/>
+            </g>;
+          })}
+          {linkDrag && (() => {
+            const A = geometry.get(linkDrag.a);
+            if (!A) return null;
+            const fromRight = linkDrag.mx >= A.x;
+            const x1 = ORIGIN + (fromRight ? A.x + A.w : A.x) * zoom, y1 = ORIGIN + (A.y + A.h / 2) * zoom;
+            const x2 = ORIGIN + linkDrag.mx * zoom, y2 = ORIGIN + linkDrag.my * zoom;
+            const mx = (x1 + x2) / 2;
+            return <path className="mm-uline preview" d={`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`} fill="none" pointerEvents="none"/>;
+          })()}
+        </svg>
         {entries.map(e => {
-          const x = ORIGIN + e.depth * COL, y = ORIGIN + e.y * ROW;
+          const g = geometry.get(e.node.id) || {x: e.x, y: e.y, w: NODE_W, h: 34};
           const kids = (e.node.children || []).length;
           const hidden = kids > 0 && !!folded[e.node.id]; // kids 为 0 时不能返回 0：React 会把 0 当文本渲染（旧版叶子节点后面多出一个「0」）
           const meta = parseNodeText(e.node.text);
           const label = e.depth === 0 ? (map.title || '未命名导图') : meta.label; // 中心主题显示导图标题（根文本不进大纲）
-          return <div key={e.node.id}
-            className={`mm-node${selId === e.node.id ? ' sel' : ''}${e.depth === 0 ? ' root' : ''}${hidden ? ' folded' : ''}${meta.color ? ' c-' + meta.color : ''}`}
-            style={{left: x, top: y, width: 150 * zoom, minHeight: 34 * zoom, padding: `${5 * zoom}px ${9 * zoom}px`, borderRadius: 9 * zoom, fontSize: 12.5 * zoom}}
-            draggable={editing !== e.node.id}
+          return <div key={e.node.id} data-id={e.node.id}
+            className={`mm-node${selId === e.node.id ? ' sel' : ''}${e.depth === 0 ? ' root' : ''}${hidden ? ' folded' : ''}${meta.color ? ' c-' + meta.color : ''}${freePlace ? ' free' : ''}${linkMode ? ' linking' : ''}`}
+            style={{left: ORIGIN + g.x * zoom, top: ORIGIN + g.y * zoom, width: g.w * zoom, minHeight: g.h * zoom, padding: `${5 * zoom}px ${9 * zoom}px`, borderRadius: 9 * zoom, fontSize: 12.5 * zoom}}
+            draggable={!freePlace && !linkMode && editing !== e.node.id}
             onDragStart={ev => { dragId.current = e.node.id; ev.dataTransfer.effectAllowed = 'move'; try { ev.dataTransfer.setData('text/plain', e.node.id); } catch {} }}
             onDragOver={ev => { const src = dragId.current; if (src && src !== e.node.id && !isAncestorId(src, e.node.id)) ev.preventDefault(); }}
             onDrop={ev => { ev.preventDefault(); const src = dragId.current || ev.dataTransfer.getData('text/plain'); dragId.current = null; moveNodeTo(src, e.node.id); }}
             onDragEnd={() => { dragId.current = null; }}
-            onClick={ev => { ev.stopPropagation(); setSelId(e.node.id); if (editing && editing !== e.node.id) commitText(); }}
+            onMouseDown={ev => onNodeDown(ev, e.node.id)}
             onDoubleClick={() => { setEditing(e.node.id); setEditVal(label); }}
-            title={`${label}${meta.note ? `\n备注：${meta.note}` : ''}\n双击改文字 · 拖动可重排`}>
+            title={`${label}${meta.note ? `\n备注：${meta.note}` : ''}\n双击改文字 · 拖右缘调宽${linkMode ? ' · 拖到目标节点建立连线' : freePlace ? ' · 拖动自由摆放' : ' · 拖到别的节点上重排'}`}>
             {editing === e.node.id
               ? <input autoFocus value={editVal} onChange={ev => setEditVal(ev.target.value)} onBlur={commitText}
                   onKeyDown={ev => { if (ev.key === 'Enter' && !ev.isComposing) commitText(); if (ev.key === 'Escape') setEditing(null); }}
                   onClick={ev => ev.stopPropagation()} aria-label="节点文字"/>
-              : <span className="mm-text">{label || '　'}</span>}
+              : <span className="mm-text"><NodeLabel label={label} nameMap={nameMap} onJump={onJump}/>{label ? '' : '　'}</span>}
             {meta.note && <i className="mm-note-dot" title={`备注：${meta.note}`} aria-hidden="true">•</i>}
             {hidden && <em className="mm-badge">+{kids}</em>}
+            <i className="mm-nw" aria-hidden="true" title="拖动调宽（双击恢复默认）"
+              onMouseDown={ev => onWidthDown(ev, e.node.id)}
+              onDoubleClick={ev => { ev.stopPropagation(); if (sizes[e.node.id]) onChange({...map, sizes: {...sizes, [e.node.id]: NODE_W}}); }}
+              onClick={ev => ev.stopPropagation()}/>
           </div>;
         })}
       </div>
-      <p className="mm-hint">双击空白处新建子节点 · 双击节点改文字 · Enter 同级 · Tab 子级 · ⌘/Ctrl+滚轮缩放</p>
+      <p className="mm-hint">双击空白新建 · 双击节点改文字 · Enter 同级 / Tab 子级 · 拖右缘调宽 · 「摆放」拖节点自由移位 · 「连线」从 A 拖到 B 建自由曲线（点线选中，Delete 删）· 节点里 [[双链]] 可点击 · ⌘/Ctrl+滚轮缩放 · 滚轮滚动身后文章</p>
     </div>
   </section>;
 }
 
 // —— 浮动窗口：拖拽标题栏移动、右下角拉伸调整大小，位置尺寸记忆 ——
-export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDraft}) {
+// graph 供节点 [[双链]] 解析名称 → 内容 id；撤销/重做在窗口层统一管理（changeMap 每次写入前先压栈）
+export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDraft, graph}) {
   const store = mindmapStore.use();
   const list = Array.isArray(store.list) ? store.list : [];
   const [sel, setSel] = useState(null);
@@ -398,6 +659,10 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDra
   const [name, setName] = useState('');
   const [win, setWin] = useState(loadWinPos);
   const [sideOpen, setSideOpen] = useState(true);
+  // 撤销 / 重做：按导图记录快照（切换导图即清空）。栈只存引用，大导图也只是多几个对象指针
+  const undoStack = useRef([]);
+  const redoStack = useRef([]);
+  const [hist, setHist] = useState({undo: 0, redo: 0});
   // 大纲面板：可收起，宽度可拖拽（记忆在 localStorage）
   const OUTLINE_KEY = CONFIG.storagePrefix + '-mm-outline-v1';
   const OUTLINE_W_KEY = CONFIG.storagePrefix + '-mm-outline-w-v1';
@@ -467,7 +732,60 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDra
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const cur = sel ? list.find(m => m.id === sel) : null;
-  const changeMap = next => mindmapStore.write({list: list.map(m => m.id === next.id ? {...next, updatedAt: Date.now()} : m)});
+  // changeMap 包装：写入前把当前版本压进撤销栈（上限 50 步），重做栈清空
+  const changeMap = next => {
+    const curSnap = list.find(m => m.id === next.id);
+    if (curSnap) {
+      undoStack.current = [...undoStack.current.slice(-49), curSnap];
+      redoStack.current = [];
+      setHist({undo: undoStack.current.length, redo: 0});
+    }
+    mindmapStore.write({list: list.map(m => m.id === next.id ? {...next, updatedAt: Date.now()} : m)});
+  };
+  const undo = () => {
+    const curSnap = sel ? list.find(m => m.id === sel) : null;
+    const prev = undoStack.current.pop();
+    if (!curSnap || !prev) return;
+    redoStack.current.push(curSnap);
+    mindmapStore.write({list: list.map(m => m.id === curSnap.id ? {...prev, updatedAt: Date.now()} : m)});
+    setHist({undo: undoStack.current.length, redo: redoStack.current.length});
+  };
+  const redo = () => {
+    const curSnap = sel ? list.find(m => m.id === sel) : null;
+    const next = redoStack.current.pop();
+    if (!curSnap || !next) return;
+    undoStack.current.push(curSnap);
+    mindmapStore.write({list: list.map(m => m.id === curSnap.id ? {...next, updatedAt: Date.now()} : m)});
+    setHist({undo: undoStack.current.length, redo: redoStack.current.length});
+  };
+  // 切换导图 / 关窗：清空历史（跨导图的撤销没有意义且会串图）
+  useEffect(() => { undoStack.current = []; redoStack.current = []; setHist({undo: 0, redo: 0}); }, [sel]);
+  // ⌘/Ctrl+Z 撤销、⌘/Ctrl+Shift+Z（或 ⌘Y）重做：输入框内不拦截
+  const histRef = useRef(null); histRef.current = {undo, redo};
+  useEffect(() => {
+    if (!open) return;
+    const onKey = e => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const k = e.key.toLowerCase();
+      if (k === 'z') { e.preventDefault(); e.shiftKey ? histRef.current.redo() : histRef.current.undo(); }
+      else if (k === 'y') { e.preventDefault(); histRef.current.redo(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
+  // 节点 [[双链]] 名称解析：与图谱 nameIndex 同规则（graph 未传时不渲染跳转按钮）
+  const nameMap = useMemo(() => {
+    if (!graph?.nodes) return null;
+    const m = new Map();
+    for (const n of graph.nodes) {
+      if (n.kind !== 'post' && n.kind !== 'note' && n.kind !== 'idea' && n.kind !== 'draft' && n.kind !== 'reading' && n.kind !== 'archive') continue;
+      m.set(String(n.title).toLowerCase(), n.id);
+      if (n.path) m.set(n.path.split('/').pop().replace(/\.md$/, '').toLowerCase(), n.id);
+    }
+    return m;
+  }, [graph]);
   const createMap = () => {
     const t = name.trim() || '未命名导图';
     const m = {id: newId(), title: t, outline: '- 第一个分支\n- 第二个分支', source: null, updatedAt: Date.now()};
@@ -484,8 +802,8 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDra
   if (!open) return null;
 
   return <>
-    {/* 底层遮罩：浮动窗口打开期间，底层界面锁定不可点击；关闭窗口后恢复操作 */}
-    <div className="mm-overlay" onClick={e => e.stopPropagation()} />
+    {/* 底层遮罩：锁定点击；滚轮转发给页面——导图开着也能滚轮阅读身后的文章 */}
+    <div className="mm-overlay" onClick={e => e.stopPropagation()} onWheel={e => window.scrollBy(0, e.deltaY)} />
 
     <div className="mm-window glass" style={{left: win.x, top: win.y, width: win.w, height: win.h}} role="dialog" aria-label="思维导图浮动窗口">
       <header className="mm-window-head" ref={headRef}>
@@ -516,7 +834,9 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDra
         </aside>}
         {cur
           ? <MapCanvas map={cur} onChange={changeMap} onOpenSource={gid => { onClose(); onOpenContent(gid); }}
-              outlineOpen={outlineOpen} onToggleOutline={() => setOutlineOpen(o => !o)} onToDraft={onToDraft}/>
+              outlineOpen={outlineOpen} onToggleOutline={() => setOutlineOpen(o => !o)} onToDraft={onToDraft}
+              onUndo={undo} onRedo={redo} canUndo={hist.undo > 0} canRedo={hist.redo > 0}
+              nameMap={nameMap} onJump={gid => { onClose(); onOpenContent(gid); }}/>
           : <section className="mm-canvas empty"><p className="empty-line">选一张导图或点 ＋ 新建<em>Pick or create</em></p></section>}
         {cur && outlineOpen && <>
           <div className="mm-split" role="separator" aria-orientation="vertical" aria-label="调整大纲宽度"
@@ -544,7 +864,7 @@ export function makeMapFromItem(gid, title, body) {
   const exist = list.find(m => m.source === gid);
   if (exist) {
     if (!window.confirm(`《${title}》已有一张导图。重新生成会替换导图内容（手工修改将丢失），确定？`)) return null;
-    mindmapStore.write({list: list.map(m => m.id === exist.id ? {...m, title, outline, folded: m.folded, updatedAt: Date.now()} : m)});
+    mindmapStore.write({list: list.map(m => m.id === exist.id ? {...m, title, outline, folded: m.folded, sizes: m.sizes, pos: m.pos, links: m.links, updatedAt: Date.now()} : m)});
     return exist.id;
   }
   const m = {id: newId(), title, outline, source: gid, updatedAt: Date.now()};
