@@ -339,9 +339,13 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
       setZoom(z => Math.max(0.35, Math.min(2, +(z + (e.deltaY < 0 ? 0.1 : -0.1)).toFixed(2))));
       return;
     }
-    // 普通滚轮转发给底层页面：导图窗口开着也能滚轮阅读身后的文章（平移画布用拖拽）
+    // 框内只操作导图：滚轮手动平移画布并 preventDefault——禁止浏览器滚动链穿透到身后的文章/页面
+    //（导图之外照常翻阅文章；切到身后内容请用「− 收起」或把窗口挪开）
     e.preventDefault();
-    window.scrollBy(0, e.deltaY);
+    const vp = viewport.current;
+    if (!vp) return;
+    vp.scrollTop += e.deltaY;
+    vp.scrollLeft += e.deltaX;
   }, []);
   useEffect(() => {
     const vp = viewport.current;
@@ -723,7 +727,7 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
           </div>;
         })}
       </div>
-      <p className="mm-hint">双击空白新建 · 双击节点改文字 · Enter 同级 / Tab 子级 · 拖右缘调宽 · 「摆放」拖节点自由移位 · 「连线」从 A 拖到 B 建自由曲线（点线选中，Delete 删）· 节点里 [[双链]] 可点击 · ⌘/Ctrl+滚轮缩放 · 滚轮滚动身后文章</p>
+      <p className="mm-hint">双击空白新建 · 双击节点改文字 · Enter 同级 / Tab 子级 · 拖右缘调宽 · 「摆放」拖节点自由移位 · 「连线」从 A 拖到 B 建自由曲线（点线选中，Delete 删）· 节点里 [[双链]] 可点击 · ⌘/Ctrl+滚轮缩放 · 滚轮平移画布</p>
     </div>
   </section>;
 }
