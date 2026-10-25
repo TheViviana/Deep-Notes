@@ -13,6 +13,7 @@ const GALLERY_MAX = 400; // 单页最多展示的张数（超出提示，防一�
 
 const KINDS_ZH = {works: '文章', notes: '笔记', drafts: '草稿', readings: '阅读', archives: '档案'};
 const KIND_GID = {works: 'post', notes: 'note', drafts: 'draft', readings: 'reading', archives: 'archive'};
+const IMG_TYPE = 'application/x-deepnotes-image'; // 与思维导图的拖图接收同一类型（MindMaps.jsx 保持一致）
 
 export function Gallery({works, notes, drafts, readings, archives, onOpenContent}) {
   const [q, setQ] = useState('');
@@ -89,7 +90,13 @@ export function Gallery({works, notes, drafts, readings, archives, onOpenContent
       : <div className="gallery-grid" ref={boxRef}>
           {list.map(it => {
             const gid = KIND_GID[it.kind] + ':' + it.id;
-            return <figure key={it.key + ':' + it.kind + ':' + it.id} className="gallery-card glass">
+            const payload = JSON.stringify({ref: it.ref || null, src: it.src || null, title: it.title});
+            return <figure key={it.key + ':' + it.kind + ':' + it.id} className="gallery-card glass"
+              draggable title="拖到思维导图节点上插入图片 · Drag onto a mind-map node"
+              onDragStart={e => {
+                e.dataTransfer.setData(IMG_TYPE, payload);
+                e.dataTransfer.effectAllowed = 'copy';
+              }}>
               <button className="gallery-img" aria-label={`放大查看 ${it.ref || it.title}`}
                 onClick={e => {
                   // 优先取回填后的实际 src（库内引用图已解析成 dataURL）；未回填（网页版无库）则不打灯箱

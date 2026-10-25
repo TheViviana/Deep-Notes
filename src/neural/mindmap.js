@@ -145,9 +145,13 @@ export function layoutTree(root, folded, heights = null, gapY = NODE_GAP_Y) {
 
 // 节点高度估算：按文字宽度（CJK 记 1em、其余记 0.55em）换算换行行数，
 // 高 = 行数 × 行高(1.4em) + 上下 padding。与 CSS 的 word-break 渲染基本一致（略保守多留一行空间）。
-export const MM_FONT = 12.5, MM_PAD_Y = 10, MM_MIN_H = 34;
+// 节点文字里的图片标记（![[图.png]] / ![alt](src)）按固定缩略图高度逐张累加，不参与换行计数。
+export const MM_FONT = 12.5, MM_PAD_Y = 10, MM_MIN_H = 34, MM_IMG_H = 96;
+const MM_IMG_TOKEN = /!\[\[[^\]\n]+\]\]|!\[[^\]\n]*\]\([^)\s]+\)/g;
 export function estimateNodeHeight(label, widthPx) {
-  const text = String(label || '');
+  const s = String(label || '');
+  const imgCount = (s.match(MM_IMG_TOKEN) || []).length;
+  const text = imgCount ? s.replace(MM_IMG_TOKEN, ' ').replace(/\s+/g, ' ').trim() : s;
   const inner = Math.max(40, widthPx - 20); // 左右 padding 与边框
   const cap = inner / MM_FONT;
   let lines = 1, w = 0;
@@ -155,7 +159,8 @@ export function estimateNodeHeight(label, widthPx) {
     const cw = /[\u2E80-\u9FFF\uF900-\uFFEF\u3000-\u303F\uFF00-\uFF20]/.test(ch) ? 1 : 0.55;
     if (w + cw > cap) { lines += 1; w = cw; } else w += cw;
   }
-  return Math.max(MM_MIN_H, Math.round(lines * MM_FONT * 1.4 + MM_PAD_Y));
+  let h = Math.max(MM_MIN_H, Math.round(lines * MM_FONT * 1.4 + MM_PAD_Y));
+  return h + imgCount * MM_IMG_H;
 }
 
 export const nodeCount = root => {

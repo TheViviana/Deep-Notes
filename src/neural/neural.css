@@ -795,7 +795,6 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .md-preview mark.av-find.cur { background: var(--gold); color: #16130c; }
 /* 本地语音朗读：当前正在朗读的段落 */
 /* 思维导图浮动窗口与遮罩 */
-.mm-overlay { position: fixed; inset: 0; z-index: 70; background: transparent; pointer-events: auto; }
 .mm-window { position: fixed; z-index: 75; display: flex; flex-direction: column; border-radius: 16px; overflow: hidden; box-shadow: 0 16px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.06); min-width: 400px; min-height: 300px; }
 .mm-window-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); cursor: move; user-select: none; flex: none; }
 .mm-window-head b { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -844,7 +843,12 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .mm-item-body small { color: var(--muted); font-size: 11px; }
 .mm-canvas { padding: 0; overflow: hidden; display: grid; grid-template-rows: auto 1fr; min-height: 62vh; }
 .mm-canvas.empty { place-items: center; }
-.mm-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.mm-bar { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+/* 工具栏悬停展开：平时只占一行标题高度，鼠标移到标题栏（或 Tab 聚焦到工具内）时下拉展开，移开即收起 */
+.mm-tools-hint { flex: none; font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; user-select: none; transition: color .15s, border-color .15s; }
+.mm-bar:hover .mm-tools-hint { color: var(--gold); border-color: rgba(232, 180, 90, .4); }
+.mm-tools { position: absolute; right: 8px; top: calc(100% - 1px); z-index: 8; max-width: min(680px, calc(100vw - 40px)); padding: 8px 10px; border-radius: 12px; border: 1px solid var(--line); background: rgba(17, 18, 18, .97); box-shadow: 0 16px 44px rgba(0, 0, 0, .5); opacity: 0; visibility: hidden; transform: translateY(-6px); transition: opacity .16s ease, transform .16s ease, visibility .16s; }
+.mm-bar:hover .mm-tools, .mm-bar:focus-within .mm-tools { opacity: 1; visibility: visible; transform: none; }
 .mm-bar-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .mm-bar-title b { font-size: 15px; }
 .mm-bar-title input { font: inherit; font-size: 15px; padding: 3px 8px; border-radius: 7px; border: 1px solid var(--gold); background: none; color: var(--text); outline: none; }
@@ -871,6 +875,8 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .mm-node .mm-nw::after { content: ''; position: absolute; inset: 0 1px; border-radius: 3px; background: transparent; transition: background .15s; }
 .mm-node:hover .mm-nw::after, .mm-node .mm-nw:active::after { background: rgba(232, 180, 90, .55); }
 .mm-node.free { cursor: move; }
+/* 节点内图片缩略图（媒体库拖入 / 文字里的 ![[图]] 引用）：独立成行，宽随节点 */
+.mm-node .mm-node-img { display: block; width: 100%; max-height: 92px; object-fit: contain; margin-top: 4px; border-radius: 6px; background: rgba(255, 255, 255, .04); }
 .mm-node:hover { border-color: rgba(232,180,90,.5); }
 .mm-node.sel { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(232,180,90,.12); }
 .mm-node.root { background: rgba(232,180,90,.12); font-weight: 600; }

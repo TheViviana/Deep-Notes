@@ -1,17 +1,27 @@
-// 思维导图浮动窗口：左下角图标入口，打开后覆盖在文章/笔记之上。
-// 大小与位置可随意调整并记忆（localStorage）；打开期间底层界面只可滚动文字，不可点击——
-// 关掉浮动窗口才能恢复完整交互。数据走 conceptStore 的 mindmaps store。
+// 思维导图浮动窗口：左下角图标入口，浮在文章/笔记之上。
+// 大小与位置可随意调整并记忆（localStorage）；打开期间底层界面照常可交互（无遮罩），
+// 工具栏悬停在标题栏上才展开、移开即收起（节省空间）。数据走 conceptStore 的 mindmaps store。
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {Icon} from './icons';
 import {CONFIG} from '../config';
 import {mindmaps as mindmapStore} from './conceptStore';
-import {outlineToTree, treeToOutline, headingsToTree, layoutTree, nodeCount, parseNodeText, formatNodeText, estimateNodeHeight, NODE_W, NODE_GAP_Y, NODE_GAP_X} from './mindmap';
+import {resolveVaultImg} from './images';
+import {outlineToTree, treeToOutline, headingsToTree, layoutTree, nodeCount, parseNodeText, formatNodeText, estimateNodeHeight, NODE_COLORS, NODE_W, NODE_GAP_Y, NODE_GAP_X} from './mindmap';
 
 const newId = () => 'mm-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const WIN_KEY = CONFIG.storagePrefix + '-mm-window-v1';
 const FREE_KEY = CONFIG.storagePrefix + '-mm-freeplace-v1'; // 「自由摆放」模式开关（会话记忆）
 const LINK_KEY = CONFIG.storagePrefix + '-mm-linkmode-v1';  // 「连线」模式开关（会话记忆）
 const NODE_W_MIN = 96, NODE_W_MAX = 460; // 手调节点宽度的上下限（逻辑 px）
+const IMG_TYPE = 'application/x-deepnotes-image'; // 媒体库拖图进导图的 dataTransfer 类型
+// 从 drop 事件取媒体库图片载荷（非本类型拖拽返回 null，不影响重排拖拽）
+const imgPayloadOf = e => {
+  try {
+    const v = JSON.parse(e.dataTransfer.getData(IMG_TYPE));
+    return v && (v.ref || v.src) ? v : null;
+  } catch { return null; }
+};
+const imgTokenOf = p => p.ref ? `![[${p.ref}]]` : `![图片](${p.src})`;
 
 function loadWinPos() {
   try {
@@ -22,19 +32,36 @@ function loadWinPos() {
   } catch { return {w: 720, h: 500, x: 80, y: 60}; }
 }
 
-// 节点文字里的 [[双链]] 渲染成可点击跳转的小按钮（与正文双链同一套名称解析：标题 / 路径文件名，忽略大小写）；
-// 未创建的目标按纯文本 + 虚线显示，不产生死按钮
-function NodeLabel({label, nameMap, onJump}) {
-  const parts = String(label || '').split(/(\[\[[^\]\n]+\]\])/g);
+// 节点文字里的 [[双链]] 与图片（![[图.png]] / ![alt](src)）就地渲染：双链是可点击跳转的小按钮
+// （与正文双链同一套名称解析：标题 / 路径文件名，忽略大小写）；图片是缩略图（库内引用由
+// resolveVaultImg 回填，dataURL / 网络图直接显示）；未创建的目标按纯文本 + 虚线显示，不产生死按钮
+const MM_LABEL_TOKEN = /(!\[\[[^\]\n]+\]\]|!\[[^\]\n]*\]\([^)\s]+\)|\[\[[^\]\n]+\]\])/g;
+function NodeLabel({label, nameMap, onJump, linkMode, freePlace}) {
+  const dragMode = !!(linkMode || freePlace); // 连线/摆放模式：mousedown 必须放行给节点拖动逻辑
+  const parts = String(label || '').split(MM_LABEL_TOKEN);
   return parts.map((seg, i) => {
-    const m = seg.match(/^\[\[([^\]\n]+)\]\]$/);
-    if (!m) return <React.Fragment key={i}>{seg}</React.Fragment>;
-    const raw = m[1].split('|')[0].trim();
-    const gid = nameMap && raw ? nameMap.get(raw.split('#')[0].toLowerCase()) : null;
-    if (!gid || !onJump) return <span key={i} className="mm-wikilink unresolved">{raw}</span>;
-    return <button key={i} type="button" className="mm-wikilink" title={`打开「${raw}」`}
-      onMouseDown={e => e.stopPropagation()}
-      onClick={e => { e.stopPropagation(); onJump(gid); }}>{raw}</button>;
+    let m = seg.match(/^!\[\[([^\]\n]+)\]\]$/);
+    if (m) {
+      const name = m[1].split('|')[0].trim();
+      return <img key={i} className="mm-node-img" data-asset={name} alt={name} draggable={false}/>;
+    }
+    m = seg.match(/^!\[([^\]\n]*)\]\(([^)\s]+)\)$/);
+    if (m) {
+      const src = m[2];
+      const local = !/^(data:|https?:|blob:)/i.test(src);
+      return <img key={i} className="mm-node-img" src={src} alt={m[1] || '图片'} draggable={false}
+        {...(local ? {'data-local': '1'} : {})}/>;
+    }
+    m = seg.match(/^\[\[([^\]\n]+)\]\]$/);
+    if (m) {
+      const raw = m[1].split('|')[0].trim();
+      const gid = nameMap && raw ? nameMap.get(raw.split('#')[0].toLowerCase()) : null;
+      if (!gid || !onJump) return <span key={i} className="mm-wikilink unresolved">{raw}</span>;
+      return <button key={i} type="button" className="mm-wikilink" title={`打开「${raw}」`}
+        onMouseDown={e => { if (!dragMode) e.stopPropagation(); }}
+        onClick={e => { e.stopPropagation(); if (!dragMode) onJump(gid); }}>{raw}</button>;
+    }
+    return <React.Fragment key={i}>{seg}</React.Fragment>;
   });
 }
 
@@ -416,6 +443,34 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
     setSelLink(null);
   };
 
+  // —— 媒体库拖图进导图：落到节点上把图片追加进该节点文字；落到空白处新建一个图片节点 ——
+  // 节点宽度顺手放宽到至少 190（图片缩略图太窄看不清），随 sizes 记忆
+  const dropImageOnNode = (id, payload) => {
+    const root = clone(tree);
+    const n = findNode(root, id);
+    if (!n) return;
+    const p = parseNodeText(n.text);
+    const label = (p.label + ' ' + imgTokenOf(payload)).trim();
+    n.text = formatNodeText(label, p.note, p.color);
+    const sizes = {...map.sizes};
+    if (!sizes[id] || sizes[id] < 190) sizes[id] = Math.max(sizes[id] || NODE_W, 190);
+    onChange({...map, outline: treeToOutline(root), sizes});
+    setSelId(id);
+  };
+  const dropImageOnCanvas = payload => {
+    const base = selId && geometry.get(selId) ? selId : tree.id; // 空白落图：挂到选中节点（或中心主题）末尾
+    const parent = findNode(tree, base);
+    if (!parent) return;
+    const idx = (parent.children || []).length;
+    applyTree(root => { const n = findNode(root, base); if (n) (n.children ||= []).push({text: imgTokenOf(payload), children: []}); });
+    setSelId(base + '-' + idx);
+  };
+  // 库内引用图回填：节点 DOM 随每次渲染重建（vaultDone 标记重置），resolveVaultImg 自带缓存，重复调用廉价
+  useEffect(() => {
+    const el = box.current;
+    if (el) el.querySelectorAll('img[data-asset], img[data-local]').forEach(img => resolveVaultImg(img));
+  });
+
   const onDown = e => {
     if (e.button !== 0 || e.target.closest('.mm-node')) return;
     setSelLink(null); // 点空白：取消连线选中
@@ -509,12 +564,20 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
       ctx.roundRect(x, y, w, h, 9);
       ctx.fill();
       ctx.stroke();
+      // 节点内的图片缩略图（已加载成功的画进导出图，随图排布在文字下方）
+      const thumb = n.querySelector('.mm-node-img');
+      let textY = y + h / 2;
+      if (thumb && thumb.complete && thumb.naturalWidth > 0) {
+        const iw = w - 18, ih = Math.min(92, Math.round(iw * thumb.naturalHeight / thumb.naturalWidth));
+        ctx.drawImage(thumb, x + 9, y + 22, iw, ih);
+        textY = y + 14;
+      }
       // 文字
       const text = n.querySelector('.mm-text')?.textContent || '';
       ctx.fillStyle = isRoot ? '#e8b45a' : '#ecece9';
       ctx.textBaseline = 'middle';
       const maxChars = Math.floor(w / 7.2);
-      ctx.fillText(text.length > maxChars ? text.slice(0, maxChars) + '…' : text, x + 9, y + h / 2, w - 14);
+      ctx.fillText(text.length > maxChars ? text.slice(0, maxChars) + '…' : text, x + 9, textY, w - 14);
     });
     // 导出
     const a = document.createElement('a');
@@ -532,6 +595,7 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
           : <b onDoubleClick={() => { setEditing('title'); setEditVal(map.title || ''); }} title="双击改标题">{map.title || '未命名导图'}</b>}
         <small>{nodeCount(tree)} 节点</small>
       </div>
+      <span className="mm-tools-hint" aria-hidden="true">⚙ 工具</span>
       <div className="mm-tools" role="group" aria-label="导图工具">
         <button className="pill ghost" disabled={!canUndo} onClick={onUndo} title="撤销（⌘/Ctrl+Z）"><Icon name="replay" size={13}/>撤销</button>
         <button className="pill ghost" disabled={!canRedo} onClick={onRedo} title="重做（⌘/Ctrl+Shift+Z）"><Icon name="replay" size={13}/>重做</button>
@@ -566,7 +630,14 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
         </span>
       </div>
     </header>
-    <div className="mm-viewport" ref={viewport} onMouseDown={onDown} onDoubleClick={onCanvasDblClick}>
+    <div className="mm-viewport" ref={viewport} onMouseDown={onDown} onDoubleClick={onCanvasDblClick}
+      onDragOver={ev => { if (ev.dataTransfer.types.includes(IMG_TYPE)) ev.preventDefault(); }}
+      onDrop={ev => {
+        const img = imgPayloadOf(ev);
+        if (!img) return;
+        ev.preventDefault();
+        dropImageOnCanvas(img);
+      }}>
       {noteEdit && <div className="mm-note-bar" onMouseDown={e => e.stopPropagation()}>
         <span>备注 <em>Note</em></span>
         <input autoFocus value={noteEdit.val} placeholder="给这个节点写一条备注（随导图保存）" aria-label="节点备注"
@@ -624,8 +695,16 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
             style={{left: ORIGIN + g.x * zoom, top: ORIGIN + g.y * zoom, width: g.w * zoom, minHeight: g.h * zoom, padding: `${5 * zoom}px ${9 * zoom}px`, borderRadius: 9 * zoom, fontSize: 12.5 * zoom}}
             draggable={!freePlace && !linkMode && editing !== e.node.id}
             onDragStart={ev => { dragId.current = e.node.id; ev.dataTransfer.effectAllowed = 'move'; try { ev.dataTransfer.setData('text/plain', e.node.id); } catch {} }}
-            onDragOver={ev => { const src = dragId.current; if (src && src !== e.node.id && !isAncestorId(src, e.node.id)) ev.preventDefault(); }}
-            onDrop={ev => { ev.preventDefault(); const src = dragId.current || ev.dataTransfer.getData('text/plain'); dragId.current = null; moveNodeTo(src, e.node.id); }}
+            onDragOver={ev => {
+              if (ev.dataTransfer.types.includes(IMG_TYPE)) { ev.preventDefault(); return; } // 媒体库拖图：允许落到本节点
+              const src = dragId.current; if (src && src !== e.node.id && !isAncestorId(src, e.node.id)) ev.preventDefault();
+            }}
+            onDrop={ev => {
+              const img = imgPayloadOf(ev);
+              if (img) { ev.preventDefault(); ev.stopPropagation(); dropImageOnNode(e.node.id, img); return; } // 图片不冒泡到画布
+              ev.preventDefault(); ev.stopPropagation();
+              const src = dragId.current || ev.dataTransfer.getData('text/plain'); dragId.current = null; moveNodeTo(src, e.node.id);
+            }}
             onDragEnd={() => { dragId.current = null; }}
             onMouseDown={ev => onNodeDown(ev, e.node.id)}
             onDoubleClick={() => { setEditing(e.node.id); setEditVal(label); }}
@@ -634,7 +713,7 @@ function MapCanvas({map, onChange, onOpenSource, outlineOpen, onToggleOutline, o
               ? <input autoFocus value={editVal} onChange={ev => setEditVal(ev.target.value)} onBlur={commitText}
                   onKeyDown={ev => { if (ev.key === 'Enter' && !ev.isComposing) commitText(); if (ev.key === 'Escape') setEditing(null); }}
                   onClick={ev => ev.stopPropagation()} aria-label="节点文字"/>
-              : <span className="mm-text"><NodeLabel label={label} nameMap={nameMap} onJump={onJump}/>{label ? '' : '　'}</span>}
+              : <span className="mm-text"><NodeLabel label={label} nameMap={nameMap} onJump={onJump} linkMode={linkMode} freePlace={freePlace}/>{label ? '' : '　'}</span>}
             {meta.note && <i className="mm-note-dot" title={`备注：${meta.note}`} aria-hidden="true">•</i>}
             {hidden && <em className="mm-badge">+{kids}</em>}
             <i className="mm-nw" aria-hidden="true" title="拖动调宽（双击恢复默认）"
@@ -802,16 +881,14 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDra
   if (!open) return null;
 
   return <>
-    {/* 底层遮罩：锁定点击；滚轮转发给页面——导图开着也能滚轮阅读身后的文章 */}
-    <div className="mm-overlay" onClick={e => e.stopPropagation()} onWheel={e => window.scrollBy(0, e.deltaY)} />
-
+    {/* 无全屏遮罩：导图窗口打开期间底层界面照常可点击、可滚动、可编辑——窗口只是浮在内容上方（悬停工具栏 + 窗口本体自身交互） */}
     <div className="mm-window glass" style={{left: win.x, top: win.y, width: win.w, height: win.h}} role="dialog" aria-label="思维导图浮动窗口">
       <header className="mm-window-head" ref={headRef}>
         <b><Icon name="concept" size={13}/> 思维导图 <em>Mind Map</em></b>
         <div className="mm-window-tools">
           <button className="icon-btn" onClick={() => setSideOpen(o => !o)} title={sideOpen ? '收起清单' : '展开清单'} aria-label="切换清单">{sideOpen ? '◀' : '▶'}</button>
           <button className="icon-btn" onClick={() => { setCreating(true); setName(''); }} title="新建导图" aria-label="新建导图"><Icon name="plus" size={13}/></button>
-          <button className="icon-btn" onClick={onClose} title="关闭浮动窗口（关闭后恢复底层界面操作）" aria-label="关闭思维导图"><Icon name="close" size={14}/></button>
+          <button className="icon-btn" onClick={onClose} title="关闭思维导图" aria-label="关闭思维导图"><Icon name="close" size={14}/></button>
         </div>
       </header>
       <div className="mm-window-body">
