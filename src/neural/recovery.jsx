@@ -21,7 +21,11 @@ export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy, currentBod
   useEffect(() => {
     const before = document.activeElement;
     ref.current?.focus({preventScroll: true});
-    const key = e => { if (e.key === 'Escape' && !e.isComposing) closeRef.current(); };
+    const key = e => {
+      // 图片 / 视频灯箱打开时 Esc 归灯箱（预览正文里点开图片放大后按 Esc 只关灯箱）
+      if (document.getElementById('image-lightbox') || document.getElementById('video-lightbox')) return;
+      if (e.key === 'Escape' && !e.isComposing) closeRef.current();
+    };
     window.addEventListener('keydown', key);
     return () => { window.removeEventListener('keydown', key); if (before?.isConnected) before.focus({preventScroll: true}); };
   }, []);

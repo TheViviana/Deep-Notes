@@ -10,6 +10,8 @@ export function Modal({title, en, onClose, children, wide}) {
     const before = document.activeElement;
     ref.current?.focus({preventScroll: true});
     const key = e => {
+      // 图片 / 视频灯箱打开时 Esc 归灯箱：先关放大层，再按一次才关弹窗
+      if (document.getElementById('image-lightbox') || document.getElementById('video-lightbox')) return;
       if (e.key === 'Escape' && !e.isComposing) closeRef.current();
       if (e.key === 'Tab') {
         const list = [...ref.current.querySelectorAll('button,input,textarea,select,a[href]')].filter(n => !n.disabled);

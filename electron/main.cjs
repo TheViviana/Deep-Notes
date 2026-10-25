@@ -974,6 +974,56 @@ ipcMain.handle('ai-fetch', async (_event, { url, headers, body }) => {
   }
 });
 
+// —— AI 流式转发（ai-fetch-stream）：SSE 原始字节逐段推回渲染层，由渲染层解析聚合 ——
+// 与 ai-fetch 同一套 SSRF / 内网段 / 端口白名单；渲染层同一时刻只有一个 AI 请求（busy 单例），
+// chunk 直接发给发起方即可，无需多路复用。空闲 90s（无新 chunk）自动中止：总时长不限——
+// 长文生成几分钟是常态，卡死的判据是「不再有数据」而不是「总时间」。
+ipcMain.handle('ai-fetch-stream', async (event, { url, headers, body }) => {
+  try {
+    const blocked = aiUrlAllowed(url);
+    if (blocked) return { ok: false, status: 0, error: `请求被拒绝：${blocked}` };
+    const hostBlocked = await aiHostAllowed(url);
+    if (hostBlocked) return { ok: false, status: 0, error: `请求被拒绝：${hostBlocked}` };
+    const ctrl = new AbortController();
+    let idle = setTimeout(() => ctrl.abort(new Error('响应空闲超过 90 秒，已中止')), 90_000);
+    const res = await net.fetch(String(url), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+      redirect: 'error',
+    });
+    if (!res.ok || !res.body) {
+      clearTimeout(idle);
+      // 错误响应体很小：整读后按原结构返回，渲染层照常给出报错信息
+      const text = await res.text().catch(() => '');
+      let data = null;
+      try { data = JSON.parse(text); } catch { /* 非 JSON 报错按 null 处理 */ }
+      return { ok: res.ok, status: res.status, data };
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      clearTimeout(idle);
+      idle = setTimeout(() => ctrl.abort(new Error('响应空闲超过 90 秒，已中止')), 90_000);
+      total += value.byteLength;
+      if (total > MAX_AI_BODY) {
+        clearTimeout(idle);
+        await reader.cancel().catch(() => {});
+        return { ok: false, status: res.status, error: '响应体超过 10MB，已拒绝' };
+      }
+      if (!event.sender.isDestroyed()) event.sender.send('ai-stream-chunk', dec.decode(value, { stream: true }));
+    }
+    clearTimeout(idle);
+    return { ok: true, status: res.status };
+  } catch (err) {
+    return { ok: false, status: 0, error: String(err?.message || err) };
+  }
+});
+
 let mainWindow;
 let ownDir = null; // 生产模式本应用 dist 目录（loadFile 的实际路径推导），will-navigate 据此放行自有导航
 const isDev = !app.isPackaged;

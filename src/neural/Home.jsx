@@ -193,7 +193,7 @@ function Scene({graph, items, onModule, onItem, live, sel}) {
     const step = now => {
       const L = live.current;
       // rAF 给的是帧开始时间，可能早于上面记录的 last；负的 dt 会让后续计算出现 NaN，所以限制为 ≥ 0
-      const dt = Math.max(0, Math.min(1 / 30, (now - last) / 1000)); last = Math.max(last, now);
+      const dt = Math.max(0, Math.min(1 / 15, (now - last) / 1000)); last = Math.max(last, now); // 上限 1/15：失焦降帧（66ms 步进）时弹簧不减速
       // 减少动态效果：弹簧直接到位——一帧即终态，配合帧循环里的状态签名看门狗，其余时间完全停笔
       const SPR = L.reduced ? (st, tv) => { st.x = tv; st.v = 0; return tv; } : spring;
       if (!L.paused) L.time += dt;
@@ -309,12 +309,23 @@ function Scene({graph, items, onModule, onItem, live, sel}) {
       // 光球与水母的视频画面
       for (const pair of Object.values(vids.current)) paintVideo(pair);
     };
+    // 窗口失焦（切到别的应用但未最小化，document.hidden 仍为 false）降到 ~15fps：
+    // 后台窗口本就看不见，全速动画纯属烧 CPU；回焦立即恢复全帧率
+    let blurred = false, lastDraw = 0;
+    const onBlur = () => { blurred = true; };
+    const onFocus = () => { blurred = false; lastDraw = 0; };
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
     // 每帧先排好下一帧再执行：某一帧出错也不会让光球和水母停住
     let warned = false;
     let lastChk = 0, lastSig = '';
     const frame = now => {
       raf = requestAnimationFrame(frame);
       if (document.hidden) return; // 窗口隐藏 / 最小化：整帧跳过（视频由 visibilitychange 停掉）
+      if (blurred) { // 失焦降帧：动画按真实 dt 继续（dt 上限已放宽），只是步进变疏
+        if (now - lastDraw < 66) return;
+        lastDraw = now;
+      }
       const L = live.current;
       if (L.reduced) {
         // 减少动态效果：弹簧已直接到位，只在舞台 / 模块 / 悬停 / 选中 / 尺寸变化时画一帧，
@@ -328,7 +339,7 @@ function Scene({graph, items, onModule, onItem, live, sel}) {
       try { step(now); } catch (err) { if (!warned) { warned = true; console.error(err); } }
     };
     raf = requestAnimationFrame(frame);
-    return () => cancelAnimationFrame(raf);
+    return () => { cancelAnimationFrame(raf); window.removeEventListener('blur', onBlur); window.removeEventListener('focus', onFocus); };
   }, [items, live, sel]);
 
   // 暂停时一并暂停视频

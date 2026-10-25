@@ -115,27 +115,119 @@ export function effectiveModel(cfg = aiState) {
 export const modelLabel = (p, m) => p.modelNames?.[m] || m;
 
 // —— 请求层：Electron 下走主进程转发（部分服务商不允许浏览器 CORS），浏览器直连 ——
-export async function aiChat(messages) {
+// 传入 onDelta 时走流式（SSE）：主进程只转发原始字节，渲染层解析并逐段回调，
+// 同时聚合成与非流式一致的 {choices:[{message}]} 结构——工具调用循环逻辑完全不变。
+// delta.tool_calls 按 index 增量聚合（id / 函数名 / 参数串都是分片到达的）。
+function sseFeeder(onEvent) {
+  let buf = '';
+  return chunk => {
+    buf += chunk;
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).replace(/\r$/, '');
+      buf = buf.slice(idx + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      try { onEvent(JSON.parse(payload)); } catch { /* 半行 / 心跳注释：跳过 */ }
+    }
+  };
+}
+
+export async function aiChat(messages, {onDelta} = {}) {
   const cfg = aiState, p = providerOf(cfg);
   const baseUrl = (cfg.baseUrl || p.baseUrl || '').replace(/\/+$/, '');
   if (!baseUrl) throw new Error('还没有配置 Base URL · Base URL missing');
   const model = effectiveModel(cfg);
-  const body = {model, messages, stream: false};
+  const streaming = typeof onDelta === 'function';
+  const body = {model, messages, stream: streaming};
   // 推理等级：DeepSeek 四档经 reasoning_effort 传给 API（关 = 不传）；OpenAI 推理模型沿用 high
   const gear = effectiveGear(cfg);
   if (p.id === 'deepseek' && gear !== 'off') body.reasoning_effort = gear;
   else if (p.id === 'openai' && gear !== 'off' && /^(o\d|gpt-5)/.test(model)) body.reasoning_effort = gear === 'low' ? 'low' : 'high';
   const headers = {'content-type': 'application/json'};
   if (cfg.apiKey && p.needKey !== false) headers.authorization = 'Bearer ' + cfg.apiKey;
+  const url = baseUrl + '/chat/completions';
+  let u;
+  try { u = new URL(url); } catch { throw new Error('Base URL 无效 · Invalid Base URL'); }
+
+  // —— 流式路径：桌面走主进程转发，浏览器直连（地址规则同非流式） ——
+  if (streaming) {
+    // 桌面/浏览器同一套地址校验：https 公网放行，明文 http 仅本机回环 + 常见本地服务端口
+    if (!(window.electronAPI?.aiFetchStream)) {
+      const host = u.hostname.toLowerCase();
+      if (u.protocol === 'https:') { /* 任意 https 放行 */ }
+      else if (u.protocol === 'http:' && (host === 'localhost' || host === '::1' || /^127\./.test(host))) {
+        if (!LOCAL_PORTS.has(Number(u.port) || 0)) {
+          throw new Error(`本机 http 仅允许常见本地服务端口（${[...LOCAL_PORTS].sort((a, b) => a - b).join(' / ')}）· Local port not allowed`);
+        }
+      }
+      else if (u.protocol === 'http:') throw new Error('明文 http 仅允许本机地址（localhost / 127.0.0.1 / ::1）· Plain http only for local addresses');
+      else throw new Error('仅允许 http(s) 地址 · Only http(s) URLs are allowed');
+    }
+    const agg = {content: '', tools: []};
+    const onEvent = ev => {
+      const d = ev?.choices?.[0]?.delta;
+      if (!d) return;
+      if (d.content) { agg.content += d.content; onDelta(d.content); }
+      if (Array.isArray(d.tool_calls)) for (const tc of d.tool_calls) {
+        const i = Number(tc.index) || 0;
+        agg.tools[i] = agg.tools[i] || {id: '', name: '', arguments: ''};
+        if (tc.id) agg.tools[i].id = tc.id;
+        if (tc.function?.name) agg.tools[i].name += tc.function.name;
+        if (tc.function?.arguments) agg.tools[i].arguments += tc.function.arguments;
+      }
+      // delta.reasoning_content（DeepSeek 推理痕迹）有意忽略：不进正文，也不上屏
+    };
+    const feed = sseFeeder(onEvent);
+    const finish = () => {
+      if (!agg.content && !agg.tools.length) throw new Error('模型没有返回内容 · Empty response');
+      const message = {role: 'assistant', content: agg.content};
+      if (agg.tools.length) message.tool_calls = agg.tools.map(t => ({
+        id: t.id || 'call_' + Math.random().toString(36).slice(2, 8), type: 'function',
+        function: {name: t.name, arguments: t.arguments || ''}}));
+      return {choices: [{message}]};
+    };
+    try {
+      let res;
+      if (window.electronAPI?.aiFetchStream) {
+        res = await window.electronAPI.aiFetchStream({url, headers, body}, feed);
+        if (!res?.ok) throw new Error(res?.error || res?.data?.error?.message || `HTTP ${res?.status}`);
+      } else {
+        const resp = await fetch(u, {method: 'POST', headers, body: JSON.stringify(body)});
+        if (!resp.ok) { const data = await resp.json().catch(() => null); throw new Error(data?.error?.message || `HTTP ${resp.status}`); }
+        if (!resp.body) throw new Error('响应体不可读 · Unreadable response');
+        const reader = resp.body.getReader(), dec = new TextDecoder();
+        for (;;) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          feed(dec.decode(value, {stream: true}));
+        }
+      }
+      return finish();
+    } catch (err) {
+      // 流式通道整体失败（端点不支持 stream 字段 / 旧版主进程等）且没收到任何内容：
+      // 自动回退一次非流式——退化为「等全部生成完再出现」的旧行为，而不是直接报错
+      if (agg.content || agg.tools.length) throw err;
+      const data = await aiChatNonStream(url, headers, {...body, stream: false}); // 回退请求必须去掉 stream 标记
+      const m = data?.choices?.[0]?.message;
+      if (m?.content) { agg.content = m.content; onDelta(m.content); }
+      return finish();
+    }
+  }
+
+  return aiChatNonStream(url, headers, body, u);
+}
+// —— 非流式请求（工具建议 / 润色等一次性请求 & 流式回退）：桌面主进程转发，浏览器直连 ——
+// 直连走与桌面主进程同一套地址规则——https 公网放行，明文 http 仅本机回环且限常见本地
+// 服务端口（本地 Ollama 场景），其余协议拒绝，防止 Base URL 被填成奇怪地址后带着密钥发出去
+async function aiChatNonStream(url, headers, body, u = null) {
   if (window.electronAPI?.aiFetch) {
-    const res = await window.electronAPI.aiFetch({url: baseUrl + '/chat/completions', headers, body});
+    const res = await window.electronAPI.aiFetch({url, headers, body});
     if (!res.ok) throw new Error(res.error || res.data?.error?.message || `HTTP ${res.status}`);
     return res.data;
   }
-  // 网页版直连：与桌面主进程同一套地址规则——https 公网放行，明文 http 仅本机回环且限常见本地
-  // 服务端口（本地 Ollama 场景），其余协议拒绝，防止 Base URL 被填成奇怪地址后带着密钥发出去
-  let u;
-  try { u = new URL(baseUrl + '/chat/completions'); } catch { throw new Error('Base URL 无效 · Invalid Base URL'); }
+  if (!u) { try { u = new URL(url); } catch { throw new Error('Base URL 无效 · Invalid Base URL'); } }
   const host = u.hostname.toLowerCase();
   if (u.protocol === 'https:') { /* 任意 https 放行 */ }
   else if (u.protocol === 'http:' && (host === 'localhost' || host === '::1' || /^127\./.test(host))) {
@@ -211,6 +303,31 @@ export const useAiErr = () => {
 };
 export function clearAiChat() { chatLog = []; chatErr = ''; persistChat(); notify(chatSubs); notify(errSubs); }
 
+// —— 流式草稿：aiSend 请求期间把模型逐字输出广播给 UI（「思考中」气泡原地变成实时文本）。
+// rAF 合帧：SSE chunk 可能每秒几十次，逐次 setState 会让消息列表高频重渲染；
+// 隐藏时 rAF 停转，流结束的 finally 里同步 flush 兜底 ——
+let streamText = '', streamPending = '', streamRaf = 0;
+const streamSubs = new Set();
+function streamPublish(text) {
+  streamPending = text;
+  if (streamRaf) return;
+  streamRaf = requestAnimationFrame(() => {
+    streamRaf = 0;
+    streamText = streamPending;
+    for (const f of streamSubs) f(streamText);
+  });
+}
+function streamFlush() {
+  if (streamRaf) { cancelAnimationFrame(streamRaf); streamRaf = 0; }
+  streamText = streamPending;
+  for (const f of streamSubs) f(streamText);
+}
+export function useAiStream() {
+  const [t, setT] = useState(streamText);
+  useEffect(() => { const f = v => setT(v); streamSubs.add(f); return () => { streamSubs.delete(f); }; }, []);
+  return t;
+}
+
 // —— 「选中 AI 菜单」预填通道：编辑器把动作提示写进草稿，AI 输入框消费后自动清空；
 // auto 为 true 时预填即自动发送（润色之外的动作都是一步直达） ——
 let aiDraft = '';
@@ -256,9 +373,14 @@ export async function aiSend(text) {
   // 上下文放宽：长文写作需要更多历史（24 轮）与更长的工具结果（12k 字符）
   const convo = chatLog.filter(m => m.role === 'user' || m.role === 'assistant').slice(-24).map(m => ({role: m.role, content: m.content}));
   busy = true; notify(busySubs);
+  // onDelta 收到的是增量片段：累积成完整草稿再发布（streamPublish 是覆盖语义）
+  let draft = '';
+  const onDelta = d => { draft += d; streamPublish(draft); };
+  draft = ''; streamPublish(''); // 清空上一轮的流式草稿，「思考中」气泡就位
   try {
     for (let round = 0; round < 6; round++) {
-      const data = await aiChat([sys, ...convo]);
+      draft = ''; streamPublish(''); // 工具轮之间也重置：上一轮草稿不残留
+      const data = await aiChat([sys, ...convo], {onDelta});
       const m = data?.choices?.[0]?.message;
       if (!m) throw new Error(data?.error?.message || '模型没有返回内容 · Empty response');
       if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
@@ -270,6 +392,7 @@ export async function aiSend(text) {
           pushMsg({role: 'op', text: opBrief(tc.function?.name, args, out)});
           convo.push({role: 'tool', tool_call_id: tc.id, content: JSON.stringify(out).slice(0, 12000)});
         }
+        streamPublish(''); // 工具轮的草稿不固化为正式消息，清空等下一轮
         continue;
       }
       pushMsg({role: 'assistant', content: m.content || '（空回复）'});
@@ -279,6 +402,8 @@ export async function aiSend(text) {
   } catch (e) {
     chatErr = `AI 请求失败：${e?.message || e}`; notify(errSubs);
   } finally {
+    streamPublish(''); // 清空流式草稿（正式消息已入列 / 出错时只留报错）
+    streamFlush();
     busy = false; notify(busySubs);
   }
 }
@@ -297,6 +422,8 @@ function opBrief(name, args, out) {
 }
 
 // —— AI 模型按钮：chip + popover，样式与交互参考 DeepSeek Harness 的 InlineModelSwitcher ——
+// 弹层按「服务商与模型 / 推理等级 / 密钥 / 人设 / 长期记忆」分区展示（带小节标题与分隔），
+// 芯片本体同时显示推理等级徽标——只看顶栏也能确认当前生效的推理档位
 export function AiChip() {
   const {on} = usePlugins();
   const [cfg, setCfg] = useAiConfig();
@@ -308,9 +435,20 @@ export function AiChip() {
   const memory = aiMemory.use();
   const memList = Array.isArray(memory.list) ? memory.list : [];
   const [personaDraft, setPersonaDraft] = useState(null); // null = 未编辑，显示已存版本
+  const [personaSaved, setPersonaSaved] = useState(false); // 保存成功的瞬时反馈
+  const personaSavedTimer = useRef(null);
   const [memOpen, setMemOpen] = useState(false);
   const [memDraft, setMemDraft] = useState('');
   const mdImport = useRef(null);
+  useEffect(() => () => clearTimeout(personaSavedTimer.current), []);
+  const savePersona = () => {
+    if (personaDraft == null) return;
+    aiPersona.write({...persona, enabled: persona?.enabled ?? true, text: (personaDraft || '').slice(0, 2000)});
+    setPersonaDraft(null);
+    setPersonaSaved(true);
+    clearTimeout(personaSavedTimer.current);
+    personaSavedTimer.current = setTimeout(() => setPersonaSaved(false), 1800);
+  };
   const onImportMd = async e => {
     const f = e.target.files?.[0];
     e.target.value = '';
@@ -336,8 +474,11 @@ export function AiChip() {
   if (!on('ai')) return null;
   const p = providerOf(cfg);
   const gear = effectiveGear(cfg);
+  const gearOf = AI_GEARS.find(g => g.id === gear);
   // 芯片显示「实际生效」的模型：DeepSeek 退役旧值归一为 v4-flash
   const model = effectiveModel(cfg) || '未设置模型';
+  const personaText = personaDraft ?? String(persona?.text || '');
+  const noteKind = !net ? 'off' : secureWarn ? 'warn' : p.needKey !== false && !cfg.apiKey ? 'warn' : 'ok';
   const pick = id => {
     const np = AI_PROVIDERS.find(x => x.id === id);
     setCfg(id === 'custom'
@@ -349,70 +490,96 @@ export function AiChip() {
       title="选择 AI 服务商、模型与推理等级 · Pick provider, model & reasoning" onClick={() => setOpen(o => !o)}>
       <Icon name="agent" size={13}/><span className="ai-chip-mode">{p.name}</span>
       <i className="ai-chip-sep" aria-hidden="true"/><span className="ai-chip-model">{model}</span>
+      {gear !== 'off' && <span className="ai-chip-gear" title={gearOf?.title}>{gearOf?.zh}</span>}
       <Icon name="chevron" size={10}/>
     </button>
     {open && <div className="ai-pop glass" role="dialog" aria-label="AI 服务商设置 Provider settings">
-      <div className="ai-row"><span className="ai-label">服务商 <em>Provider</em></span>
-        <div className="ai-seg" role="tablist">{AI_PROVIDERS.map(x =>
+      <header className="ai-pop-head">
+        <b>AI 模型设置</b><em>Model settings</em>
+        <span className={`ai-net ${net ? 'on' : ''}`} title={net ? '顶栏联网开关已打开' : '顶栏联网开关未打开，AI 不会发起任何请求'}>
+          <i aria-hidden="true"/>{net ? '联网已开' : '断网中'}
+        </span>
+      </header>
+
+      <section className="ai-sec">
+        <p className="ai-sec-title">服务商 <em>Provider</em></p>
+        <div className="ai-providers" role="tablist">{AI_PROVIDERS.map(x =>
           <button key={x.id} type="button" role="tab" aria-selected={x.id === cfg.provider}
-            className={x.id === cfg.provider ? 'is-active' : ''} onClick={() => pick(x.id)}>{x.name}</button>)}</div>
-      </div>
-      <div className="ai-row"><span className="ai-label">模型 <em>Model</em></span>
+            className={x.id === cfg.provider ? 'is-active' : ''} title={x.note || x.name}
+            onClick={() => pick(x.id)}>{x.name}</button>)}</div>
         {p.customModel
-          ? <input value={cfg.model || ''} placeholder="模型名 · model id" aria-label="模型名 Model id"
+          ? <input className="ai-model-input" value={cfg.model || ''} placeholder="模型名 · model id" aria-label="模型名 Model id"
               onChange={e => setCfg({model: e.target.value})}/>
-          : <select value={model} aria-label="选择模型 Model" onChange={e => setCfg({model: e.target.value})}>
+          : <select className="ai-model-input" value={model} aria-label="选择模型 Model" onChange={e => setCfg({model: e.target.value})}>
               {p.models.map(m => <option key={m} value={m}>{modelLabel(p, m)}</option>)}
               {!p.models.includes(model) && <option value={model}>{modelLabel(p, model)}</option>}
             </select>}
-      </div>
-      <div className="ai-row"><span className="ai-label">推理等级 <em>Reasoning</em></span>
+      </section>
+
+      <section className="ai-sec">
+        <p className="ai-sec-title">推理等级 <em>Reasoning</em></p>
         <div className="ai-seg" role="tablist">
           {AI_GEARS.map(g => <button key={g.id} type="button" role="tab" aria-selected={gear === g.id}
             className={gear === g.id ? 'is-active' : ''} title={g.title} onClick={() => setCfg({gear: g.id})}>{g.zh} <em>{g.en}</em></button>)}
         </div>
-      </div>
-      {p.needKey !== false && <div className="ai-row"><span className="ai-label">API Key</span>
+      </section>
+
+      {p.needKey !== false && <section className="ai-sec">
+        <p className="ai-sec-title">API Key</p>
         <input type="password" value={cfg.apiKey || ''} placeholder="sk-…" aria-label="API Key"
-          autoComplete="off" onChange={e => setCfg({apiKey: e.target.value})}/></div>}
-      {p.id === 'custom' && <div className="ai-row"><span className="ai-label">Base URL</span>
+          autoComplete="off" onChange={e => setCfg({apiKey: e.target.value})}/>
+      </section>}
+
+      {p.id === 'custom' && <section className="ai-sec">
+        <p className="ai-sec-title">Base URL</p>
         <input value={cfg.baseUrl || ''} placeholder="https://…/v1" aria-label="Base URL"
-          onChange={e => setCfg({baseUrl: e.target.value})}/></div>}
-      <div className="ai-row"><span className="ai-label">人设 <em>Persona</em></span>
-        <div className="ai-persona">
+          onChange={e => setCfg({baseUrl: e.target.value})}/>
+      </section>}
+
+      <section className="ai-sec">
+        <p className="ai-sec-title">人设 <em>Persona</em>
           <label className="ai-persona-toggle" title="启用后 AI 的回答风格与立场优先遵循人设">
             <input type="checkbox" checked={!!persona?.enabled} onChange={e => aiPersona.write({...persona, enabled: e.target.checked})}/>
+            <i className="ai-switch-track" aria-hidden="true"><b/></i>
             {persona?.enabled ? '已启用' : '已停用'}
           </label>
-          <textarea rows={2} value={personaDraft ?? String(persona?.text || '')} aria-label="AI 人设"
-            placeholder="例如：你是我的写作教练，风格犀利直接，多给例子，少客套…"
-            onChange={e => setPersonaDraft(e.target.value)}/>
-          <button type="button" className="pill" disabled={personaDraft == null}
-            onClick={() => { aiPersona.write({...persona, enabled: persona?.enabled ?? true, text: (personaDraft || '').slice(0, 2000)}); setPersonaDraft(null); }}>保存人设 <em>Save</em></button>
+        </p>
+        <textarea rows={3} value={personaText} aria-label="AI 人设" maxLength={2000}
+          placeholder="例如：你是我的写作教练，风格犀利直接，多给例子，少客套…（启用后注入每次对话）"
+          onChange={e => setPersonaDraft(e.target.value)}/>
+        <div className="ai-persona-foot">
+          <span className="ai-count">{personaText.length}/2000{personaDraft != null ? ' · 未保存' : ''}</span>
+          {personaSaved
+            ? <span className="ai-saved" role="status">已保存 ✓</span>
+            : <button type="button" className="pill" disabled={personaDraft == null} onClick={savePersona}>保存人设 <em>Save</em></button>}
         </div>
-      </div>
-      <div className="ai-row"><span className="ai-label">长期记忆 <em>Memory</em></span>
-        <div className="ai-mem">
-          <button type="button" className="pill" onClick={() => setMemOpen(o => !o)}>{memOpen ? '收起' : `管理（${memList.length} 条）`}</button>
-          <button type="button" className="pill" onClick={() => mdImport.current?.click()} title="把一个 .md 的章节逐条存入长期记忆">导入 .md <em>Import</em></button>
+      </section>
+
+      <section className="ai-sec">
+        <p className="ai-sec-title">长期记忆 <em>Memory</em>
+          <span className="ai-mem-count">{memList.length} 条</span>
+          <button type="button" className="ai-mini" onClick={() => setMemOpen(o => !o)} aria-expanded={memOpen}>{memOpen ? '收起' : '管理'}</button>
+          <button type="button" className="ai-mini" onClick={() => mdImport.current?.click()} title="把一个 .md 的章节逐条存入长期记忆">导入 .md</button>
           <input ref={mdImport} type="file" accept=".md,.markdown,.txt" hidden onChange={onImportMd} aria-hidden="true"/>
-          {memOpen && <div className="ai-mem-list">
-            {[...memList].reverse().slice(0, 12).map(m => <div key={m.id} className="ai-mem-item">
-              <span>{String(m.text || '').slice(0, 90)}{String(m.text || '').length > 90 ? '…' : ''}</span>
-              <button type="button" aria-label={`删除记忆 ${m.id}`} title="删除" onClick={() => forgetAiMemory(m.id)}>×</button>
-            </div>)}
-            {!memList.length && <p className="ai-mem-empty">还没有记忆。AI 对话中让它「记住这个」会自动存入；也可在下面手动添加，或导入 .md。</p>}
-            <div className="ai-mem-add">
-              <input value={memDraft} placeholder="手动添加一条记忆…" aria-label="手动添加记忆"
-                onChange={e => setMemDraft(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && !e.isComposing && memDraft.trim()) { saveAiMemory(memDraft); setMemDraft(''); } }}/>
-              <button type="button" className="send" disabled={!memDraft.trim()} aria-label="添加记忆"
-                onClick={() => { if (memDraft.trim()) { saveAiMemory(memDraft); setMemDraft(''); } }}>＋</button>
-            </div>
-          </div>}
-        </div>
-      </div>
-      <p className="ai-note" role="status">
+        </p>
+        {memOpen && <div className="ai-mem-list">
+          {[...memList].reverse().slice(0, 12).map(m => <div key={m.id} className="ai-mem-item">
+            <span>{String(m.text || '').slice(0, 90)}{String(m.text || '').length > 90 ? '…' : ''}</span>
+            <button type="button" aria-label={`删除记忆 ${m.id}`} title="删除" onClick={() => forgetAiMemory(m.id)}>×</button>
+          </div>)}
+          {memList.length > 12 && <p className="ai-mem-empty">只显示最近 12 条 · 共 {memList.length} 条，都会注入对话（总长超限时优先保留最新）</p>}
+          {!memList.length && <p className="ai-mem-empty">还没有记忆。AI 对话中让它「记住这个」会自动存入；也可在下面手动添加，或导入 .md。</p>}
+          <div className="ai-mem-add">
+            <input value={memDraft} placeholder="手动添加一条记忆…" aria-label="手动添加记忆"
+              onChange={e => setMemDraft(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && !e.isComposing && memDraft.trim()) { saveAiMemory(memDraft); setMemDraft(''); } }}/>
+            <button type="button" className="send" disabled={!memDraft.trim()} aria-label="添加记忆"
+              onClick={() => { if (memDraft.trim()) { saveAiMemory(memDraft); setMemDraft(''); } }}>＋</button>
+          </div>
+        </div>}
+      </section>
+
+      <p className={`ai-note is-${noteKind}`} role="status">
         {!net ? '顶栏联网开关未打开，AI 不会发起任何请求 · Network switch is off'
           : secureWarn ? '本机安全存储不可用，密钥本次只留在内存、没有保存，重启后需重填 · Secure storage unavailable'
           : p.needKey !== false && !cfg.apiKey ? '还没有填 API Key · API key missing'
@@ -424,12 +591,23 @@ export function AiChip() {
 
 // —— 消息流：dock 与浮动面板共用。助手回复按 Markdown 渲染（加粗 / 列表 / 代码块），
 // 新消息自动滚动到底；onJump 用于把回复里的 [[双链]] 解析成节点跳转（工作台 dock 传入） ——
+// 单条助手消息 memo 化：busy 状态翻转（「思考中」出现/消失）时不再重渲染全部历史消息的 Markdown
+const AiMsgItem = React.memo(function AiMsgItem({m}) {
+  return <div className={`ai-msg ${m.role}`}>
+    <span className="ai-who">{m.role === 'user' ? '我' : 'AI'}</span>
+    {m.role === 'assistant'
+      ? <div className="ai-body md" dangerouslySetInnerHTML={{__html: renderMarkdown(m.content)}}/>
+      : <p>{m.content}</p>}
+  </div>;
+});
+
 export function AiMsgs({empty, onJump}) {
   const msgs = useAiChat();
   const busy = useAiBusy();
   const err = useAiErr();
+  const streamText = useAiStream(); // 流式期间模型逐字输出（纯文本上屏，结束后才整条 Markdown 渲染）
   const box = useRef(null);
-  useEffect(() => { const el = box.current; if (el) el.scrollTop = el.scrollHeight; }, [msgs, busy]);
+  useEffect(() => { const el = box.current; if (el) el.scrollTop = el.scrollHeight; }, [msgs, busy, streamText]);
   const jump = e => {
     const a = e.target.closest('a[data-target]');
     if (a) onJump(a.dataset.target);
@@ -439,13 +617,10 @@ export function AiMsgs({empty, onJump}) {
       {!msgs.length && <p className="ai-empty">{empty || '向 AI 提问，或让它直接帮你读写文章、草稿与笔记。'}</p>}
       {msgs.map((m, i) => m.role === 'op'
         ? <p key={i} className="ai-op"><Icon name="check" size={11}/>{m.text}</p>
-        : <div key={i} className={`ai-msg ${m.role}`}>
-            <span className="ai-who">{m.role === 'user' ? '我' : 'AI'}</span>
-            {m.role === 'assistant'
-              ? <div className="ai-body md" dangerouslySetInnerHTML={{__html: renderMarkdown(m.content)}}/>
-              : <p>{m.content}</p>}
-          </div>)}
-      {busy && <div className="ai-msg assistant pending"><span className="ai-who">AI</span><p>思考中… <em>thinking</em></p></div>}
+        : <AiMsgItem key={i} m={m}/>)}
+      {busy && (streamText
+        ? <div className="ai-msg assistant streaming"><span className="ai-who">AI</span><p className="ai-stream-text">{streamText}<i className="ai-stream-caret" aria-hidden="true"/></p></div>
+        : <div className="ai-msg assistant pending"><span className="ai-who">AI</span><p>思考中… <em>thinking</em></p></div>)}
     </div>
     {err && <p className="ai-err" role="alert">{err}</p>}
   </>;

@@ -157,15 +157,50 @@ export function openVideoLightbox(ref, label = '') {
   return true;
 }
 
+// 图片灯箱：正文 / 预览里的图片点击后放大查看（与视频灯箱同一套交互：Esc / 点遮罩 / 点 × 关闭）。
+// dataURL 粘贴图与知识库引用图（已回填 src）都适用；长图滚动查看。
+export function openImageLightbox(src, label = '') {
+  if (!src) return false;
+  document.getElementById('image-lightbox')?.remove();
+  const box = document.createElement('div');
+  box.id = 'image-lightbox';
+  box.className = 'video-lightbox image-lightbox';
+  box.setAttribute('role', 'dialog');
+  box.setAttribute('aria-modal', 'true');
+  box.innerHTML = '<div class="vl-body"><header class="vl-head"><span class="vl-name"></span>'
+    + '<button class="vl-close" aria-label="关闭 Close">×</button></header>'
+    + '<div class="vl-img-wrap"><img alt=""/></div></div>';
+  box.querySelector('.vl-name').textContent = label || '图片 · Image';
+  const img = box.querySelector('img');
+  img.src = src;
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  const close = () => {
+    box.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  box.addEventListener('click', e => { if (e.target === box || e.target.closest('.vl-close')) close(); });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(box);
+  return true;
+}
+
 // 全局挂一次：所有 .md-preview 里新出现的图片 / 视频自动解析（双链弹窗、阅读模式、对照分屏共用），
-// 以及视频链接的点击委托（网页版也会挂，点开提示仅桌面版可播放）
+// 视频链接与图片的点击委托（网页版也会挂；图片点击进灯箱，视频链接点开提示仅桌面版可播放）
 export function useVaultImages() {
   useEffect(() => {
     const onClick = e => {
       const a = e.target.closest?.('.md-video-link');
-      if (!a) return;
-      e.preventDefault();
-      openVideoLightbox(a.dataset.asset || '', a.textContent?.trim() || '');
+      if (a) {
+        e.preventDefault();
+        openVideoLightbox(a.dataset.asset || '', a.textContent?.trim() || '');
+        return;
+      }
+      // 预览视图里的图片点击放大：编辑镜像层（.lm-img）不拦——那里点按要定位光标
+      const img = e.target.closest?.('.md-preview img');
+      if (img && !img.closest('a') && img.getAttribute('src')) {
+        e.preventDefault();
+        openImageLightbox(img.getAttribute('src'), img.getAttribute('alt') || '');
+      }
     };
     document.addEventListener('click', onClick);
     if (!window.deepnotes?.vault) return () => document.removeEventListener('click', onClick);

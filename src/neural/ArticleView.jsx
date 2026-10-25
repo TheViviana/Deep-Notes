@@ -13,7 +13,7 @@ import {isVideoRef} from './images';
 import {headingAt} from './vaultRules';
 import {useEditorEnhancers, usePlugins, useNetwork} from './plugins';
 import {isTranslatable, translateText} from './translate';
-import {serialize, exportFiles, safeName} from './fileStore';
+import {serialize, exportFiles, safeName, capable, getRoot} from './fileStore';
 import {CONFIG} from '../config';
 
 marked.setOptions({gfm: true, breaks: false});
@@ -829,6 +829,8 @@ export function buildMirrorHtml(text, sel) {
 }
 
 export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent, onEditInfo, onMakeMap, eyebrow = ['ARTICLE', '文章全文'], exportKind = 'works', progressId = ''}) {
+  // 落盘位置如实显示：桌面版连库时编辑实时写回知识库 .md，网页版才存浏览器
+  const savedNote = capable() && getRoot() ? '已实时写入知识库' : '已保存到此浏览器';
   const [mode, setMode] = useState('edit');
   // 专注模式：隐藏头部信息与页脚，正文区占满（浮层本身已全屏，这里是榨出最后的可视空间）
   const [focusMode, setFocusMode] = useState(false);
@@ -1202,7 +1204,7 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
       </div>}
     </div>}
     <footer className="av-foot">
-      <span>{String(work.body || '').length} 字 <em>chars</em> · {wikiCount} 个双链 <em>wikilinks</em>{fx.badges(work.body).map((b, i) => <React.Fragment key={i}> · {b.zh} <em>{b.en}</em></React.Fragment>)} · 已保存到此浏览器 <em>Saved locally</em></span>
+      <span>{String(work.body || '').length} 字 <em>chars</em> · {wikiCount} 个双链 <em>wikilinks</em>{fx.badges(work.body).map((b, i) => <React.Fragment key={i}> · {b.zh} <em>{b.en}</em></React.Fragment>)} · {savedNote} <em>{capable() && getRoot() ? 'Written to vault' : 'Saved locally'}</em></span>
       <span className="av-hint"><Icon name="pulse" size={12}/>双链与标签会自动汇入图谱 <em>Links feed the graph</em></span>
     </footer>
   </section>;

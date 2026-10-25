@@ -5,6 +5,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
   // AI 助手插件：主进程转发（仅当联网开关与插件同时打开时渲染层才会调用）
   aiFetch: payload => ipcRenderer.invoke('ai-fetch', payload),
+  // AI 流式：onChunk 收到主进程逐段推回的 SSE 原始文本；返回 invoke 的最终结果（ok/status）
+  aiFetchStream: (payload, onChunk) => {
+    const h = (_e, text) => { try { onChunk(text); } catch {} };
+    ipcRenderer.on('ai-stream-chunk', h);
+    return ipcRenderer.invoke('ai-fetch-stream', payload).finally(() => ipcRenderer.off('ai-stream-chunk', h));
+  },
   // API Key 本机加密（safeStorage）：明文只经 IPC 传一次，localStorage 里只存 base64 密文
   keyEncrypt: plain => ipcRenderer.invoke('key-encrypt', plain),
   keyDecrypt: b64 => ipcRenderer.invoke('key-decrypt', b64),

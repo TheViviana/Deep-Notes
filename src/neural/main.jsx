@@ -170,6 +170,10 @@ const deleteScopeNote = () => capable() && getRoot()
   ? '桌面版会同步把该文件移入知识库的 .trash（30 天后自动清理）。'
   : '此操作只影响当前浏览器。';
 
+// 条目 id：时间戳 + 4 位随机段。同毫秒连续新建（手速连点 / AI 工具循环 / 脚本批量转出）
+// 不再共享同一个 id——纯 Date.now() 的 id 撞车后两条内容同 key 渲染、编辑互相覆盖、删除一起消失
+const uid = p => p + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
 
 // —— 独立的单文件 HTML 文档：打印版与「分享 HTML」共用同一套浅色排版样式（无脚本、不联网）——
 function buildArticleHtml({title, meta, html, share}) {
@@ -233,6 +237,9 @@ function ReadFull({r, graph, onClose, onGo, onOpenContent}) {
   const tocOn = !disabled.includes('toc');
   const [trans, setTrans] = useState({phase: 'idle', done: 0, total: 0}); // idle | running | done
   const [hint, setHint] = useState('');
+  // 弹窗可能在翻译进行中被关闭：卸载后停止取任务、不再 setState（与 ArticleView 同一套 alive 口径）
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
   useEffect(() => { setTrans({phase: 'idle', done: 0, total: 0}); setHint(''); }, [src, r]);
   const outline = useMemo(() => src || !tocOn ? [] : parseOutline(r.body), [src, tocOn, r.body]);
   const jumpHead = line => {
@@ -269,13 +276,16 @@ function ReadFull({r, graph, onClose, onGo, onOpenContent}) {
     let done = 0;
     const worker = async () => {
       while (queue.length) {
+        if (!alive.current) return; // 弹窗已关闭：停止取任务、不再 setState
         const el = queue.shift();
         try { out.push([el, await translateText(el.textContent)]); } catch { out.push([el, null]); }
         done += 1;
+        if (!alive.current) return;
         setTrans(t => ({...t, done}));
       }
     };
     await Promise.all([worker(), worker(), worker()]);
+    if (!alive.current) return; // 卸载后 DOM 节点已失效，不再回填译文
     for (const [el, text] of out) {
       if (!text || !el.isConnected || el.querySelector('.md-trans')) continue;
       const span = document.createElement('span');
@@ -513,6 +523,10 @@ function App() {
     if (!prev) return; // 首次渲染只记录快照；导入流程会主动全量写入
     for (const kind of ['works', 'notes', 'drafts', 'readings', 'archives', 'ideas']) {
       const pv = prev[kind], cv = cur[kind];
+      // 数组引用没变 = 该模块没有任何条目变化（全库统一不可变更新纪律）：
+      // 直接跳过，不再为每个模块重建两张 id 映射与消歧路径表——在某个模块打字时
+      // 其余五个模块的逐键 O(n) diff 全部省掉，大库连库时的输入开销显著下降
+      if (pv === cv) continue;
       const pmap = new Map(pv.map(x => [x.id, x]));
       const cmap = new Map(cv.map(x => [x.id, x]));
       const removed = pv.filter(x => !cmap.has(x.id));
@@ -589,7 +603,7 @@ function App() {
 
   const close = useCallback(() => setModal(null), []);
   function newDraft(title = '未命名草稿', body = '', source) {
-    const id = 'draft-' + Date.now();
+    const id = uid('draft');
     setDrafts(d => [{id, title, body, source}, ...d]);
     setActive(id); setPage('drafts'); setModal(null);
     setToast('草稿已创建，只保存在此浏览器 · Draft saved locally');
@@ -844,7 +858,7 @@ function App() {
   }
   // —— 阅读区 CRUD：收藏别人写好的内容，可批注编辑；标题/作者/来源/日期 ——
   function newReading() {
-    const id = 'reading-' + Date.now();
+    const id = uid('reading');
     setReadings(rs => [{id, title: '新建阅读', author: '', source: '', date: nowStamp().slice(0, 10), body: ''}, ...rs]);
     setReadSel(id); setReadOpen(id); setPage('readings');
     setToast('阅读条目已创建，粘贴或写入正文 · Reading created');
@@ -915,7 +929,7 @@ function App() {
   }
   // —— 档案区 CRUD：创作者自己的个人档案（简介、回顾、清单等），同样参与双链与图谱 ——
   function newArchive() {
-    const id = 'archive-' + Date.now();
+    const id = uid('archive');
     setArchives(as => [{id, title: '新建档案', date: nowStamp().slice(0, 10), body: ''}, ...as]);
     setArcSel(id); setArcOpen(id); setPage('archives');
     setToast('档案已创建，写入你的个人内容 · Archive created');
@@ -1000,10 +1014,10 @@ function App() {
       const safe = safeName(moved.title);
       setNotes(ns => [{id: nid, title: moved.title, path: uniqueNotePath(`05-方法库 methods/新建/${safe}.md`, noteTaken(ns, nid), nid), body: moved.body}, ...ns]);
     }
-    else if (toKind === 'drafts') setDrafts(ds => [{id: 'draft-' + Date.now(), title: moved.title, body: moved.body, source: null}, ...ds]);
+    else if (toKind === 'drafts') setDrafts(ds => [{id: uid('draft'), title: moved.title, body: moved.body, source: null}, ...ds]);
     else if (toKind === 'ideas') setIdeas(is => [...is, {id: nextIdeaId(is), title: moved.title, platform: '', priority: '中', status: '待写', note: (moved.body || '').slice(0, 120)}]);
-    else if (toKind === 'readings') setReadings(rs => [{id: 'reading-' + Date.now(), title: moved.title, author: '', source: '', date: stamp.slice(0, 10), body: moved.body}, ...rs]);
-    else if (toKind === 'archives') setArchives(as => [{id: 'archive-' + Date.now(), title: moved.title, date: stamp.slice(0, 10), body: moved.body}, ...as]);
+    else if (toKind === 'readings') setReadings(rs => [{id: uid('reading'), title: moved.title, author: '', source: '', date: stamp.slice(0, 10), body: moved.body}, ...rs]);
+    else if (toKind === 'archives') setArchives(as => [{id: uid('archive'), title: moved.title, date: stamp.slice(0, 10), body: moved.body}, ...as]);
     setModal(null);
     setToast(`已移动到${MOVE_ZH[toKind]} · Moved to ${MOVE_EN[toKind]}`);
   }
@@ -1014,6 +1028,16 @@ function App() {
     setLibSel(w.id); setPage('library'); setOpenArticle(null);
     setEditingWork(w); setWorkIsNew(true); setModal('work');
     setToast('文章已创建，保存在此浏览器 · Article created locally');
+  }
+  // 信息弹窗直接关闭（未点保存）时撤掉全新且全空的文章：否则每次取消都会留下一个
+  // 「未命名文章」空条目，连库时还会往知识库写一份空的 未命名文章.md
+  function closeWorkModal() {
+    if (workIsNew && editingWork && editingWork.title === '未命名文章'
+      && !(editingWork.body || '').trim() && !(editingWork.tags || []).length) {
+      setWorks(ws => ws.filter(w => w.id !== editingWork.id));
+      setLibSel(sel => sel === editingWork.id ? null : sel);
+    }
+    setModal(null);
   }
   function updateWork(id, patch) {
     if (patch.title != null) {
@@ -1087,13 +1111,13 @@ function App() {
       const w = normalizeWork({title, date: nowStamp(), tags: [], body: text});
       setWorks(ws => [w, ...ws]); setLibSel(w.id); setPage('library');
     } else if (kind === 'drafts') {
-      const d = {id: 'draft-' + Date.now(), title, body: text, source: null};
+      const d = {id: uid('draft'), title, body: text, source: null};
       setDrafts(ds => [d, ...ds]); setActive(d.id); setPage('drafts');
     } else if (kind === 'readings') {
-      const r = {id: 'reading-' + Date.now(), title, author: '', source: '', date: nowStamp().slice(0, 10), body: text};
+      const r = {id: uid('reading'), title, author: '', source: '', date: nowStamp().slice(0, 10), body: text};
       setReadings(rs => [r, ...rs]); setReadSel(r.id); setPage('readings');
     } else if (kind === 'archives') {
-      const a = {id: 'archive-' + Date.now(), title, date: nowStamp().slice(0, 10), body: text};
+      const a = {id: uid('archive'), title, date: nowStamp().slice(0, 10), body: text};
       setArchives(as => [a, ...as]); setArcSel(a.id); setPage('archives');
     } else {
       const id = 'note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
@@ -1187,7 +1211,7 @@ function App() {
       setToast(`AI 新建了方法笔记「${t}」 · AI created a note`);
       return {id: 'note:' + id, title: t};
     }
-    const id = 'draft-' + Date.now();
+    const id = uid('draft');
     setDrafts(ds => [{id, title: t, body}, ...ds]);
     setToast(`AI 新建了草稿「${t}」 · AI created a draft`);
     return {id: 'draft:' + id, title: t};
@@ -1432,10 +1456,17 @@ function App() {
     } else if (target === 'methods') {
       // 新笔记的 path 不能和现有笔记撞车（同 path 会互相覆盖一个文件）；撞了就在文件名后追加 id 短码。
       // 替换同名条目不动 path：文件原地更新，不会在知识库里搬家。
+      // 消歧循环必须有界且保底唯一：短码追加 8 次后仍撞车（极端同名批量导入）时，
+      // 退回数字后缀递增到空位为止——任何输入都必须落到一条没人占用的路径
       const usedPaths = new Set(notes.map(x => x.path));
       const rePath = f => {
-        let p = f.path, guard = 0;
-        while (usedPaths.has(p) && guard++ < 8) p = p.replace(/\.md$/, `--${shortId(f.id)}.md`);
+        let p = f.path;
+        if (usedPaths.has(p)) {
+          let dedup = p.replace(/\.md$/, `--${shortId(f.id)}.md`);
+          for (let n = 2; usedPaths.has(dedup) && n < 1000; n++) dedup = p.replace(/\.md$/, `--${shortId(f.id)}-${n}.md`);
+          if (usedPaths.has(dedup)) dedup = p.replace(/\.md$/, `-${Date.now()}.md`);
+          p = dedup;
+        }
         usedPaths.add(p);
         return {...f, path: p};
       };
@@ -1651,7 +1682,7 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
   function mmToDraft(map) {
     const body = mapToDraftMarkdown(map);
     if (!body) { setToast('导图还没有内容，先在画布或大纲里加几个节点 · Map is empty'); return; }
-    const id = 'draft-' + Date.now();
+    const id = uid('draft');
     setDrafts(ds => [{id, title: map.title || '未命名导图', body, source: null}, ...ds]);
     setActive(id); setPage('drafts'); setMmOpen(false);
     setToast(`已把导图《${map.title || '未命名导图'}》转成新草稿 · Converted to draft`);
@@ -2091,7 +2122,7 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
         const v = e.target.value;
         setEditingWork({...editingWork, [k]: v === '' ? (nullable ? null : 0) : Number(v)});
       };
-      return <Modal title={workIsNew ? '新建文章信息' : '编辑文章信息'} en="Article info" wide onClose={close}>
+      return <Modal title={workIsNew ? '新建文章信息' : '编辑文章信息'} en="Article info" wide onClose={closeWorkModal}>
         <div className="form">
           <p className="quiet">标题、日期、研究方向与标签构成主信息；双链由正文 [[ ]] 推导，编辑日期保存时自动记录 <em>Main info · auto-dated</em></p>
           <label>标题 <em>Title</em><input autoFocus value={editingWork.title} onChange={e => setEditingWork({...editingWork, title: e.target.value})} placeholder="给文章一个标题"/></label>

@@ -194,12 +194,22 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
         ctx.globalAlpha = 1;
       }
     };
+    // 窗口失焦（切到别的应用但未最小化）降到 ~15fps：后台窗口看不见，全速绘制纯属烧 CPU
+    let blurred = false, lastDraw = 0;
+    const onBlur = () => { blurred = true; };
+    const onFocus = () => { blurred = false; lastDraw = 0; };
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
     // 每帧先排好下一帧再绘制：某一帧出错也不会让背景网络停住
     let warned = false;
     let lastChk = 0, lastSig = '';
     const frame = now => {
       raf = requestAnimationFrame(frame);
       if (document.hidden) return; // 窗口隐藏 / 最小化：整帧跳过
+      if (blurred) { // 失焦降帧：脉冲相位按绝对时间推进，帧率变疏、速度不变
+        if (now - lastDraw < 66) return;
+        lastDraw = now;
+      }
       if (reduced) {
         // 减少动态效果：只画一帧静态画面，之后每 160ms 比对一次状态签名（舞台 / 选中 / 悬停 / 光球 / 过滤），变了才重画
         if (now - lastChk < 160) return;
@@ -212,7 +222,7 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
       try { draw(now); drew = true; } catch (err) { if (!warned) { warned = true; console.error(err); } }
     };
     raf = requestAnimationFrame(frame);
-    return () => { cancelAnimationFrame(raf); ro.disconnect(); };
+    return () => { cancelAnimationFrame(raf); ro.disconnect(); window.removeEventListener('blur', onBlur); window.removeEventListener('focus', onFocus); };
   }, [graph, layout, live, reduced]);
   return <canvas ref={ref} className="network-canvas" aria-hidden="true"/>;
 }

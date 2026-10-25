@@ -6,6 +6,7 @@ import {ArticleView, LineMirror, renderMarkdown, readProgress} from './ArticleVi
 import {useWikiComplete, WikiSuggest, resolveTarget, scrollToAnchor, headingMap} from './wiki';
 import {useEditorEnhancers} from './plugins';
 import {conceptExtras, setConceptExtra, conceptReview, gradeConcept, paraCards, paraReview, deleteParaCard, gradePara} from './conceptStore';
+import {capable, getRoot} from './fileStore';
 import {parseDocFile} from './docImport';
 import {CONFIG} from '../config';
 import {T} from './theme';
@@ -18,6 +19,10 @@ function useLocalState(key, init) {
 }
 // 双链点击解析：与 graph.js 的 byName 规则一致（标题 / 路径文件名，忽略大小写）。
 const FILE_KIND_ZH = {post: ['文章', 'Posts'], draft: ['草稿', 'Drafts'], note: ['方法笔记', 'Notes']};
+// 落盘位置如实显示：桌面版连库时编辑实时写回知识库 .md，网页版才存浏览器
+const SAVED_NOTE = capable() && getRoot()
+  ? <><Icon name="check" size={13}/>已实时写入知识库 <em>Written to vault</em></>
+  : <><Icon name="check" size={13}/>已保存到此浏览器 <em>Saved locally</em></>;
 const dayOfTs = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
 
 export function PageHead({zh, en, sub, subEn, children}) {
@@ -33,7 +38,18 @@ export function Library({graph, works, selected, setSelected, openArticle, setOp
   const [sort, setSort] = useState('date');
   const charsOf = p => (p.body || '').length;
   const updatedOf = p => p.updatedAt || p.date || '';
-  const linksOf = p => { const id = 'post:' + p.id; return graph.links.reduce((s, l) => s + (l.kind === 'wiki' && (l.s === id || l.t === id) ? 1 : 0), 0); };
+  // 双链计数：每次渲染预计算一张「内容节点 → wiki 连接数」映射，卡片行查表即可。
+  // 此前每张卡片都遍历全部连线（O(卡 × 连线)），千卡大库切到作品库会卡一拍
+  const linkCounts = useMemo(() => {
+    const m = new Map();
+    for (const l of graph.links) {
+      if (l.kind !== 'wiki') continue;
+      m.set(l.a, (m.get(l.a) || 0) + 1);
+      m.set(l.b, (m.get(l.b) || 0) + 1);
+    }
+    return m;
+  }, [graph]);
+  const linksOf = p => linkCounts.get('post:' + p.id) || 0;
   const keyOf = {chars: charsOf, links: linksOf};
   const rows = works.filter(p => p.title.toLowerCase().includes(q.toLowerCase())).sort((a, b) =>
     sort === 'date' ? b.date.localeCompare(a.date) : sort === 'updated' ? updatedOf(b).localeCompare(updatedOf(a)) : keyOf[sort](b) - keyOf[sort](a));
@@ -110,7 +126,8 @@ function InboxPanel({items, setItems, onToDraft, onToNote, onDaily, onClose}) {
   const [q, setQ] = useState('');
   const add = () => {
     const t = q.trim(); if (!t) return;
-    setItems([{id: 'i-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), text: t, ts: Date.now()}, ...items]);
+    // 函数式更新：连续快速记录（按住 Enter）时第二次 add 不再基于过期的 items 闭包，闪念不会互相顶掉
+    setItems(list => [{id: 'i-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), text: t, ts: Date.now()}, ...list]);
     setQ('');
   };
   const dayOf = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
@@ -145,7 +162,7 @@ function InboxPanel({items, setItems, onToDraft, onToNote, onDaily, onClose}) {
             <span>
               <button onClick={() => onToDraft(it.id)}>转草稿 <em>Draft</em></button>
               <button onClick={() => onToNote(it.id)}>转笔记 <em>Note</em></button>
-              <button className="del" onClick={() => setItems(items.filter(x => x.id !== it.id))} aria-label="删除闪念"><Icon name="trash" size={12}/></button>
+              <button className="del" onClick={() => { if (window.confirm('删除这条闪念？删除后无法找回。')) setItems(list => list.filter(x => x.id !== it.id)); }} aria-label="删除闪念"><Icon name="trash" size={12}/></button>
             </span>
           </footer>
         </div>)}
@@ -257,7 +274,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
             <button type="button" className={readMode ? 'on' : ''} aria-pressed={readMode}
               title="用渲染视图阅读，双链可点击 · Read the rendered view" onClick={() => setReadMode(v => !v)}>阅读 <em>Read</em></button>
           </span>
-          <span><Icon name="check" size={13}/>已保存到此浏览器 <em>Saved locally</em></span>
+          <span>{SAVED_NOTE}</span>
         </div>
         <input className="editor-title" value={draft.title} onChange={e => change('title', e.target.value)} placeholder="给这篇内容一个标题 Title" aria-label="草稿标题"/>
         {!readMode && fx.bar}
@@ -486,7 +503,7 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
             {onMove && <button type="button" title="把这篇笔记移到其他模块（作品库 / 创作台 / 选题池） · Move this note to another module" onClick={() => onMove(note.id)}>移动到 <em>Move</em></button>}
             <button type="button" onClick={() => onDelete(note.id)}>删除 <em>Delete</em></button>
           </span>
-          <span><Icon name="check" size={13}/>已保存到此浏览器 <em>Saved locally</em></span>
+          <span>{SAVED_NOTE}</span>
         </div>
         <input className="editor-title" value={note.title} onChange={e => change('title', e.target.value)} placeholder="给这篇笔记一个标题 Title" aria-label="笔记标题"/>
         {backlinks.length > 0 && <div className="av-backlinks" role="group" aria-label={`反向链接 ${backlinks.length} 条 Backlinks`}>
@@ -817,7 +834,8 @@ export function Concepts({graph, onGo, onJumpContent}) {
                   ? <button className="rc-title as-link" onClick={() => (onJumpContent || onGo)(to)} title="打开原文 · Open source">{c.source}</button>
                   : <span className="rc-title">{c.source || '未命名'}</span>}
                 {due && <span className="rc-due">待复习 <em>due</em></span>}
-                <button className="icon-btn rc-edit" aria-label="删除卡片 Delete card" title="删除卡片 Delete" onClick={() => deleteParaCard(c.id)}><Icon name="trash" size={13}/></button>
+                <button className="icon-btn rc-edit" aria-label="删除卡片 Delete card" title="删除卡片 Delete"
+                  onClick={() => { if (window.confirm('删除这张段落卡？复习进度一并清除，无法找回。')) deleteParaCard(c.id); }}><Icon name="trash" size={13}/></button>
               </span>
               <p className="rc-def rc-para">{c.text}</p>
               <span className="rc-sub">{dayOfTs(c.ts)} 存入 · saved</span>

@@ -57,7 +57,7 @@ export function PrivateNotes() {
   const kw = q.trim().toLowerCase();
   const shown = kw ? notes.filter(n => [n.title, n.body, ...(n.tags || [])].join(' ').toLowerCase().includes(kw)) : notes;
 
-  const reload = () => { if (isUnlocked()) listNotes().then(setNotes).catch(() => setNotes([])); };
+  const reload = () => { if (isUnlocked()) return listNotes().then(setNotes).catch(() => setNotes([])); return Promise.resolve(); };
   useEffect(() => { if (unlocked) reload(); }, [unlocked]); // eslint-disable-line react-hooks/exhaustive-deps
   // 依赖 cur?.id（而非 sel）：新建后 notes 异步解密回来 cur 才有值，此时再回填标题正文
   useEffect(() => { setTitle(cur?.title || ''); setBody(cur?.body || ''); setTagsInput((cur?.tags || []).join(', ')); setSyncedId(cur?.id || null); }, [cur?.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -88,8 +88,8 @@ export function PrivateNotes() {
   const createNote = async () => {
     const id = await upsertNote({title: '新建隐私笔记', body: ''});
     setSel(null); // 先清选中，避免旧选中笔记的防抖把内容追写过来
-    reload();
-    setTimeout(() => setSel(id), 50); // 等解密列表落地后再选中新笔记
+    await reload(); // 等解密列表落地再选中新笔记（固定 50ms 在大库上会抢跑，落在空态里）
+    setSel(id);
   };
 
   if (!vault || !unlocked) {
