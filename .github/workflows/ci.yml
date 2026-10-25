@@ -1,0 +1,27 @@
+# CI：每次推送 / PR 自动回归——102 项测试 + 动效代码模式校验 + 前端构建。
+# 全部本地检查，无外部服务；Node 20 / 22 双版本矩阵（package.json engines: ^20.19.0 || >=22.12.0）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: 测试与构建 (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run verify
+      - run: npm run build
