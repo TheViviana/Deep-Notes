@@ -738,6 +738,8 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDra
   const [name, setName] = useState('');
   const [win, setWin] = useState(loadWinPos);
   const [sideOpen, setSideOpen] = useState(true);
+  // 迷你模式：整窗收起为一颗小球，底层界面完全可操作；点小球恢复（关窗即重置）
+  const [mini, setMini] = useState(false);
   // 撤销 / 重做：按导图记录快照（切换导图即清空）。栈只存引用，大导图也只是多几个对象指针
   const undoStack = useRef([]);
   const redoStack = useRef([]);
@@ -880,6 +882,19 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDra
 
   if (!open) return null;
 
+  // 迷你模式：只渲染一颗小球——鼠标在屏上任何位置都能操作其他界面，点小球恢复完整窗口
+  if (mini) {
+    const px = Math.max(8, Math.min(win.x, window.innerWidth - 64));
+    const py = Math.max(8, Math.min(win.y, window.innerHeight - 64));
+    const nodeN = cur ? nodeCount(outlineToTree(cur.outline)) : null;
+    return <button className="mm-mini-pill glass" style={{left: px, top: py}}
+      onClick={() => setMini(false)}
+      title={`展开思维导图${nodeN ? `（${nodeN} 节点）` : ''} · Restore mind map`}
+      aria-label="展开思维导图">
+      <Icon name="concept" size={14}/>{nodeN ? <b>{nodeN}</b> : null}
+    </button>;
+  }
+
   return <>
     {/* 无全屏遮罩：导图窗口打开期间底层界面照常可点击、可滚动、可编辑——窗口只是浮在内容上方（悬停工具栏 + 窗口本体自身交互） */}
     <div className="mm-window glass" style={{left: win.x, top: win.y, width: win.w, height: win.h}} role="dialog" aria-label="思维导图浮动窗口">
@@ -888,6 +903,7 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDra
         <div className="mm-window-tools">
           <button className="icon-btn" onClick={() => setSideOpen(o => !o)} title={sideOpen ? '收起清单' : '展开清单'} aria-label="切换清单">{sideOpen ? '◀' : '▶'}</button>
           <button className="icon-btn" onClick={() => { setCreating(true); setName(''); }} title="新建导图" aria-label="新建导图"><Icon name="plus" size={13}/></button>
+          <button className="icon-btn" onClick={() => setMini(true)} title="收起为一颗小球（阅读身后内容不被遮挡，点小球恢复）" aria-label="收起思维导图">−</button>
           <button className="icon-btn" onClick={onClose} title="关闭思维导图" aria-label="关闭思维导图"><Icon name="close" size={14}/></button>
         </div>
       </header>

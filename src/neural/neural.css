@@ -804,6 +804,10 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .mm-window .mm-canvas { flex: 1; min-width: 0; border: 0; border-radius: 0; padding: 0; display: grid; grid-template-rows: auto 1fr; overflow: hidden; min-height: 0; }
 .mm-resize { position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize; z-index: 2; background: linear-gradient(135deg, transparent 50%, var(--muted) 50%); border-bottom-right-radius: 16px; opacity: .6; }
 .mm-resize:hover { opacity: 1; }
+/* 迷你模式小球：整窗收起后只剩它，底层界面完全可操作；点击恢复完整窗口 */
+.mm-mini-pill { position: fixed; z-index: 75; width: 46px; height: 46px; border-radius: 50%; display: flex; align-items: center; justify-content: center; gap: 2px; color: var(--gold); cursor: pointer; box-shadow: 0 10px 30px rgba(0, 0, 0, .5), 0 0 0 1px rgba(232, 180, 90, .3); transition: transform .18s, box-shadow .18s; }
+.mm-mini-pill:hover { transform: scale(1.08); box-shadow: 0 12px 34px rgba(0, 0, 0, .55), 0 0 0 1px rgba(232, 180, 90, .6); }
+.mm-mini-pill b { font-size: 10px; font-weight: 600; color: var(--gold); }
 .corner-dock .dock-extra.active { color: var(--gold); border-color: var(--gold); }
 
 /* 阅读进度条：预览模式底部可视条，点击轨道快进 */
