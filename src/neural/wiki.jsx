@@ -57,6 +57,9 @@ export function useWikiComplete({titles, areaRef, onChange, headings}) {
     if (e.key === 'ArrowDown') { e.preventDefault(); setPick((live.current.pick + 1) % s.list.length); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setPick((live.current.pick - 1 + s.list.length) % s.list.length); }
     else if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); insert(s.list[live.current.pick]); }
+    // Tab 与 Enter 同为确认选中：外层编辑器把 Tab 也交给补全（见 plugins.jsx 拦截列表），
+    // 这里不处理的话 Tab 既不缩进也不选中，焦点直接跳出输入框
+    else if (e.key === 'Tab') { e.preventDefault(); insert(s.list[live.current.pick]); }
     else if (e.key === 'Escape') setSuggest(null);
   };
   return {suggest, pick, check, insert, onKeyDown, setSuggest};

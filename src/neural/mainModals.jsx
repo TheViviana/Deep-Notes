@@ -61,7 +61,7 @@ export function PomodoroFab({pomo, written, onStart, onStop}) {
         : <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.7"/><path d="M12 7.2v4.8l3.4 2.1" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"/></svg>}
     </button>
     {open && <div className="pomo-panel glass" role="dialog" aria-label="番茄钟设置 Pomodoro settings">
-      <header><b>番茄钟</b><em>Pomodoro</em><button className="icon-btn" onClick={() => setOpen(false)} aria-label="关闭设置"><Icon name="close" size={13}/></button></header>
+      <header><b>番茄钟</b><em>Pomodoro</em><button className="icon-btn" onClick={() => { setOpen(false); if (!pomo) noiseStop(); }} aria-label="关闭设置"><Icon name="close" size={13}/></button></header>
       <div className="pomo-row">
         <label><span>专注 <em>Focus</em></span><span className="pomo-num"><input type="number" min="1" max="180" value={set.focus}
           onChange={e => save({focus: Math.max(1, Math.min(180, Math.round(Number(e.target.value) || 25)))})}/> 分</span></label>

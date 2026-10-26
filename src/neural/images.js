@@ -124,11 +124,15 @@ export function resolveVaultVideo(el) {
   el.src = url;
 }
 
+// 模块级记录当前灯箱的关闭函数：再开新灯箱先走它的 close()（暂停旧视频、摘除 keydown
+// 监听），而不是只 remove() DOM——否则旧监听泄漏、被移除的 <video> 可能继续出声
+let closeOpenLightbox = null;
+
 // 视频灯箱：正文 / 表格里的 [文件名](x.mp4) 点击后在浮层播放，不离开当前视图。
 // 用纯 DOM 而非 React：.md-preview 是 innerHTML 渲染的，文章页 / 各内页 / 对照分屏各自独立，
 // 全局挂一次点击委托即可覆盖所有入口（与 useVaultImages 同一个 hook）。
 export function openVideoLightbox(ref, label = '') {
-  document.getElementById('video-lightbox')?.remove();
+  closeOpenLightbox?.();
   const url = vaultAssetUrl(ref);
   const box = document.createElement('div');
   box.id = 'video-lightbox';
@@ -150,10 +154,12 @@ export function openVideoLightbox(ref, label = '') {
     try { box.querySelector('video')?.pause(); } catch {}
     box.remove();
     document.removeEventListener('keydown', onKey);
+    if (closeOpenLightbox === close) closeOpenLightbox = null;
   };
   box.addEventListener('click', e => { if (e.target === box || e.target.closest('.vl-close')) close(); });
   document.addEventListener('keydown', onKey);
   document.body.appendChild(box);
+  closeOpenLightbox = close;
   return true;
 }
 
@@ -161,7 +167,7 @@ export function openVideoLightbox(ref, label = '') {
 // dataURL 粘贴图与知识库引用图（已回填 src）都适用；长图滚动查看。
 export function openImageLightbox(src, label = '') {
   if (!src) return false;
-  document.getElementById('image-lightbox')?.remove();
+  closeOpenLightbox?.();
   const box = document.createElement('div');
   box.id = 'image-lightbox';
   box.className = 'video-lightbox image-lightbox';
@@ -177,10 +183,12 @@ export function openImageLightbox(src, label = '') {
   const close = () => {
     box.remove();
     document.removeEventListener('keydown', onKey);
+    if (closeOpenLightbox === close) closeOpenLightbox = null;
   };
   box.addEventListener('click', e => { if (e.target === box || e.target.closest('.vl-close')) close(); });
   document.addEventListener('keydown', onKey);
   document.body.appendChild(box);
+  closeOpenLightbox = close;
   return true;
 }
 

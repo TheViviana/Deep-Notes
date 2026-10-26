@@ -170,17 +170,24 @@ export function gradePara(id, grade) { gradeIn(paraReview, id, grade); }
 
 // 启动时把知识库 meta 里的附属数据灌回来：有 shadow 时按 merge3 三向合并（双机编辑不互相抹，
 // 审计 B7）；没有 shadow（老用户首次升级 / 从未写盘成功过）退化为本地优先，与旧行为一致。
-export function hydrateConceptMeta(meta) {
+// opts.replace（多库切换）：新库 meta 缺键时把本机对应存储重置为空——旧库的闪卡 / 记忆
+// 已留在旧库的 meta.json 里，不能带着渗透进新库（下次 patchMeta 会写进新库）。
+// 隐私笔记（private）除外：它可能只有本机一份（尚未落盘），宁可暂留也不清。
+export function hydrateConceptMeta(meta, opts) {
   if (!meta || typeof meta !== 'object') return;
-  const pairs = [[conceptExtras, 'conceptExtras'], [conceptReview, 'conceptReview'], [paraCards, 'paraCards'], [paraReview, 'paraReview'], [aiMemory, 'aiMemory'], [aiPersona, 'aiPersona'], [mindmaps, 'mindmaps'], [privateStore, 'private']];
+  const replace = !!opts?.replace;
+  const pairs = [[conceptExtras, 'conceptExtras', {}], [conceptReview, 'conceptReview', {}], [paraCards, 'paraCards', {}], [paraReview, 'paraReview', {}], [aiMemory, 'aiMemory', {list: []}], [aiPersona, 'aiPersona', {}], [mindmaps, 'mindmaps', {list: []}], [privateStore, 'private', null]];
   const shadow = readShadow();
   const hasShadow = shadow && typeof shadow === 'object';
   hydrating = true;
   try {
     const newShadow = {...(hasShadow ? shadow : {})};
-    for (const [store, key] of pairs) {
+    for (const [store, key, empty] of pairs) {
       const incoming = meta[key];
-      if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) continue;
+      if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) {
+        if (replace && empty) { store.write(empty); delete newShadow[key]; }
+        continue;
+      }
       const local = store.get();
       const merged = hasShadow && shadow[key] ? merge3(local, incoming, shadow[key]) : {...incoming, ...local};
       store.write(merged);

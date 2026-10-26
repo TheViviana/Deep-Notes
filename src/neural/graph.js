@@ -135,18 +135,22 @@ export function buildGraph({works = [], notes = notesRaw, ideas = [], drafts = [
   const byName = nameIndex(nodes.values());
   for (const n of [...nodes.values()]) {
     if (!CONTENT.has(n.kind)) continue;
-    for (const m of (n.body || '').matchAll(/\[\[([^\]]+)\]\]/g)) {
-      const [target, alias] = m[1].split('|');
-      if (target.includes('{{')) continue;
-      const name = target.split('#')[0].split('/').pop().trim();
-      if (!name) continue;
-      let id = byName.get(name.toLowerCase());
-      if (!id) {
-        id = 'ghost:' + name.toLowerCase();
-        add({id, kind: 'ghost', title: alias?.trim() || name, short: alias?.trim() || cleanTitle(name), path: target.trim() + '.md', text: ''});
+    // 代码围栏 / 行内代码里的 [[示例]] 不是双链（Markdown 教程类笔记常见），与渲染、
+    // 一键转双链管线同一保护口径：先分段再扫描，否则造出幽灵节点与 wiki 边
+    const segs = String(n.body || '').split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g);
+    for (let si = 0; si < segs.length; si += 2)
+      for (const m of segs[si].matchAll(/\[\[([^\]]+)\]\]/g)) {
+        const [target, alias] = m[1].split('|');
+        if (target.includes('{{')) continue;
+        const name = target.split('#')[0].split('/').pop().trim();
+        if (!name) continue;
+        let id = byName.get(name.toLowerCase());
+        if (!id) {
+          id = 'ghost:' + name.toLowerCase();
+          add({id, kind: 'ghost', title: alias?.trim() || name, short: alias?.trim() || cleanTitle(name), path: target.trim() + '.md', text: ''});
+        }
+        link(n.id, id, 'wiki');
       }
-      link(n.id, id, 'wiki');
-    }
   }
 
   // 话题标签（大小写合并）。
@@ -300,7 +304,10 @@ export function forceLayout(graph) {
   const anchor = id => {
     const n = idx.get(id);
     if (n.kind === 'concept') return [0, -1];
-    const f = FOLDERS.find(f => f.id === (n.folder?.startsWith('f:0') || n.level === 2 ? 'f:methods' : n.folder) || f.id === id);
+    // 方法库的二级分类节点（含用户自建分类 f:工具 / 兜底 f:笔记，不止数字开头的 f:0…）
+    // 及其下的笔记都锚到 f:methods：按结构判定（分类节点 level === 2），不靠文件名前缀
+    const sub = n.folder ? idx.get(n.folder) : null;
+    const f = FOLDERS.find(f => f.id === (sub?.level === 2 || n.level === 2 ? 'f:methods' : n.folder) || f.id === id);
     return f ? [Math.cos(rad(f.angle)), Math.sin(rad(f.angle))] : null;
   };
   for (const n of N) {

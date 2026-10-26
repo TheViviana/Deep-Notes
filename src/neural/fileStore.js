@@ -37,6 +37,10 @@ export function setErrorHandler(fn) { errorHandler = fn; }
 // 这样 800ms 防抖窗口内的编辑不会丢，也不会写进新库。
 export async function setRoot(dir) {
   await flush();
+  // flush 在途期间（慢盘上可达数秒）新入队的编辑仍捕获旧根目录：补写进旧库，
+  // 不能落进下面的 queue.clear() 黑洞；极端连续输入仍有残余时转留底（启动横幅提示重试），绝不静默丢
+  for (let i = 0; i < 3 && queue.size; i++) await flush();
+  if (queue.size) recordPending([...queue.values()]);
   await writeMetaNow();  // 换库前把附属数据落到旧库（防抖窗口内的改动不能跟着根目录走丢）
   metaGen++;             // 作废仍在途的旧库读盘结果
   metaCache = null;      // 换库：附属数据要重新读新库的 meta，不能把旧库的写过去
@@ -145,6 +149,12 @@ export async function writeMetaNow() {
   const sentDirty = new Set(metaDirty);
   const sent = {};
   for (const k of sentDirty) sent[k] = metaCache[k];
+  // 与盘上基线逐键相等就不写：启动合并 / 换库灌入只产生新引用、内容没变，
+  // 落盘只会带来 mtime 抖动（iCloud 全量重传），并非真实改动
+  if (metaBase && [...sentDirty].every(k => JSON.stringify(sent[k] ?? null) === JSON.stringify(metaBase[k] ?? null))) {
+    for (const k of sentDirty) metaDirty.delete(k);
+    return true;
+  }
   let payload = {...metaCache};
   // 写前重读一次盘上 meta：长驻会话持有的 metaCache 是启动时的快照，直接整对象覆盖会把
   // 另一台机器在这期间的改动整块抹掉。只让本次发送的脏键覆盖盘上值，其余以盘上为准。
@@ -287,7 +297,7 @@ function quoteVal(v) {
 }
 function frontmatter(pairs) {
   const render = ([k, v]) => {
-    if (isBlock(v)) return `${k}: |\n` + v.text.split('\n').map(l => '  ' + l).join('\n');
+    if (isBlock(v)) return `${k}: ${v.style === '>' ? '>' : '|'}${v.chomp || ''}\n` + v.text.split('\n').map(l => '  ' + l).join('\n');
     if (Array.isArray(v))
       return v.length ? `${k}:\n` + v.map(x => `  - ${quoteVal(String(x).replace(/\n/g, ' '))}`).join('\n') : null;
     return `${k}: ${quoteVal(String(v).replace(/\n/g, ' '))}`;
@@ -665,9 +675,10 @@ export function flushSyncNow() {
     clearTimeout(metaTimer);
     metaTimer = null;
     try {
-      // 带上脏键清单：主进程先同步重读盘上 meta 再只盖脏键——长驻会话直接整对象覆盖，
-      // 会把另一台机器（iCloud 同步）本次会话的改动整块回滚
-      const r = v.metaWriteSync(getRoot(), {...metaCache}, [...metaDirty]);
+      // 带上脏键清单与本机基线：主进程先同步重读盘上 meta 再只盖脏键——长驻会话直接整对象
+      // 覆盖，会把另一台机器（iCloud 同步）本次会话的改动整块回滚；列表键（闪念 / 分类）
+      // 还要按基线做三向合并（盘上新增补进来、本会话删除不复活），与异步 writeMetaNow 同口径
+      const r = v.metaWriteSync(getRoot(), {...metaCache}, [...metaDirty], metaBase || {});
       if (r?.ok) {
         metaDirty.clear();
         // metaBase 对齐「实际落盘」的合并结果（含对面机器的非脏键改动），下次写盘的三向合并才不复活旧值

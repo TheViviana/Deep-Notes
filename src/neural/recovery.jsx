@@ -18,6 +18,8 @@ export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy, currentBod
   const ref = useRef(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
+  // 「恢复为副本」防连点：读快照是异步的，连点会建出两份副本
+  const [copyBusy, setCopyBusy] = useState(false);
   useEffect(() => {
     const before = document.activeElement;
     ref.current?.focus({preventScroll: true});
@@ -163,7 +165,7 @@ export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy, currentBod
             <span>{baseName(fileVer.rel)} · {fmtTs(fileVer.ts)}</span>
             <span className="snap-actions">
               {fileBody != null && !fileErr && <button className="pill ghost" onClick={diffFileVsPrev} title="与更早一份快照对比差异 · Diff against previous"><Icon name="draft" size={13}/>与上一份对比 <em>Diff</em></button>}
-              <button className="pill primary" onClick={() => onRestoreCopy(fileVer)}><Icon name="replay" size={13}/>恢复为副本 <em>Restore as copy</em></button>
+              <button className="pill primary" disabled={copyBusy} onClick={async () => { if (copyBusy) return; setCopyBusy(true); try { await onRestoreCopy(fileVer); } finally { setCopyBusy(false); } }}><Icon name="replay" size={13}/>恢复为副本 <em>Restore as copy</em></button>
             </span>
           </div>
           <pre>{fileErr || (fileBody ?? '正在读取…')}</pre>

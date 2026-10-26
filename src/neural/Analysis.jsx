@@ -120,7 +120,7 @@ function WikiEditor({graph, node, onBody, onNoteTitle, onAction, onGo}) {
         const tNode = t0 && graph.index.get(t0);
         const hit = tNode && tNode.kind !== 'ghost';
         return <span className="le-row" key={i}>
-          <button className={`le-name ${hit ? '' : 'le-ghost'}`} title={hit ? '在图谱中打开' : '未创建——点击改名，或用右侧按钮一键创建'} onClick={() => { if (hit) { if (onGo) onGo(t0); } else { setMode({type: 'rename', raw: w.raw}); setVal(w.target); } }}>{w.target}{!hit && <em>未创建</em>}{dup > 1 && <em>×{dup}</em>}</button>
+          <button className={`le-name ${hit ? '' : 'le-ghost'}`} title={hit ? '在图谱中打开' : '未创建——点击改名，或用右侧按钮一键创建'} onClick={() => { if (hit) { if (onGo) onGo(t0); } else { setMode({type: 'rename', raw: w.raw, occ}); setVal(w.target); } }}>{w.target}{!hit && <em>未创建</em>}{dup > 1 && <em>×{dup}</em>}</button>
           {w.alias && <span className="le-alias">「{w.alias}」</span>}
           <span className="le-ops">
             {!hit && <>
@@ -373,7 +373,9 @@ function Mentions({graph, node, onLinkify}) {
     const out = [];
     for (const n of graph.nodes) {
       if (!CONTENT.has(n.kind) || n.id === node.id || !n.body) continue;
-      const segs = String(n.body).split(/(\[\[[^\]]*\]\])/g); // 偶数段是普通文本，奇数段是已有双链
+      // 计数口径与 linkifyMentions（main.jsx）一致：代码围栏 / 行内代码 / URL / 已有双链段里的
+      // 同名字面量不算「提及」——否则显示「N 处」实际只转一部分，toast 对不上
+      const segs = String(n.body).split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`|https?:\/\/[^\s)>\]]+|\[\[[^\]]*\]\])/g); // 偶数段是普通文本
       let cnt = 0;
       for (let i = 0; i < segs.length; i += 2) cnt += (segs[i].match(rx) || []).length;
       if (cnt) out.push({n, cnt});

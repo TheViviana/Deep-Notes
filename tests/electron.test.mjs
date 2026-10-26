@@ -118,7 +118,12 @@ test('meta 退出同步写：只盖脏键，先把盘上值读回来合并（不
   assert.match(src, /payload = \{\.\.\.disk\}/);
   assert.match(src, /e\.returnValue = \{ok: true, data: payload\}/); // 回传实际落盘值供渲染层对齐基线
   const pre = readFileSync(join(__TEST_ROOT__, 'electron/preload.cjs'), 'utf8');
-  assert.match(pre, /metaWriteSync: \(root, data, dirty\)/);
+  assert.match(pre, /metaWriteSync: \(root, data, dirty, base\)/);
+});
+
+test('meta 退出同步写：列表键（闪念/分类）按基线三向合并，与异步 writeMetaNow 同口径', () => {
+  assert.match(src, /META_LIST_KEYS = new Set\(\['inbox', 'folders', 'readFolders'\]\)/);
+  assert.match(src, /mergeMetaList\(data\[k\], disk\[k\], b\[k\]\)/);
 });
 
 test('符号链接：库内软链不读取、不入回收站（用户自建的库结构不被同步拆掉）', () => {

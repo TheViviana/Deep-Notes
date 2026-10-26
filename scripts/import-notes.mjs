@@ -51,7 +51,7 @@ if (opt.help) { console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8')
 if (opt.reset) { writeFileSync(INDEX, indexFor('sample.js')); console.log('已切回示例数据（src/data/sample.js）。'); process.exit(0); }
 if (!opt.vault || !existsSync(opt.vault) || !statSync(opt.vault).isDirectory()) { console.error('请用 --vault 指定一个存在的笔记文件夹。'); process.exit(1); }
 const VAULT = resolve(opt.vault);
-const maxWorks = opt.maxWorks || Infinity, maxNotes = opt.maxNotes || Infinity;
+const maxWorks = opt.maxWorks >= 0 ? opt.maxWorks : Infinity, maxNotes = opt.maxNotes >= 0 ? opt.maxNotes : Infinity; // 负数按不限量处理（slice(0, -5) 会静默裁掉内容）
 
 // —— 读取 Markdown ——
 const SKIP = new Set(['.obsidian', '.trash', '.git', 'node_modules', '.DS_Store']);

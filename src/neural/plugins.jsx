@@ -266,6 +266,8 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
       const f = [...(cd.files || [])].find(x => x.type.startsWith('image/'));
       if (f) {
         e.preventDefault();
+        // 与「插图」按钮同一上限：超大图整读 base64 内存峰值高
+        if (f.size > 20 * 1024 * 1024) { window.showGlobalNotice?.('图片过大，上限 20MB · Image too large (max 20MB)'); return; }
         fileToDataUrl(f).then(async url => {
           const cur = area.current; if (!cur) return;
           const s = cur.selectionStart, end = cur.selectionEnd, v = cur.value;

@@ -200,7 +200,7 @@ export function htmlToMarkdown(html) {
     if (tag === 'pre') return '\n\n```\n' + ch.textContent.replace(/\n$/, '') + '\n```\n\n';
     if (tag === 'ul' || tag === 'ol') {
       const items = [...ch.children].filter(li => li.tagName.toLowerCase() === 'li');
-      return '\n\n' + items.map((li, i) => (tag === 'ol' ? `${i + 1}. ` : '- ') + walk(li, depth + 1).join('').trim().replace(/\n+/g, ' ')).join('\n') + '\n\n';
+      return '\n\n' + items.map((li, i) => (tag === 'ol' ? `${i + 1}. ` : '- ') + walk(li, depth + 1).trim().replace(/\n+/g, ' ')).join('\n') + '\n\n';
     }
     if (tag === 'img') { const alt = ch.getAttribute('alt') || '图片'; const src = ch.getAttribute('src') || ''; return src ? `![${alt}](${src})` : `（图片：${alt}）`; }
     if (tag === 'a') { const href = ch.getAttribute('href') || ''; const t = inner().trim(); return href && !href.startsWith('#') ? `[${t}](${href})` : t; }

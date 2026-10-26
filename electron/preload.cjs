@@ -37,7 +37,7 @@ contextBridge.exposeInMainWorld('deepnotes', {
     metaRead: root => ipcRenderer.invoke('vault:meta-read', root),
     metaWrite: (root, data) => ipcRenderer.invoke('vault:meta-write', {root, data}),
     // 退出前的同步 meta 落盘（beforeunload 里异步通道来不及）
-    metaWriteSync: (root, data, dirty) => ipcRenderer.sendSync('vault:meta-write-sync', {root, data, dirty}),
+    metaWriteSync: (root, data, dirty, base) => ipcRenderer.sendSync('vault:meta-write-sync', {root, data, dirty, base}),
     // 文件恢复：列出写前快照 / 读取某份快照内容（恢复界面数据源）
     snapshots: root => ipcRenderer.invoke('vault:snapshots', { root }),
     snapshotRead: (root, file) => ipcRenderer.invoke('vault:snapshot-read', { root, file }),

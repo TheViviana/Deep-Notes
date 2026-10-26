@@ -17,8 +17,22 @@ export const unquote = s => {
   }
   return t;
 };
-// 块标量需要在 serialize 时按 `|` 形式回写，用一个标记包装以便 render 识别
+// 块标量需要在 serialize 时按原样式（| 或 >，含 chomp 修饰符）回写，用一个标记包装以便 render 识别
 export const isBlock = v => v && typeof v === 'object' && v.__block === true;
+// 行内数组 [a, "b, c"] 的切分：引号内的逗号不是分隔符（Obsidian 会写带逗号的标签）。
+// 简单按逗号硬切会把「"标签, 含逗号"」劈成带残引号的碎条，经 keep 写回后污染 frontmatter。
+const splitInline = s => {
+  const out = [];
+  let cur = '', q = null;
+  for (const ch of s) {
+    if (q) { cur += ch; if (ch === q) q = null; continue; }
+    if (ch === '"' || ch === "'") { q = ch; cur += ch; continue; }
+    if (ch === ',') { out.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
+};
 export function parse(text) {
   // UTF-8 BOM：外部编辑器（如 Windows 记事本）可能给文件头加 \uFEFF，
   // 不剥掉会让 /^---/ 锚定失败，整个 frontmatter 被吞（deepnotes-id 丢失会触发误删重写）。
@@ -60,7 +74,7 @@ export function parse(text) {
       key = kv[1].trim();
       const v = kv[2].trim();
       fm[key] = v.startsWith('[') && v.endsWith(']')
-        ? v.slice(1, -1).split(',').map(unquote).filter(Boolean)
+        ? splitInline(v.slice(1, -1)).map(unquote).filter(Boolean)
         : v === '' ? '' : unquote(v);
     }
     // 末尾收尾：最后一行若是块标量，去掉尾部多余换行

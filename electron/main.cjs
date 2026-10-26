@@ -128,6 +128,10 @@ function writeGuard(full, epoch) {
   if (!epoch) return null; // 旧客户端不带序号：维持原行为
   const key = path.resolve(String(full));
   const latest = writeEpochs.get(key) || 0;
+  // 记录的序号比当前墙钟还大：上次落盘后时钟被回拨（NTP 校正 / 手动改时间），序号基准
+  // 已失效——不收敛的话，渲染层重载后（lastEpoch 归零、以回拨后的墙钟为基准）所有新写
+  // 都会被误判成「迟到的旧写」静默跳过，且渲染层按成功处理、不留底。以本次写为新基准继续。
+  if (latest > Date.now()) { writeEpochs.set(key, epoch); return null; }
   if (epoch < latest) return '已有更新的版本落盘，本次过期写入已跳过';
   writeEpochs.set(key, epoch);
   return null;
@@ -862,7 +866,23 @@ ipcMain.handle('vault:meta-write', async (_e, {root, data}) => {
 // 走 sendSync 阻塞通道（与 vault:flush-sync 同口径：只校验白名单，不弹框）。
 // 带 dirty（本会话改过的顶层键）时先同步重读盘上 meta 再只盖这些键——长驻会话直接整对象
 // 覆盖会把另一台机器（iCloud 同步）本次会话的改动整块回滚；返回实际落盘的合并结果供渲染层对齐基线。
-ipcMain.on('vault:meta-write-sync', (e, {root, data, dirty} = {}) => {
+// 与渲染层 fileStore.mergeMetaList 同口径：本地为本会话权威，盘上多出来的条目（另一台机器
+// 在本会话期间新增的闪念 / 分类）补进来；本会话删掉的（在 base 里）不复活。
+const META_LIST_KEYS = new Set(['inbox', 'folders', 'readFolders']);
+function mergeMetaList(local, disk, base) {
+  const arr = Array.isArray(local) ? local.slice() : [];
+  if (!Array.isArray(disk)) return arr;
+  const keyOf = x => (x && typeof x === 'object' ? String(x.id ?? JSON.stringify(x)) : String(x));
+  const localKeys = new Set(arr.map(keyOf));
+  const baseKeys = new Set((Array.isArray(base) ? base : []).map(keyOf));
+  for (const x of disk) {
+    const k = keyOf(x);
+    if (localKeys.has(k) || baseKeys.has(k)) continue;
+    arr.push(x);
+  }
+  return arr;
+}
+ipcMain.on('vault:meta-write-sync', (e, {root, data, dirty, base} = {}) => {
   try {
     if (!root || !data || !rootAuthorized(root)) { e.returnValue = {ok: false, error: '未授权'}; return; }
     const full = path.join(path.resolve(root), META_REL);
@@ -872,7 +892,10 @@ ipcMain.on('vault:meta-write-sync', (e, {root, data, dirty} = {}) => {
       let disk = {};
       try { const d = JSON.parse(fs.readFileSync(full, 'utf8')); if (d && typeof d === 'object' && !Array.isArray(d)) disk = d; } catch {}
       payload = {...disk};
-      for (const k of dirty) if (Object.prototype.hasOwnProperty.call(data, k)) payload[k] = data[k];
+      const b = base && typeof base === 'object' && !Array.isArray(base) ? base : {};
+      for (const k of dirty) if (Object.prototype.hasOwnProperty.call(data, k)) {
+        payload[k] = META_LIST_KEYS.has(k) ? mergeMetaList(data[k], disk[k], b[k]) : data[k];
+      }
     }
     fs.mkdirSync(path.dirname(full), {recursive: true});
     const tmp = full + '.tmp-' + process.pid;

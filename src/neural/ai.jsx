@@ -220,7 +220,7 @@ export async function aiChat(messages, {onDelta} = {}) {
         res = await window.electronAPI.aiFetchStream({url, headers, body}, feed);
         if (!res?.ok) throw new Error(res?.error || res?.data?.error?.message || `HTTP ${res?.status}`);
       } else {
-        const resp = await fetch(u, {method: 'POST', headers, body: JSON.stringify(body)});
+        const resp = await fetch(u, {method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(90_000)});
         if (!resp.ok) { const data = await resp.json().catch(() => null); throw new Error(data?.error?.message || `HTTP ${resp.status}`); }
         if (!resp.body) throw new Error('响应体不可读 · Unreadable response');
         const reader = resp.body.getReader(), dec = new TextDecoder();
@@ -229,6 +229,7 @@ export async function aiChat(messages, {onDelta} = {}) {
           if (done) break;
           feed(dec.decode(value, {stream: true}));
         }
+        feed(dec.decode() + '\n'); // 冲刷解码器残余 + 缓冲区里不足一行的尾部（末行无 \n 时丢最后一个 data 事件）
       }
       return finish();
     } catch (err) {
@@ -238,6 +239,9 @@ export async function aiChat(messages, {onDelta} = {}) {
       const data = await aiChatNonStream(url, headers, {...body, stream: false}); // 回退请求必须去掉 stream 标记
       const m = data?.choices?.[0]?.message;
       if (m?.content) { agg.content = m.content; onDelta(m.content); }
+      // 回退是非流式 JSON：tool_calls 一并合入，否则端点不支持 SSE 时文件工具静默失效
+      if (Array.isArray(m?.tool_calls)) for (const tc of m.tool_calls)
+        if (tc?.function?.name) agg.tools.push({id: tc.id || '', name: tc.function.name, arguments: tc.function.arguments || ''});
       return finish();
     }
   }
@@ -264,7 +268,7 @@ async function aiChatNonStream(url, headers, body, u = null) {
   }
   else if (u.protocol === 'http:') throw new Error('明文 http 仅允许本机地址（localhost / 127.0.0.1 / ::1）· Plain http only for local addresses');
   else throw new Error('仅允许 http(s) 地址 · Only http(s) URLs are allowed');
-  const res = await fetch(u, {method: 'POST', headers, body: JSON.stringify(body)});
+  const res = await fetch(u, {method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(90_000)});
   const data = await res.json().catch(() => null);
   if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
   return data;
@@ -465,6 +469,7 @@ export function AiChip() {
   const personaSavedTimer = useRef(null);
   const [memOpen, setMemOpen] = useState(false);
   const [memDraft, setMemDraft] = useState('');
+  const addMem = () => { if (memDraft.trim()) { saveAiMemory(memDraft); setMemDraft(''); } };
   const mdImport = useRef(null);
   useEffect(() => () => clearTimeout(personaSavedTimer.current), []);
   const savePersona = () => {
@@ -598,9 +603,8 @@ export function AiChip() {
           <div className="ai-mem-add">
             <input value={memDraft} placeholder="手动添加一条记忆…" aria-label="手动添加记忆"
               onChange={e => setMemDraft(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && !e.isComposing && memDraft.trim()) { saveAiMemory(memDraft); setMemDraft(''); } }}/>
-            <button type="button" className="send" disabled={!memDraft.trim()} aria-label="添加记忆"
-              onClick={() => { if (memDraft.trim()) { saveAiMemory(memDraft); setMemDraft(''); } }}>＋</button>
+              onKeyDown={e => { if (e.key === 'Enter' && !e.isComposing) addMem(); }}/>
+            <button type="button" className="send" disabled={!memDraft.trim()} aria-label="添加记忆" onClick={addMem}>＋</button>
           </div>
         </div>}
       </section>

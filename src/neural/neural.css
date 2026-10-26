@@ -185,7 +185,7 @@ html, body { margin: 0; background: #0d0e0e; }
 .ask input { width: 100%; height: 42px; padding: 0 50px 0 18px; border-radius: 999px; border: 1px solid var(--line-2); background: rgba(255, 255, 255, .06); color: var(--text); outline: none; }
 .ask input:focus { border-color: rgba(230, 207, 152, .5); box-shadow: 0 0 0 3px rgba(230, 207, 152, .1); }
 .ask input::placeholder, .an-ask input::placeholder, .search input::placeholder, textarea::placeholder { color: var(--muted); }
-.send, .an-ask form button { position: absolute; right: 5px; width: 32px; height: 32px; border-radius: 50%; border: 0; display: grid; place-items: center; color: #161716; background: linear-gradient(135deg, #f4f4f1, #c6c7c2); }
+.ask .send, .an-ask form button { position: absolute; right: 5px; width: 32px; height: 32px; border-radius: 50%; border: 0; display: grid; place-items: center; color: #161716; background: linear-gradient(135deg, #f4f4f1, #c6c7c2); }
 .neural .send { color: #161716; }
 .dock-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 9px 2px 0; }
 .dock-chips .me { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-2); padding: 4px 9px; border-radius: 8px; background: rgba(255, 255, 255, .05); }
@@ -1046,7 +1046,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .ai-mem-add { display: flex; gap: 6px; width: 100%; }
 .ai-mem-add input { flex: 1; min-width: 0; height: 28px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255, 255, 255, .05); color: var(--text); font-size: 12px; padding: 0 9px; outline: none; }
 .ai-mem-add input:focus { border-color: rgba(230, 207, 152, .5); }
-.ai-mem-add .send { flex: none; border: 1px solid var(--line); background: none; color: var(--gold); border-radius: 8px; cursor: pointer; padding: 2px 10px; }
+.ai-mem-add .send { position: static; flex: none; width: auto; height: 28px; border: 1px solid var(--line); background: none; color: var(--gold); border-radius: 8px; cursor: pointer; padding: 2px 10px; }
 .ai-mem-add .send:disabled { opacity: .4; cursor: default; }
 /* 批量替换弹窗 */
 .rep-regex { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); }
@@ -1353,7 +1353,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .sel-menu .sel-ask { display: flex; align-items: center; gap: 5px; margin-top: 4px; padding: 5px 2px 2px; border-top: 1px solid var(--line); }
 .sel-menu .sel-ask input { flex: 1; min-width: 0; height: 30px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-2); background: rgba(255, 255, 255, .06); color: var(--text); font-size: 12px; outline: none; }
 .sel-menu .sel-ask input:focus { border-color: rgba(230, 207, 152, .5); }
-.sel-menu .sel-ask .send { flex: none; width: 26px; height: 26px; border: 0; border-radius: 50%; display: grid; place-items: center; color: #161716; background: linear-gradient(135deg, #f4f4f1, #c6c7c2); cursor: pointer; }
+.sel-menu .sel-ask .send { position: static; flex: none; width: 26px; height: 26px; border: 0; border-radius: 50%; display: grid; place-items: center; color: #161716; background: linear-gradient(135deg, #f4f4f1, #c6c7c2); cursor: pointer; }
 .sel-menu .sel-ask .send:disabled { opacity: .4; cursor: default; }
 @media (prefers-reduced-motion: reduce) { .sel-menu { animation: none; } }
 

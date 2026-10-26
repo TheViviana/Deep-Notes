@@ -1353,7 +1353,7 @@ function App() {
     let bak; // bak：备份内容；用 bak 而非 snap 命名，避免遮蔽外层的知识库信息 state
     try { bak = JSON.parse(localStorage.getItem(BACKUP_KEY)); } catch {}
     if (!bak || !Array.isArray(bak.works)) { setToast('没有可恢复的数据快照 · No snapshot'); return; }
-    if (!window.confirm(`恢复 ${bak.at} 的数据快照？当前内容会先另存一份新快照（可再恢复回来），桌面版会写回知识库文件夹。`)) return;
+    if (!window.confirm(`恢复 ${bak.at} 的数据快照？当前内容会先另存一份新快照（可再恢复回来），桌面版会写回知识库文件夹。${VAULT_MODE ? '\n\n注意：连接知识库期间这份快照不再更新，它可能早于当前知识库内容；恢复会把它整体写回知识库（逐条可从「文件恢复」找回，更稳妥）。' : ''}`)) return;
     // 确认框承诺的「先另存一份新快照」：连库时 localStorage 全量快照缺位（saveSnapshot 直接
     // 返回），至少把内存里与备份有差异的条目存进应用内快照（IndexedDB），「文件恢复」可找回
     snapshotBeforeAdopt({works, notes, drafts, readings, archives},
@@ -1418,7 +1418,9 @@ function App() {
     }
     // 复用已有「 - Deep Notes」专属库时保留手动空分类（B8：它们刚刚从 meta 合并进来，
     // 不应被 adoptData keepFolders=false 误清后再空写盘上）；新建副本照常清空。
-    adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${copyDir ? ` · 已写入「${copyDir.replace(/\/+$/, '').split('/').pop()}」` : ''}`, reuse);
+    // 复用库的内容刚从盘上解析出来，灌入不写透（through=false）——否则首轮 diff 把每个文件
+    // 重写一遍（mtime 全变、iCloud 全量重传、写前快照刷屏）；新建副本为空才需要写透生成 .md。
+    adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${copyDir ? ` · 已写入「${copyDir.replace(/\/+$/, '').split('/').pop()}」` : ''}`, reuse, !reuse);
     try { localStorage.setItem(FILES_KEY, String(data.counts.all)); } catch {} // 文件数基线：自动同步的「拒绝不完整覆盖」以此为参照
   }
 
@@ -1439,27 +1441,47 @@ function App() {
     // 同标题视为同一条：保留原 id（选中态 / 反向链接不断）。replaceFields 列出的字段才被文件
     // 覆盖，且空值不覆盖（空 body / 空 author 不会抹掉现有内容）——应用内手工维护的
     // 数据（作品指标、阅读分类、笔记路径）不在列表里，合并永远不会清掉它们。
+    // replaceFields 也可以是函数（按条目返回字段清单）：media / date / platform 等有解析默认值
+    // 的字段，只有 frontmatter 里确实写了才覆盖——否则一个无 frontmatter 的同名 .md 合并进来，
+    // 会把已有视频作品改回图文、把手工修正的发布日期顶成文件 mtime。
     const hasVal = v => v !== '' && v != null && !(Array.isArray(v) && !v.length);
+    const fmById = data.fmById instanceof Map ? data.fmById : new Map();
+    const fmHas = (f, keys) => {
+      const fm = fmById.get(String(f.id));
+      if (!fm) return false;
+      return Object.keys(fm).some(k => keys.includes(k.toLowerCase()));
+    };
+    const FM_MEDIA = ['media', '类型', 'type', '形式'];
+    const FM_DATE_WORKS = ['date', '发布时间', '发布日期', 'published', 'publishedat', 'created', '创建时间'];
+    const FM_DATE_READ = ['date', '收藏日期', '发布日期', 'published'];
+    const FM_DATE_ARCH = ['date', '收档日期', '创建日期', 'published'];
     const mergeByTitle = (list, items, reid, replaceFields) => {
       const out = [...list];
       const idx = new Map();
       out.forEach((x, i) => { const k = canon(x.title); if (k && !idx.has(k)) idx.set(k, i); });
+      const mergeInto = (old, f, keepId) => {
+        const rf = typeof replaceFields === 'function' ? replaceFields(f) : replaceFields;
+        return rf
+          ? {...old, ...Object.fromEntries(rf.filter(k => hasVal(f[k])).map(k => [k, f[k]])), ...(keepId ? {id: old.id} : {})}
+          : {...old, ...f, ...(keepId ? {id: old.id} : {})};
+      };
       const adds = [];
+      const addIdx = new Map(); // 同批文件内部的同标题去重：后者按「更新」合并进前者，不重复追加
       for (const f of items) {
-        const i = idx.get(canon(f.title));
-        if (i == null) adds.push(f);
-        else {
-          replaced++;
-          out[i] = replaceFields
-            ? {...out[i], ...Object.fromEntries(replaceFields.filter(k => hasVal(f[k])).map(k => [k, f[k]])), id: out[i].id}
-            : {...out[i], ...f, id: out[i].id};
-        }
+        const k = canon(f.title);
+        const i = k ? idx.get(k) : undefined;
+        if (i != null) { replaced++; out[i] = mergeInto(out[i], f, true); continue; }
+        const j = k ? addIdx.get(k) : undefined;
+        if (j != null) { adds[j] = mergeInto(adds[j], f, false); continue; }
+        if (k) addIdx.set(k, adds.length);
+        adds.push(f);
       }
       return reid ? [...out, ...adds.map((x, i) => reid(x, i))] : [...out, ...adds];
     };
     if (target === 'works') {
       const base = works.reduce((m, w) => Math.max(m, Number(String(w.id).match(/^w(\d+)$/)?.[1]) || 0), 0);
-      setWorks(mergeByTitle(works, fresh, (x, i) => ({...x, id: 'w' + (base + fresh.length + i + 1)}), ['title', 'date', 'direction', 'media', 'tags', 'body']));
+      setWorks(mergeByTitle(works, fresh, (x, i) => ({...x, id: 'w' + (base + fresh.length + i + 1)}),
+        f => ['title', 'direction', 'tags', 'body', ...(fmHas(f, FM_DATE_WORKS) ? ['date'] : []), ...(fmHas(f, FM_MEDIA) ? ['media'] : [])]));
     } else if (target === 'methods') {
       // 新笔记的 path 不能和现有笔记撞车（同 path 会互相覆盖一个文件）；撞了就在文件名后追加 id 短码。
       // 替换同名条目不动 path：文件原地更新，不会在知识库里搬家。
@@ -1482,13 +1504,16 @@ function App() {
     } else if (target === 'ideas') {
       // 导入的选题 id 可能是字符串（frontmatter deepnotes-id / 稳定散列），新增条目改用带时间戳的 id，避免与数字 id 撞车
       const stamp = 'idea-' + Date.now();
-      setIdeas(mergeByTitle(ideas, fresh, (x, i) => ({...x, id: `${stamp}-${i}`}), ['title', 'platform', 'priority', 'status', 'note']));
+      setIdeas(mergeByTitle(ideas, fresh, (x, i) => ({...x, id: `${stamp}-${i}`}),
+        f => ['title', ...(fmHas(f, ['platform', '平台']) ? ['platform'] : []), ...(fmHas(f, ['priority', '优先级']) ? ['priority'] : []), ...(fmHas(f, ['status', '状态']) ? ['status'] : []), ...(fmHas(f, ['note', '备注', 'description', '简介']) ? ['note'] : [])]));
     } else if (target === 'drafts') {
       setDrafts(mergeByTitle(drafts, fresh, (x, i) => ({...x, id: 'draft-' + Date.now() + '-' + i}), ['title', 'body']));
     } else if (target === 'readings') {
-      setReadings(mergeByTitle(readings, fresh, (x, i) => ({...x, id: 'reading-' + Date.now() + '-' + i}), ['title', 'date', 'author', 'source', 'folder', 'body']));
+      setReadings(mergeByTitle(readings, fresh, (x, i) => ({...x, id: 'reading-' + Date.now() + '-' + i}),
+        f => ['title', 'author', 'source', 'folder', 'body', ...(fmHas(f, FM_DATE_READ) ? ['date'] : [])]));
     } else if (target === 'archives') {
-      setArchives(mergeByTitle(archives, fresh, (x, i) => ({...x, id: 'archive-' + Date.now() + '-' + i}), ['title', 'date', 'body']));
+      setArchives(mergeByTitle(archives, fresh, (x, i) => ({...x, id: 'archive-' + Date.now() + '-' + i}),
+        f => ['title', 'body', ...(fmHas(f, FM_DATE_ARCH) ? ['date'] : [])]));
     }
     setToast(`已导入 ${fresh.length} 条到「${MERGE_ZH[target]}」${replaced ? `（更新 ${replaced} 条同名）` : ''} · Imported`);
   }
@@ -1510,19 +1535,29 @@ function App() {
   async function switchVault(dir) {
     if (!dir || dir === getRoot()) return;
     metaReady.current = false;
-    await setRoot(dir); // 旧库队列先写尽、附属数据先落旧库
-    window.deepnotes?.vault?.watch?.(dir);
-    const meta = await loadMeta();
-    if (meta) {
-      hydrateConceptMeta(meta);
-      if (Array.isArray(meta.inbox)) setInbox(meta.inbox);
-      if (Array.isArray(meta.folders)) setFolders(meta.folders);
-      if (Array.isArray(meta.readFolders)) setReadFolders(meta.readFolders);
-    }
-    metaReady.current = true;
-    // force：用户亲自切库不算「文件数骤减」（内存里还是旧库条目，骤减守卫的基线对不上）
-    const data = await syncRef.current({startup: true, force: true});
-    if (!data?.counts?.all) showGlobalNotice('该知识库没有读到内容：确认文件夹还在原位，或先导入一次 · Vault appears empty');
+    // 复用读盘门：切换期间界面不可编辑——此刻内存还是旧库内容，而 diff 捕获的根目录
+    // 即将换成新库，不关门的话切换窗口内的编辑会被当成新库内容写进新库。
+    // 门先落下：编辑器卸载时的保存（旧库内容）在 setRoot 前入队，仍捕获旧根目录，
+    // 由 setRoot 的补写循环落进旧库，不跨库泄漏。
+    setVaultReady(false);
+    try {
+      await new Promise(r => setTimeout(r, 120)); // 等读盘门完成渲染、编辑器卸载保存先入队
+      await setRoot(dir); // 旧库队列先写尽、附属数据先落旧库
+      window.deepnotes?.vault?.watch?.(dir);
+      const meta = await loadMeta();
+      if (meta) {
+        hydrateConceptMeta(meta, {replace: true});
+        // 按新库「替换」而非并集：meta 缺键（新库没存过）也必须清空本机值——否则旧库的
+        // 闪念 / 分类留在界面，下次改动经 patchMeta 写进新库的 meta.json（跨库渗透）
+        setInbox(Array.isArray(meta.inbox) ? meta.inbox : []);
+        setFolders(Array.isArray(meta.folders) ? meta.folders : []);
+        setReadFolders(Array.isArray(meta.readFolders) ? meta.readFolders : []);
+      }
+      metaReady.current = true;
+      // force：用户亲自切库不算「文件数骤减」（内存里还是旧库条目，骤减守卫的基线对不上）
+      const data = await syncRef.current({startup: true, force: true});
+      if (!data?.counts?.all) showGlobalNotice('该知识库没有读到内容：确认文件夹还在原位，或先导入一次 · Vault appears empty');
+    } finally { setVaultReady(true); }
   }
 
   // 批量替换的执行端：把命中正文整体替换（内部统一走正则；普通模式转义查找串 + 忽略大小写，
@@ -1713,6 +1748,7 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
   // 5) 读文件期间又有新编辑（内存数组引用已变）则跳过本次采用并稍后重跑——否则 adopt 会用
   //    不含新编辑的文件版本回滚界面，diff 再把回滚内容写盘，编辑就真的丢了。
   const syncSeq = useRef(0);
+  const unreadableSig = useRef(''); // 上次提示过的「读不到」清单：回声同步不重复弹同一条提示
   // 每次渲染对齐的最新内容引用：同步流程用它检测「读文件期间又有编辑」（闭包值仍是调用瞬间的）
   const contentRef = useRef(null);
   contentRef.current = {works, notes, drafts, readings, archives, ideas};
@@ -1734,7 +1770,16 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
     } catch { return null; }
     let data;
     try { data = await parseVault(files, getTarget()); } catch { return null; }
-    if (seq !== syncSeq.current || !data.counts.all) return null;
+    if (seq !== syncSeq.current) return null;
+    // 库被外部清空（非启动首读、非显式换库、内存还有内容、没有读不到的占位文件）：
+    // 与骤减守卫同口径提示并跳过——静默 return 会让内存里的幽灵内容在下次编辑时写回复活
+    if (!data.counts.all) {
+      if (!startup && !force && !unreadable.length) {
+        const memN = works.length + notes.length + drafts.length + readings.length + archives.length + ideas.length;
+        if (memN > 0) setToast(`知识库文件全部被外部移除（应用内还有 ${memN} 条），已跳过自动同步以防误写回；若确属有意清空，请重新导入一次该知识库 · Sync skipped`);
+      }
+      return null;
+    }
     // 骤减守卫基线：会话内有内容时以内存条数为准——应用内删除已随 diff 写进 .trash，
     // 盘上不少于内存即属合法收缩（照常同步并在 same 分支收缩基线）；内存为空（启动首读）
     // 才用导入基线 FILES_KEY 兜底。此前取两者 max 且删除后从不收缩 FILES_KEY：删超 30%
@@ -1746,19 +1791,11 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
       setToast(`知识库文件数量骤减（${lastCount} → ${data.counts.all}），已跳过自动同步以防误删；若确属有意删除，请重新导入一次该知识库 · Sync skipped`);
       return null;
     }
-    // 与解析器同口径的归一化 + 按 id 顺序无关比对（vaultCompare）：自己写盘的回声、数组
-    // 顺序差异、正文首尾空白、空指标 null↔0、media 缺省等往返差异都不再误判为「外部变更」。
-    // 误判的代价是 adoptData 用盘上版本覆盖内存——重置页面 / 选中态、顶掉未落盘的移动。
-    const same = sameVaultContent({works, notes, drafts, readings, archives, ideas}, data, kbConcepts);
-    if (same) {
-      if (unreadable.length) setToast(`知识库有 ${unreadable.length} 个文件暂时读不到（可能未从 iCloud 下载），相关内容保持原样 · Sync partial`);
-      // 无变化也要收缩基线：应用内删除落盘后的回声同步走这里，FILES_KEY 不更新会越积越高
-      try { localStorage.setItem(FILES_KEY, String(data.counts.all + unreadable.length)); } catch {}
-      return data; // 文件夹没有变化就不打扰
-    }
     // iCloud 占位：读不到的文件不参与删除判定，对应内容原样保留（与当前 state 同引用，
     // diff 写回时不会重写它们），其余内容照常对齐。选题不保留：数字 id 与读回内容必然撞车，
     // 保留副本还会对占位路径发起写盘；文件从 iCloud 下载完成后选题自然回来。
+    // （提前计算：下方的「无变化」比对也要用——占位条目在内存里、不在 data 里，直接比必然
+    // 不等，每次自身写盘的回声都会被误判成外部变更，走一遍 adopt 还弹提示）
     let keepOld = null;
     if (unreadable.length) {
       const ghost = new Set(unreadable);
@@ -1773,6 +1810,22 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
         const fresh = new Set((data[kind] || []).map(x => relOfItem(kind, x)));
         keepOld[kind] = (cur[kind] || []).filter(x => { const r = relOfItem(kind, x); return r && isGhost(r) && !fresh.has(r); });
       }
+    }
+    // 与解析器同口径的归一化 + 按 id 顺序无关比对（vaultCompare）：自己写盘的回声、数组
+    // 顺序差异、正文首尾空白、空指标 null↔0、media 缺省等往返差异都不再误判为「外部变更」。
+    // 误判的代价是 adoptData 用盘上版本覆盖内存——重置页面 / 选中态、顶掉未落盘的移动。
+    // 有占位文件时先把占位条目从内存侧剔除再比：剔除后与盘上一致即为「无变化」，静默收敛。
+    const cmpCur = keepOld
+      ? Object.fromEntries(Object.entries({works, notes, drafts, readings, archives}).map(([k, list]) => [k, (list || []).filter(x => !keepOld[k].includes(x))]))
+      : {works, notes, drafts, readings, archives};
+    const same = sameVaultContent({...cmpCur, ideas}, data, kbConcepts);
+    if (same) {
+      const sig = unreadable.join('|');
+      if (unreadable.length && sig !== unreadableSig.current) setToast(`知识库有 ${unreadable.length} 个文件暂时读不到（可能未从 iCloud 下载），相关内容保持原样 · Sync partial`);
+      unreadableSig.current = sig;
+      // 无变化也要收缩基线：应用内删除落盘后的回声同步走这里，FILES_KEY 不更新会越积越高
+      try { localStorage.setItem(FILES_KEY, String(data.counts.all + unreadable.length)); } catch {}
+      return data; // 文件夹没有变化就不打扰
     }
     // 读文件期间用户又编辑过（内存数组引用已变）：本次快照不含这些新编辑，adopt 会把界面
     // 回滚成文件版本、diff 随后把回滚内容写盘。跳过本次采用并稍后重跑——新编辑会先被
@@ -1796,6 +1849,7 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
       snapshot: data.snapshot, concepts: data.concepts,
     };
     adoptData(next, `已同步知识库变更：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${unreadable.length ? `（另有 ${unreadable.length} 个文件暂时读不到，已保持原样）` : ''}`, true, false, true); // 内容来自盘上：灌入不写透，避免全库重写；视图原地保留，不跳工作台
+    unreadableSig.current = unreadable.join('|'); // 本次变更已含「读不到」说明，随后的回声同步不再重复提示
     try { localStorage.setItem(FILES_KEY, String(data.counts.all + unreadable.length)); } catch {} // 文件数基线含占位文件
     return data;
   }, [works, notes, ideas, drafts, readings, archives, kbConcepts, snap]);

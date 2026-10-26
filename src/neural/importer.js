@@ -64,8 +64,13 @@ export function pickMdFiles() {
 // target：'auto' 按文件夹名自动分类；也可指定 'works' | 'methods' | 'ideas' | 'drafts' | 'readings' | 'archives'，把全部文件归入所选模块
 export async function parseVault(fileList, target = 'auto') {
   // 跳过目录里的 .md 同样不导入：桌面版有主进程 SKIP 兜底，网页版没有——
-  // 不过滤的话 .trash 里已删除的笔记会整体复活，.obsidian / .git 里的说明文件也会混进来
-  const skipped = p => p.split('/').some(seg => seg.startsWith('.') || SKIP_DIRS.has(seg));
+  // 不过滤的话 .trash 里已删除的笔记会整体复活，.obsidian / .git 里的说明文件也会混进来。
+  // webkitRelativePath 首段是所选文件夹本身的名字（桌面版由 readVaultFiles 合成），
+  // 库根叫「.notes」/「node_modules」不该导致全部文件被跳过——判定时剥掉首段
+  const skipped = p => {
+    const parts = p.split('/');
+    return parts.slice(parts.length > 1 ? 1 : 0).some(seg => seg.startsWith('.') || SKIP_DIRS.has(seg));
+  };
   const all = fileList.filter(f => f && isMd(f.name) && !skipped(f.webkitRelativePath || f.name));
   const files = all.map(f => {
     // webkitRelativePath 形如「仓库名/子目录/文件.md」；第一段是所选文件夹名，分类时跳过
@@ -86,6 +91,9 @@ export async function parseVault(fileList, target = 'auto') {
     bucket[x.kind].push({...x, title});
   }
   const byDate = (a, b) => b.date.localeCompare(a.date);
+  // 每条内容的 frontmatter 来源表（id → fm）：「导入选定内容」合并时据此区分
+  // 「文件里确实写了 media/date」与「解析默认值」，默认值不得覆盖用户手工修正的字段
+  const fmById = new Map();
 
   // 带 fm 构建 → 排序 → settleIds 定 id → 归一化；顺序保证 id 只依赖 deepnotes-id，不依赖文件顺序
   // rel 一并带上：settleIds 用它做稳定散列，normalizeWork / 随后的 delete 会把临时字段清掉
@@ -113,6 +121,7 @@ export async function parseVault(fileList, target = 'auto') {
     };
   }).sort(byDate);
   settleIds(worksRaw, 'w');
+  worksRaw.forEach(w => fmById.set(String(w.id), w.fm));
   const works = worksRaw.map(w => normalizeWork(w));
 
   const noteTags = [];
@@ -127,6 +136,7 @@ export async function parseVault(fileList, target = 'auto') {
       updatedAt: String(pick(x.fm, ['updated']) || '') || undefined, keep: keepOf(x.fm, 'notes')};
   });
   settleIds(notes, 'n'); // rel 保留：含 iCloud 占位文件的同步要按真实路径匹配条目（main.jsx keepOld）
+  notes.forEach(n => fmById.set(String(n.id), n.fm));
 
   // 选题 id 与其余五个模块同口径：优先 frontmatter 的 deepnotes-id，缺失时按标题散列补号。
   // 旧的「数组下标 + 1」会在增删一个 .md 后整体移位，草稿的 source 指向错误选题、图谱连线错乱。
@@ -137,6 +147,7 @@ export async function parseVault(fileList, target = 'auto') {
       status: ['待写', '待扩展', '已转草稿'].includes(status) ? status : '待写', note: String(pick(x.fm, ['note', '备注', 'description', '简介']) || clean(x.body).replace(/^#.*\n/, '').trim().slice(0, 120)), keep: keepOf(x.fm, 'ideas')};
   });
   settleIds(ideas, 'idea-'); // 选题池常合并成一个 .md：以标题做稳定散列，顺序变化也不漂移
+  ideas.forEach(d => fmById.set(String(d.id), d.fm));
 
   const drafts = bucket.drafts.map(x => {
     const src = String(pick(x.fm, ['source', '来源选题', '选题']) || '');
@@ -146,6 +157,7 @@ export async function parseVault(fileList, target = 'auto') {
       updatedAt: String(pick(x.fm, ['updated']) || '') || undefined, keep: keepOf(x.fm, 'drafts')};
   });
   settleIds(drafts, 'draft-');
+  drafts.forEach(d => fmById.set(String(d.id), d.fm));
 
   // 阅读区：别人写好的内容（作者 / 来源 / 分类可选，写在 frontmatter 里）。
   // folder 是应用内的左侧分类：落盘在每篇 .md 的 frontmatter 里，导入 / 自动同步都不会丢。
@@ -159,6 +171,7 @@ export async function parseVault(fileList, target = 'auto') {
     updatedAt: String(pick(x.fm, ['updated']) || '') || undefined, keep: keepOf(x.fm, 'readings')
   }));
   settleIds(readings, 'reading-');
+  readings.forEach(r => fmById.set(String(r.id), r.fm));
   readings.sort((a, b) => b.date.localeCompare(a.date));
 
   // 档案区：创作者自己的个人档案（简介、回顾、清单等），同样参与双链与图谱。
@@ -169,6 +182,7 @@ export async function parseVault(fileList, target = 'auto') {
     updatedAt: String(pick(x.fm, ['updated']) || '') || undefined, keep: keepOf(x.fm, 'archives')
   }));
   settleIds(archives, 'archive-');
+  archives.forEach(a => fmById.set(String(a.id), a.fm));
   archives.sort((a, b) => b.date.localeCompare(a.date));
 
   // 概念词：内容里出现的全部话题标签（不设数量上限），出现越多在概念网络里越靠前。
@@ -184,7 +198,7 @@ export async function parseVault(fileList, target = 'auto') {
 
   return {
     vault: (fileList[0]?.webkitRelativePath || '').split('/')[0] || '所选文件夹',
-    works, notes, ideas, drafts, readings, archives, snapshot, concepts,
+    works, notes, ideas, drafts, readings, archives, snapshot, concepts, fmById,
     counts: {all: read.length, works: works.length, notes: notes.length, ideas: ideas.length, drafts: drafts.length, readings: readings.length, archives: archives.length}
   };
 }

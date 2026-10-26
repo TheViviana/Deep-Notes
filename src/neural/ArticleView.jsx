@@ -245,7 +245,7 @@ export function renderMarkdown(md) {
       const m = ln.match(/^[ \t]*\[\^([^\]\s]+)\]:[ \t]*(.*)$/);
       if (m) { flush(); cur = {key: m[1], text: [m[2]]}; continue; }
       if (cur) {
-        if (ln.length === 0 || /^[ \t]{2,}|\t/.test(ln)) { cur.text.push(ln.replace(/^[ \t]{2,}/, '').replace(/^\t/, '')); continue; }
+        if (ln.length === 0 || /^(?:[ \t]{2,}|\t)/.test(ln)) { cur.text.push(ln.replace(/^[ \t]{2,}/, '').replace(/^\t/, '')); continue; }
         else { flush(); }
       }
       out.push(ln);
@@ -261,9 +261,10 @@ export function renderMarkdown(md) {
       (_, t, title) => title.trim() ? `> **${title.trim()}**` : '>');
     return s
       // 定义列表：术语行 + 一至多行「: 定义」→ <dl>（GFM 没有，Obsidian 支持）。
-      // 结尾补空行：marked 把 <dl> 当作 HTML 块时一路吃到空行为止，不补会把紧邻的下一段正文吞进块里
+      // 结尾补空行：marked 把 <dl> 当作 HTML 块时一路吃到空行为止，不补会把紧邻的下一段正文吞进块里；
+      // 术语 / 定义先 unescLt 再 esc（源码层已把 < 转义成 &lt;，直接 esc 会双重转义成 &amp;lt;）
       .replace(/(^|\n)([^\n:][^\n]*)\n((?:[ \t]*: [^\n]+\n?)+)/g, (_, pre, term, defs) =>
-        `${pre}<dl><dt>${esc(term.trim())}</dt>${defs.trim().split('\n').map(l => `<dd>${esc(l.replace(/^[ \t]*: /, ''))}</dd>`).join('')}</dl>\n\n`)
+        `${pre}<dl><dt>${esc(unescLt(term.trim()))}</dt>${defs.trim().split('\n').map(l => `<dd>${esc(unescLt(l.replace(/^[ \t]*: /, '')))}</dd>`).join('')}</dl>\n\n`)
       // 下标 ~x~ / 上标 ^x^：两侧非 ~ / ^、非空白，避免误伤 GFM 删除线 ~~…~~ 与公式占位符；
       // ^ 前是 [ 时跳过（未定义的脚注引用 [^x] 原样保留，相邻两个 [^a][^b] 不被误包成上标）
       .replace(/(?<!~)~([^~\n\s]+)~(?!~)/g, '<sub>$1</sub>')

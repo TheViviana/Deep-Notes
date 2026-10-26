@@ -20,7 +20,10 @@ export function parseTags(v) {
 
 // 归一化：补齐字段默认值，保证 graph 与页面上用到的一定存在。
 // keep（导入时未消费的自定义 frontmatter 键）原样透传：写回知识库时展开，用户手写元数据不丢。
-export function normalizeWork(w = {}) {
+export function normalizeWork(w) {
+  // 畸形条目兜底为空对象：localStorage 里混入 null（手改 / 旧版写坏）时访问 w.id 会抛
+  // TypeError，loadWorks 整体 catch 落到 seedWorks()——示例数据覆盖整库真实作品
+  if (!w || typeof w !== 'object') w = {};
   return {
     id: w.id || 'work-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     title: String(w.title || '').trim() || '未命名文章',
@@ -64,7 +67,7 @@ export function useWorks() {
   // 审计 A3：与 main.jsx 的 useSaved 同一口径——断库（切回示例）后 root 为空，
   // 恢复 localStorage 写入，避免「磁盘/localStorage 两条通道同时关闭」
   const diskMode = VAULT_MODE && !!getRoot();
-  const [works, setWorks] = useState(VAULT_MODE ? () => [] : loadWorks);
+  const [works, setWorks] = useState(diskMode ? () => [] : loadWorks);
   useEffect(() => {
     if (diskMode) return; // 内容只写知识库 .md，localStorage 不再保存（退出落盘由 flushSyncNow 负责）
     pendingWorks = works;
