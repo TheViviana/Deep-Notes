@@ -121,10 +121,22 @@ async function ensureAuthorized(root) {
 
 const SKIP = new Set(['.obsidian', '.trash', '.git', '.DS_Store', 'node_modules']);
 
+// —— 写序号守卫：同一路径的写盘按发起序号排队，过期的迟到写（慢盘上的在途 IPC）不得覆盖
+// 已用更新版本落盘的文件（渲染层退出同步通道已在主进程内写完新版，迟到的异步旧写被拦下）。
+const writeEpochs = new Map(); // 键 = 解析后的绝对路径
+function writeGuard(full, epoch) {
+  if (!epoch) return null; // 旧客户端不带序号：维持原行为
+  const key = path.resolve(String(full));
+  const latest = writeEpochs.get(key) || 0;
+  if (epoch < latest) return '已有更新的版本落盘，本次过期写入已跳过';
+  writeEpochs.set(key, epoch);
+  return null;
+}
+
 // —— 原子写入：先写同目录隐藏临时文件，再 rename 到位 ——
 // 写一半崩溃 / 断电时要么是完整旧文件、要么是完整新文件，不会留下截断的半截 .md。
 // 临时文件以 . 开头：readMd 与 vault:asset 都会跳过，永远不会被当成笔记读出来。
-async function atomicWrite(full, body) {
+async function atomicWrite(full, body, guard) {
   const tmp = path.join(path.dirname(full), '.' + path.basename(full) + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8));
   // 覆盖已有文件时沿用原权限：临时文件默认 0644，rename 换 inode 后用户手动收紧的
   // 权限（如 chmod 600）会被静默放宽
@@ -140,7 +152,11 @@ async function atomicWrite(full, body) {
     } finally {
       await fh.close().catch(() => {});
     }
+    // rename 前最后一刻再过一次序号守卫：写盘期间退出同步通道可能已用更新版本落盘，
+    // 迟到的旧版本绝不能盖上去（guard 为同步函数，与 sendSync 处理器的执行不会交错）
+    if (guard && guard()) { await fsp.unlink(tmp).catch(() => {}); return 'stale'; }
     await fsp.rename(tmp, full);
+    return null;
   } catch (err) {
     // 任何一步失败都要清掉临时文件：写失败 / fsync 失败 / rename 失败都不在库里留残渣
     await fsp.unlink(tmp).catch(() => {});
@@ -228,7 +244,7 @@ async function snapshotBeforeWrite(root, full, body) {
     const dir = snapDirFor(root);
     const now = Date.now();
     // 审计 B5：追加后缀防毫秒级同名覆盖
-    const dest = uniqueSnapPath(dir, path.relative(path.resolve(String(root)), path.resolve(full)).replace(/\.md$/i, ''), now);
+    const dest = uniqueSnapPath(dir, path.relative(path.resolve(String(root)), path.resolve(full)).replace(/\.(md|markdown)$/i, ''), now);
     await fsp.mkdir(path.dirname(dest), { recursive: true });
     // 内容去重：与本文件最新一份快照相同就跳过（连续保存只留真正变化过的版本）
     const stem = path.basename(dest).replace(/_\d{13,}(?:-\d+)?\.md$/, '');
@@ -252,7 +268,7 @@ function snapshotBeforeWriteSync(root, full, body) { // 退出同步通道用：
     try { old = fs.readFileSync(full, 'utf8'); } catch { return; }
     if (String(old) === String(body)) return;
     const dir = snapDirFor(root);
-    const dest = uniqueSnapPath(dir, path.relative(path.resolve(String(root)), path.resolve(full)).replace(/\.md$/i, ''), Date.now());
+    const dest = uniqueSnapPath(dir, path.relative(path.resolve(String(root)), path.resolve(full)).replace(/\.(md|markdown)$/i, ''), Date.now());
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     // 内容去重：同步版直接读最新快照文件对比（取目录里排序最末一份）
     const stem = path.basename(dest).replace(/_\d{13,}(?:-\d+)?\.md$/, '');
@@ -297,15 +313,32 @@ async function readMd(root) {
         unreadable.push(path.relative(root, path.join(dir, cloud[1])).split(path.sep).join('/'));
         continue;
       }
+      // iCloud 也可把整层文件夹卸成「.目录名.icloud」占位文件：里面所有笔记都读不到。
+      // 占位与文件同名同构（无法区分「目录占位」与「无扩展名文件占位」），按启发式处理：
+      // 带扩展名的是资源占位（图片/PDF 等，与笔记同步无关）静默跳过；不带扩展名的按目录占位
+      // 计入 unreadable（尾部带 '/' 前缀标记），上层 keepOld 按前缀保护整层内容不被误删。
+      if (cloud) {
+        if (!/\.[a-z0-9]{1,10}$/i.test(cloud[1])) {
+          unreadable.push(path.relative(root, path.join(dir, cloud[1])).split(path.sep).join('/') + '/');
+        }
+        continue;
+      }
       if (e.name.startsWith('.') || SKIP.has(e.name)) {
-        // 顺手清掉上次崩溃残留的写入临时文件：正在写的临时文件很新，超过 1 小时的一定是残留
-        if (e.isFile() && /^\..+\.tmp-/.test(e.name)) {
+        // 隐藏目录但非 iCloud 占位：静默跳过（.obsidian / .trash 等）
+        if (!e.isDirectory() && e.isFile() && /^\..+\.tmp-/.test(e.name)) {
+          // 顺手清掉上次崩溃残留的写入临时文件：正在写的临时文件很新，超过 1 小时的一定是残留
           const p = path.join(dir, e.name);
           try { const st = await fsp.stat(p); if (Date.now() - st.mtimeMs > 60 * 60 * 1000) await fsp.rm(p, { force: true }); } catch {}
         }
         continue;
       }
       const full = path.join(dir, e.name);
+      // 库内符号链接（用户的组织方式）不跟随、不读取，也绝不能被同步按「已删除」移进 .trash：
+      // 计作 unreadable 让上层 keepOld 原样保留
+      if (e.isSymbolicLink()) {
+        if (/\.(md|markdown)$/i.test(e.name)) unreadable.push(path.relative(root, full).split(path.sep).join('/'));
+        continue;
+      }
       if (e.isDirectory()) await walk(full);
       else if (e.isFile() && /\.(md|markdown)$/i.test(e.name)) { // 与软件内导入 isMd 同口径
         const relPath = path.relative(root, full).split(path.sep).join('/');
@@ -336,17 +369,22 @@ ipcMain.handle('vault:read', async (_e, root) => {
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
-ipcMain.handle('vault:write', async (_e, { root, rel, body }) => {
+ipcMain.handle('vault:write', async (_e, { root, rel, body, epoch }) => {
   try {
     if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
     const full = path.join(root, rel);
     if (!inside(root, full)) return { ok: false, error: '路径越界' };
     if (isSymlink(full)) return { ok: false, error: '目标是符号链接，拒绝写入' };
+    const stale = writeGuard(full, epoch);
+    if (stale) return { ok: true, stale: true }; // 过期写按成功返回：内容已有更新版本，渲染层无需重试留底
     const blocked = rejectIncomplete(full, body);
     if (blocked) return { ok: false, error: blocked };
     await snapshotBeforeWrite(root, full, body); // 覆盖前把盘上旧内容存进恢复快照库（失败不阻塞写盘）
     await fsp.mkdir(path.dirname(full), { recursive: true });
-    await atomicWrite(full, body);
+    // rename 前再验一次：写盘期间退出同步通道可能已用更新版本落盘（序号更大），本次迟到写必须让位
+    const guard = epoch ? () => (writeEpochs.get(path.resolve(full)) || 0) > epoch : null;
+    const wr = await atomicWrite(full, body, guard);
+    if (wr === 'stale') return { ok: true, stale: true };
     await pruneUp(root, path.dirname(full)).catch(() => {}); // 顺手清掉因改名/移动而空掉的目录
     return { ok: true };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
@@ -455,6 +493,9 @@ ipcMain.handle('vault:trash', async (_e, { root, rel }) => {
     if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
     const full = path.join(root, rel);
     if (!inside(root, full)) return { ok: false, error: '路径越界' };
+    // 库内符号链接是用户的组织方式，readMd 已按 unreadable 保留其内容——trash 绝不能把
+    // 符号链接本体移进 .trash（用户的库结构会被同步静默拆掉）
+    if (isSymlink(full)) return { ok: false, error: '目标是符号链接，拒绝移入回收站' };
     const trashDir = path.join(root, '.trash');
     await fsp.mkdir(trashDir, { recursive: true });
     // 随机后缀避免同毫秒同名互相覆盖（先删的内容也要能找回）
@@ -508,6 +549,7 @@ ipcMain.on('vault:flush-sync', (e, ops) => {
       const full = path.join(op?.root || '', rel);
       if (!op?.root || !rel || !inside(op.root, full)) { failed.push(rel); continue; }
       if (op.trash) {
+        if (isSymlink(full)) { failed.push(rel); continue; } // 与 vault:trash 同口径：符号链接不进回收站
         const trashDir = path.join(op.root, '.trash');
         fs.mkdirSync(trashDir, { recursive: true });
         const dest = path.join(trashDir, Date.now() + '-' + Math.random().toString(36).slice(2, 6) + '-' + path.basename(full));
@@ -515,14 +557,18 @@ ipcMain.on('vault:flush-sync', (e, ops) => {
         pruneUp(op.root, path.dirname(full)).catch(() => {});
       } else {
         if (isSymlink(full)) { failed.push(rel); continue; }
+        const stale = writeGuard(full, op?.epoch); // 同步通道也是一次写：过期序号不能回滚新内容
+        if (stale) continue; // 过期写按成功处理：不列入 failed，渲染层不会留底重试
         const blocked = rejectIncomplete(full, op.body);
         if (blocked) { failed.push(rel); continue; }
         snapshotBeforeWriteSync(op.root, full, op.body); // 退出写盘前的最后一道快照
         fs.mkdirSync(path.dirname(full), { recursive: true });
         const tmp = path.join(path.dirname(full), '.' + path.basename(full) + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8));
-        // 与 atomicWrite 同一套落盘纪律：fsync 后 rename，句柄 finally 关闭；任何一步失败都要清掉临时文件
+        // 与 atomicWrite 同一套落盘纪律：沿用原文件权限、fsync 后 rename，句柄 finally 关闭；失败清临时文件
+        let mode = 0o666;
+        try { mode = fs.statSync(full).mode & 0o777; } catch {}
         try {
-          const fd = fs.openSync(tmp, 'w');
+          const fd = fs.openSync(tmp, 'w', mode);
           try { fs.writeSync(fd, String(op.body ?? ''), null, 'utf8'); fs.fsyncSync(fd); }
           finally { try { fs.closeSync(fd); } catch {} }
           fs.renameSync(tmp, full);
@@ -641,7 +687,7 @@ const MIME = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', 
 // 视频不随副本复制，播放时回退到这里只读读取；名字必须精确对应，符号链接目录一律不认。
 function sourceRootOf(root) {
   const abs = path.resolve(String(root || ''));
-  const m = path.basename(abs).match(/^(.*) - Deep Notes$/);
+  const m = path.basename(abs).match(/^(.*) - Deep Notes$/i); // 与 prepare-copy 的复用判断同口径（大小写不敏感）
   if (!m || !m[1]) return null;
   const sib = path.join(path.dirname(abs), m[1]);
   try {
@@ -772,6 +818,10 @@ ipcMain.handle('vault:asset', async (_e, { root, ref }) => {
     if (!mime) return { ok: false, error: '不支持的格式' };
     // 视频走 deepnotes-asset:// 流式通道：base64 一部视频就几百 MB，绝不能走 IPC
     if (mime.startsWith('video/')) return { ok: false, error: '视频请走流式通道' };
+    // 体积上限：图片 / PDF 经 base64 走 IPC 会放大 4/3 倍并整读进内存——超大文件（数百 MB
+    // 扫描版 PDF）直接拒读，渲染层显示占位而不是把两个进程的内存一起打满
+    const ASSET_MAX = 64 * 1024 * 1024; // 64MB
+    try { if ((await fsp.stat(full)).size > ASSET_MAX) return { ok: false, error: '文件过大（超 64MB），请直接到知识库文件夹查看' }; } catch {}
     const buf = await fsp.readFile(full);
     return { ok: true, mime, data: buf.toString('base64') };
   } catch (err) { return { ok: false, error: String(err?.message || err) }; }
@@ -809,17 +859,26 @@ ipcMain.handle('vault:meta-write', async (_e, {root, data}) => {
   } catch (err) { return {ok: false, error: String(err?.message || err)}; }
 });
 // 退出前的同步 meta 落盘：beforeunload 里异步 vault:meta-write 可能来不及执行，
-// 走 sendSync 阻塞通道（与 vault:flush-sync 同口径：只校验白名单，不弹框）
-ipcMain.on('vault:meta-write-sync', (e, {root, data} = {}) => {
+// 走 sendSync 阻塞通道（与 vault:flush-sync 同口径：只校验白名单，不弹框）。
+// 带 dirty（本会话改过的顶层键）时先同步重读盘上 meta 再只盖这些键——长驻会话直接整对象
+// 覆盖会把另一台机器（iCloud 同步）本次会话的改动整块回滚；返回实际落盘的合并结果供渲染层对齐基线。
+ipcMain.on('vault:meta-write-sync', (e, {root, data, dirty} = {}) => {
   try {
     if (!root || !data || !rootAuthorized(root)) { e.returnValue = {ok: false, error: '未授权'}; return; }
     const full = path.join(path.resolve(root), META_REL);
     if (!inside(root, full)) { e.returnValue = {ok: false, error: '越界'}; return; }
+    let payload = data;
+    if (Array.isArray(dirty) && dirty.length) {
+      let disk = {};
+      try { const d = JSON.parse(fs.readFileSync(full, 'utf8')); if (d && typeof d === 'object' && !Array.isArray(d)) disk = d; } catch {}
+      payload = {...disk};
+      for (const k of dirty) if (Object.prototype.hasOwnProperty.call(data, k)) payload[k] = data[k];
+    }
     fs.mkdirSync(path.dirname(full), {recursive: true});
     const tmp = full + '.tmp-' + process.pid;
-    fs.writeFileSync(tmp, JSON.stringify(data));
+    fs.writeFileSync(tmp, JSON.stringify(payload));
     fs.renameSync(tmp, full); // 原子替换，与 atomicWrite 同思路
-    e.returnValue = {ok: true};
+    e.returnValue = {ok: true, data: payload};
   } catch (err) { e.returnValue = {ok: false, error: String(err?.message || err)}; }
 });
 

@@ -96,3 +96,41 @@ test('写前快照：整棵树周期性清理、同毫秒文件名去重、同�
   assert.match(syncBody, /names\[names\.length - 1\]/);
   assert.match(syncBody, /capSnapshots/);
 });
+
+// —— 写序号守卫（慢盘上的迟到旧写不得回滚已落盘的新内容）——
+
+test('写序号守卫：vault:write 与退出同步通道都按序号拦截过期写', () => {
+  assert.match(src, /const writeEpochs = new Map\(\)/);
+  assert.match(src, /function writeGuard\(full, epoch\)/);
+  assert.match(src, /const stale = writeGuard\(full, epoch\)/); // vault:write
+  assert.match(src, /const stale = writeGuard\(full, op\?\.epoch\)/); // vault:flush-sync
+  assert.match(src, /const guard = epoch \? \(\) => \(writeEpochs\.get\(path\.resolve\(full\)\) \|\| 0\) > epoch : null/);
+  // rename 前最后一刻再过一次：写盘期间同步通道可能已用更新版本落盘
+  assert.match(src, /if \(guard && guard\(\)\)/);
+  // 过期写按成功返回：内容已有更新版本，渲染层不必重试也不必留底
+  assert.match(src, /\{ ok: true, stale: true \}/);
+  const pre = readFileSync(join(__TEST_ROOT__, 'electron/preload.cjs'), 'utf8');
+  assert.match(pre, /write: \(root, rel, body, epoch\)/);
+});
+
+test('meta 退出同步写：只盖脏键，先把盘上值读回来合并（不许整对象覆盖回滚对面机器）', () => {
+  assert.match(src, /Array\.isArray\(dirty\) && dirty\.length/);
+  assert.match(src, /payload = \{\.\.\.disk\}/);
+  assert.match(src, /e\.returnValue = \{ok: true, data: payload\}/); // 回传实际落盘值供渲染层对齐基线
+  const pre = readFileSync(join(__TEST_ROOT__, 'electron/preload.cjs'), 'utf8');
+  assert.match(pre, /metaWriteSync: \(root, data, dirty\)/);
+});
+
+test('符号链接：库内软链不读取、不入回收站（用户自建的库结构不被同步拆掉）', () => {
+  assert.match(src, /e\.isSymbolicLink\(\)/);
+  assert.match(src, /目标是符号链接，拒绝移入回收站/);
+  assert.match(src, /目标是符号链接，拒绝写入/);
+  // 退出同步通道同样口径：软链既不写也不 trash
+  const syncBody = src.slice(src.indexOf("ipcMain.on('vault:flush-sync'"));
+  assert.match(syncBody, /isSymlink\(full\)/);
+});
+
+test('vault:asset：超大图片 / PDF 拒读，不放任数百 MB 经 base64 走 IPC', () => {
+  assert.match(src, /ASSET_MAX = 64 \* 1024 \* 1024/);
+  assert.match(src, /文件过大/);
+});

@@ -178,7 +178,10 @@ export async function writeMetaNow() {
           if (metaCache[k] === sent[k]) { metaCache[k] = payload[k]; metaDirty.delete(k); }
         } else if (!metaDirty.has(k)) metaCache[k] = payload[k];
       }
-      metaBase = {...metaCache};
+      // metaBase 对齐「实际落盘」的 payload：写盘期间用户又改的脏键（metaCache 里的新值还没上盘）
+      // 也必须取 payload 里的写出值——否则下一轮 mergeMetaList 会把盘上「多出来的已删项」当成
+      // 另一台机器的新增而补回（删除复活）。payload = 写前重读的盘上值 + 本次发送键的合并结果。
+      metaBase = {...payload};
       if (metaDirty.size) scheduleMeta(); // 写盘期间到达的新改动：补一轮写盘，绝不静默丢
     }
     // 写盘成功才广播：conceptStore 据此更新三向合并的 shadow（写失败不更新，shadow 不撒谎）
@@ -353,12 +356,21 @@ const queue = new Map(); // 'm:from' -> {root, from, to, move} | 't:rel' -> {roo
 let timer = null;
 const opKey = op => op.move ? 'm:' + op.from : op.trash ? 't:' + op.rel : 'w:' + op.rel;
 
+// 上一枚发出的写序号：保证严格递增，同毫秒入队也能分出先后。
+// 只用墙钟 Date.now() 的话，NTP 校正 / 手动改时间把时钟回拨时新写的序号会小于主进程
+// 记住的旧序号，被 writeGuard 当成「迟到的旧写」判 stale——渲染层按成功处理、不留底，
+// 这批编辑就静默丢了。
+let lastEpoch = 0;
+
 function enqueue(op) {
   // 同键仲裁（全局规则）：较新的编辑可以覆盖较旧的排队操作；旧值永远不反向顶掉新值。
   // 留底（_retry）里的旧 body 只能填进空位，不能盖掉本会话排队的更新版本。
   const k = opKey(op);
   const cur = queue.get(k);
   if (cur && !cur._retry && op._retry) return; // 旧回填不得覆盖队列里的新编辑
+  // 用墙钟毫秒做基准（渲染层重载后计数器会归零，纯自增会被主进程守卫永久拦住），
+  // 再用 lastEpoch 强制单调：既跨会话可比，又不惧时钟回拨。
+  op.epoch = (lastEpoch = Math.max(Date.now(), lastEpoch + 1));
   // Map 同键 set 不改变插入顺序：先 delete 再 set 把键移到队尾，
   // 否则「写→删→写」会执行成「写（新）→删」，新内容落盘即进回收站。
   if (cur) queue.delete(k);
@@ -491,12 +503,14 @@ function recordPending(ops) {
 // （iCloud / 网盘慢盘）时触发第二轮——两轮交错会让「trash 旧文件」晚于「write 新文件」
 // 落执行，把刚重建的文件又移进回收站。串行化：在途期间直接复用同一 Promise。
 let flushing = null;
+let inflight = null; // 本轮 flush 已从队列取走、正在 await IPC 的操作（退出同步通道要合并它们）
 export function flush() {
   if (flushing) return flushing;
   // finally 里补一轮：在途期间新入队的操作（防抖定时器撞上在途 Promise 时不会另排新定时器）
   // 不能滞留到下一次编辑才落盘——慢盘（iCloud）上这批 op 既不在盘上也不在留底里
   flushing = flushOnce().finally(() => {
     flushing = null;
+    inflight = null;
     if (queue.size) { clearTimeout(timer); timer = setTimeout(flush, 800); }
   });
   return flushing;
@@ -508,6 +522,7 @@ async function flushOnce() {
   if (!v || !queue.size) return;
   const ops = [...queue.values()];
   queue.clear();
+  inflight = ops; // 在途操作副本：beforeunload 的同步通道据此合并（异步 IPC 在慢盘上可能永不完结）
   // move 先于 write / trash 执行：新条目常插到队首抢走原名，被挤到消歧名的旧条目必须先把
   // 原名文件搬走、新条目随后才写原名——按入队序「写原名(新) → move 原名→消歧名」会把新条目
   // 刚落盘的文件搬到消歧名再被旧内容覆盖，新条目从盘上蒸发（同名新建即触发）
@@ -521,7 +536,7 @@ async function flushOnce() {
       if (!root) continue;
       const res = op.move ? await v.move(root, op.from, op.to)
         : op.trash ? await v.trash(root, op.rel)
-        : await v.write(root, op.rel, op.body);
+        : await v.write(root, op.rel, op.body, op.epoch);
       // 主进程把业务失败包成 {ok:false} 返回而非抛错：这里必须显式检查，
       // 否则越界 / 拒写 / 权限不足全被静默吞掉，重试与用户提示都不会触发
       if (res && res.ok === false) throw new Error(res.error || '写盘失败');
@@ -650,19 +665,42 @@ export function flushSyncNow() {
     clearTimeout(metaTimer);
     metaTimer = null;
     try {
-      const r = v.metaWriteSync(getRoot(), {...metaCache});
-      if (r?.ok) { metaDirty.clear(); metaBase = {...metaCache}; }
+      // 带上脏键清单：主进程先同步重读盘上 meta 再只盖脏键——长驻会话直接整对象覆盖，
+      // 会把另一台机器（iCloud 同步）本次会话的改动整块回滚
+      const r = v.metaWriteSync(getRoot(), {...metaCache}, [...metaDirty]);
+      if (r?.ok) {
+        metaDirty.clear();
+        // metaBase 对齐「实际落盘」的合并结果（含对面机器的非脏键改动），下次写盘的三向合并才不复活旧值
+        if (r.data && typeof r.data === 'object') metaBase = {...r.data};
+        else metaBase = {...metaCache};
+      }
     } catch {}
   }
   clearTimeout(timer);
   timer = null;
+  // 在途 flush（慢盘上仍 await IPC）的操作已不在队列里：合并进同步批次，否则这批编辑
+  // 既不落盘也不留底。队列里的同名新编辑优先（同键覆盖在途旧值），在途的异步写迟到后
+  // 由主进程写序号守卫拦住，不会把新内容回滚。
+  // 在途 op 必须整体排在当前队列之前：它们是被 flushOnce 取走的更早批次。追加到队尾会把
+  // 「删除 P（在途）→ 重建同名 P（新排队）」在退出时执行成「写 P → 回收 P」，刚重建的笔记
+  // 只剩 .trash 里一份（此类的操作 ordering 只靠插入序）。Map.set 同键不改插入位，所以
+  // 「先铺在途、再盖队列」即可让队列里的新编辑在同键上顶替在途旧值且保持靠后的位置。
+  if (inflight?.length) {
+    const merged = new Map();
+    for (const op of inflight) merged.set(opKey(op), op);
+    for (const [k, op] of queue) merged.set(k, op);
+    queue.clear();
+    for (const [k, op] of merged) queue.set(k, op);
+  }
   // 挂起写也搭上退出前的同步通道（最后一次机会）：排队进队列但留底先不清（审计 C2：
   // 先写后清，与 retryPending 同口径——同步通道执行期间进程被强杀时，留底还在盘上，
   // 下次启动照常重试，不会出现「留底已清、盘上未成」的窗口）。
   const pend = loadPending();
   if (pend.length) fillPending(pend); // 只填空位：队列里的新编辑优先于留底里的旧内容
   if (!queue.size) return;
-  // 与 flush 同一口径：move 先于 write / trash，同名新建场景下新条目的文件不被搬走覆盖
+  // 与 flush 同一口径：move 先于 write / trash，同名新建场景下新条目的文件不被搬走覆盖。
+  // op 自带 enqueue 时的写序号：主进程按序号守卫——在途异步写（慢盘上迟到）不会把同步通道
+  // 刚落盘的新内容回滚成旧版。
   const ops = [...queue.values()]
     .map(op => ({...op, root: op.root || getRoot()}))
     .sort((a, b) => (b.move ? 1 : 0) - (a.move ? 1 : 0));

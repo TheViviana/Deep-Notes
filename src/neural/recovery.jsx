@@ -63,13 +63,18 @@ export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy, currentBod
     return [...map.values()];
   }, [fileList]);
 
+  const pickFileVerRef = useRef(null); // 当次选择的版本：异步读取返回时若已改选，丢弃过期结果
   const pickFileVer = e => {
+    pickFileVerRef.current = e.file;
     setFileVer(e);
     setFileBody(null); // null = 读取中
     setFileErr(null);
     readFileSnapshot(e.file)
-      .then(body => { if (body == null) setFileErr('（读取失败 · Failed to read）'); else setFileBody(body); })
-      .catch(() => setFileErr('（读取失败 · Failed to read）'));
+      .then(body => {
+        if (pickFileVerRef.current !== e.file) return; // 快速连点两个版本：慢读取不得覆盖后选版本
+        if (body == null) setFileErr('（读取失败 · Failed to read）'); else setFileBody(body);
+      })
+      .catch(() => { if (pickFileVerRef.current === e.file) setFileErr('（读取失败 · Failed to read）'); });
   };
 
   // —— 版本对比：应用内快照 ↔ 当前内容 / 文件历史相邻两份，行级 diff 高亮 ——
@@ -90,6 +95,7 @@ export function RecoveryModal({onClose, onRestoreSnap, onRestoreCopy, currentBod
     const prev = group[idx + 1]; // 列表新 → 旧，下一份即更早版本
     if (!prev) { setDiff({title: '没有更早版本', rows: null, note: '这是该文件最早的一份快照 · Oldest snapshot'}); return; }
     const prevBody = await readFileSnapshot(prev.file);
+    if (pickFileVerRef.current !== fileVer.file) return; // 读取期间已改选其他版本：丢弃过期对比
     if (prevBody == null) { setDiff({title: '无法对比', rows: null, note: '上一份快照读取失败，无法参与对比 · Previous snapshot unreadable'}); return; }
     showDiff(lineDiff(prevBody, fileBody || ''), `${baseName(fileVer.rel)}：${fmtTs(prev.ts)} → ${fmtTs(fileVer.ts)}`);
   };

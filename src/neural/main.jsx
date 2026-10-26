@@ -665,8 +665,14 @@ function App() {
     if (t.length < 2) { setToast('名称太短，不做替换 · Too short to link'); return; }
     // 计数在渲染期一次算完再提交（写进惰性 updater 会被 React 提前求值 / StrictMode 双调用打乱）
     let n = 0;
-    const conv = body => String(body || '').split(/(\[\[[^\]]*\]\])/g).map(seg => seg.startsWith('[[') ? seg
-      : seg.replace(new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), () => { n++; return `[[${t}]]` })).join('');
+    // 代码围栏 / 行内代码 / URL 里的同名字面量不是「提及」：先摘出保护（与渲染管线的处理顺序一致），
+    // 否则一键转换会把代码示例与链接一并污染成 [[双链]] 并写盘
+    const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const nameRe = new RegExp(esc(t), 'g');
+    const conv = body => String(body || '')
+      .split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`|https?:\/\/[^\s)>\]]+|\[\[[^\]]*\]\])/g)
+      .map(seg => (/^```|^`|^https?:|^\[\[/.test(seg)) ? seg
+        : seg.replace(nameRe, () => { n++; return `[[${t}]]`; })).join('');
     const next = {
       works: works.map(x => x.title !== t ? {...x, body: conv(x.body)} : x),
       notes: notes.map(x => x.title !== t ? {...x, body: conv(x.body)} : x),
@@ -1553,11 +1559,18 @@ function App() {
     setPalette(false); setModal(null);
     const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
     const MODULES_ZH = {works: '作品库', notes: '方法库', drafts: '创作台', readings: '阅读区', archives: '档案区'};
+    // 本地资源降级：分享版没有知识库文件可回填——视频换成文字占位、库内引用图换成文件名文本，
+    // 不留死播放器与破图（与 printArticle 的打印版口径一致；dataURL 粘贴图原样内嵌不受影响）
+    const degrade = h => String(h)
+      .replace(/<video class="md-embed-video" data-asset="([^"]*)"(?: style="width:\d+px")? controls preload="metadata" playsinline><\/video>/g,
+        (m, f) => `<p>[视频：${esc(f)} · 本地视频请回 Deep Notes 播放]</p>`)
+      .replace(/<img class="md-embed" data-asset="([^"]*)" alt="[^"]*"(?: style="width:\d+px")?\s*\/?>/g,
+        (m, f) => `<span>[图片：${esc(f)}]</span>`);
     const groups = [['works', works], ['notes', notes], ['drafts', drafts], ['readings', readings], ['archives', archives]]
       .map(([kind, items]) => ({kind, name: MODULES_ZH[kind], items: items.map(x => ({
         id: esc(kind + '-' + x.id), title: esc(x.title || '未命名'),
         meta: esc([kind === 'readings' ? x.author : '', kind === 'works' ? (x.date || '').slice(0, 10) : kind === 'notes' ? (x.path || '').split('/').slice(1).join(' / ') : (x.date || '').slice(0, 10)].filter(Boolean).join(' · ')),
-        html: renderMarkdown(x.body || '')}))}))
+        html: degrade(renderMarkdown(x.body || ''))}))}))
       .filter(g => g.items.length);
     const total = groups.reduce((s, g) => s + g.items.length, 0);
     const chars = totalChars({works, notes, drafts, readings, archives});
@@ -1749,13 +1762,16 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
     let keepOld = null;
     if (unreadable.length) {
       const ghost = new Set(unreadable);
+      // 目录级 iCloud 占位（「.目录名.icloud」）以尾部 '/' 前缀标记：该前缀下的全部条目保留
+      const ghostDirs = unreadable.filter(r => r.endsWith('/'));
+      const isGhost = r => ghost.has(r) || ghostDirs.some(d => r.startsWith(d));
       // 真实磁盘路径优先：pathOf 是按标题反推的，标题 ≠ 文件名（外部导入的 .md 很常见）时匹配不上占位文件
       const relOfItem = (kind, x) => x.rel || pathOf(kind, x) || '';
       const cur = {works, notes, drafts, readings, archives};
       keepOld = {};
       for (const kind of Object.keys(cur)) {
         const fresh = new Set((data[kind] || []).map(x => relOfItem(kind, x)));
-        keepOld[kind] = (cur[kind] || []).filter(x => { const r = relOfItem(kind, x); return r && ghost.has(r) && !fresh.has(r); });
+        keepOld[kind] = (cur[kind] || []).filter(x => { const r = relOfItem(kind, x); return r && isGhost(r) && !fresh.has(r); });
       }
     }
     // 读文件期间用户又编辑过（内存数组引用已变）：本次快照不含这些新编辑，adopt 会把界面

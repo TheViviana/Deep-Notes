@@ -215,6 +215,9 @@ export function useVaultImages() {
         if (n.matches?.('.md-preview') || n.querySelector?.('.md-preview')) scan();
         else if (n.matches?.('img')) resolveVaultImg(n);
         else if (n.matches?.('video')) resolveVaultVideo(n);
+        // innerHTML 原地更新：新增块元素里包的图片/视频不在上面两个分支（容器本身没重挂载），
+        // 创作台对照栏 / 阅读模式切换内容时库内图片会破图、视频死播放器
+        else if (n.querySelector?.('img, video[data-asset]')) scan();
       }
     });
     mo.observe(document.body, {childList: true, subtree: true});

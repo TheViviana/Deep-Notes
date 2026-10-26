@@ -432,3 +432,66 @@ test('改名链折叠：同条目连续改名只落最终路径不留中间孤�
   assert.ok(writeOrig > moveIdx, `新条目写原名必须晚于让位 move（move=${moveIdx}, write=${writeOrig}）`);
   assert.ok(calls.some(c => c[0] === 'write' && /同名--\w+\.md$/.test(c[1])), '旧条目内容落在消歧路径');
 });
+
+test('写序号严格单调递增：时钟回拨后新写的序号不会被主进程判过期而静默丢写', async () => {
+  const realNow = Date.now;
+  const epochs = [];
+  // —— 写序号（epoch）：主进程据此拦「迟到的旧写」回滚刚落盘的新内容 ——
+  const fakeNow = realDateNow => {
+    Date.now = () => realDateNow;
+  };
+  window.deepnotes = {vault: {
+    write: async (root, rel, body, epoch) => { epochs.push(epoch); return {ok: true}; },
+    move: async () => ({ok: true}),
+    trash: async () => ({ok: true}),
+  }};
+  store.set(VAULT_ROOT_KEY, '/tmp/vault');
+
+  // 场景一：同 journal-item 连续入队（写账号 A 后立刻写 B），最终只下一次 op
+  fakeNow(1_700_000_000_000);
+  queueSync('drafts', {id: 'same', title: '同处理', body: 'a'}, null, null);
+  queueSync('drafts', {id: 'same', title: '同处理', body: 'b'}, null, null);
+  await flush();
+  assert.equal(epochs.length, 1, '同身份 op 应折叠为一次写');
+  const firstEpoch = epochs[0];
+
+  // 场景二：墙钟回拨（NTP 校正 / 手动改时间）后新写的序号仍必须向前；
+  // 否则新 op 的 epoch 小于主进程记住的最新序号，会被判 stale 静默跳过（渲染层当成功、不留底）
+  fakeNow(firstEpoch - 3_600_000);
+  queueSync('drafts', {id: 'after-rollback', title: '回拨后写', body: 'c'}, null, null);
+  await flush();
+  assert.equal(epochs.length, 2);
+  assert.ok(epochs[1] > firstEpoch, `回拨后新写的序号必须大于旧写（旧=${firstEpoch} 新=${epochs[1]}）`);
+  Date.now = realNow;
+});
+
+// —— 退出前的同步落盘：在途旧批次必须排在新排队的编辑之前 ——
+test('退出落盘：在途旧批次排在队列新编辑之前（重建的同名笔记不被随后的 trash 吃掉）', async () => {
+  let releaseTrash;
+  const slow = new Promise(r => { releaseTrash = r; });
+  let syncOrder = null;
+  window.deepnotes = {vault: {
+    write: async () => ({ok: true}),
+    move: async () => ({ok: true}),
+    trash: async () => { await slow; return {ok: true}; }, // iCloud 慢盘：trash 卡在 IPC
+    metaWriteSync: () => ({ok: true}),
+    flushSync: ops => {
+      syncOrder = ops.map(op => (op.trash ? 'trash:' : op.move ? 'move:' : 'write:') + (op.rel || op.from));
+      return {failed: []};
+    },
+  }};
+  // 删除 P → 起一轮 flush，trash 卡住，该 op 进入 inflight
+  queueSync('drafts', null, {id: 'del', title: 'P', body: '旧'}, null, null);
+  const inflightFlush = flush();
+  await new Promise(r => setTimeout(r, 0)); // 让 flushOnce 走到 await IPC
+  // 用户随后重建同名笔记 P（新排队，追加到队尾）
+  queueSync('drafts', {id: 'reborn', title: 'P', body: '新'}, null, null);
+  flushSyncNow(); // ⌘Q：同步通道要合并在途的 trash
+  releaseTrash();
+  await inflightFlush.catch(() => {});
+  // 顺序必须是先 trash 旧 P、再 write 新 P：反过来会把刚重建的笔记直接送进 .trash
+  assert.deepEqual(syncOrder, [
+    'trash:03-创作台/正在写/P.md',
+    'write:03-创作台/正在写/P.md',
+  ]);
+});

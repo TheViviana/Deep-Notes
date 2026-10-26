@@ -21,7 +21,7 @@ contextBridge.exposeInMainWorld('deepnotes', {
   vault: {
     chooseDir: () => ipcRenderer.invoke('vault:choose-dir'),
     read: root => ipcRenderer.invoke('vault:read', root),
-    write: (root, rel, body) => ipcRenderer.invoke('vault:write', { root, rel, body }),
+    write: (root, rel, body, epoch) => ipcRenderer.invoke('vault:write', { root, rel, body, epoch }),
     // 原子移动 / 重命名（rename）：改名不再拆成 trash + write 两步
     move: (root, from, to) => ipcRenderer.invoke('vault:move', { root, from, to }),
     trash: (root, rel) => ipcRenderer.invoke('vault:trash', { root, rel }),
@@ -37,7 +37,7 @@ contextBridge.exposeInMainWorld('deepnotes', {
     metaRead: root => ipcRenderer.invoke('vault:meta-read', root),
     metaWrite: (root, data) => ipcRenderer.invoke('vault:meta-write', {root, data}),
     // 退出前的同步 meta 落盘（beforeunload 里异步通道来不及）
-    metaWriteSync: (root, data) => ipcRenderer.sendSync('vault:meta-write-sync', {root, data}),
+    metaWriteSync: (root, data, dirty) => ipcRenderer.sendSync('vault:meta-write-sync', {root, data, dirty}),
     // 文件恢复：列出写前快照 / 读取某份快照内容（恢复界面数据源）
     snapshots: root => ipcRenderer.invoke('vault:snapshots', { root }),
     snapshotRead: (root, file) => ipcRenderer.invoke('vault:snapshot-read', { root, file }),

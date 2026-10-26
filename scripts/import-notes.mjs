@@ -240,8 +240,10 @@ const tmp = target + '.tmp-' + process.pid;
 writeFileSync(tmp, out);
 renameSync(tmp, target);
 if (!opt.out) {
-  // 数据落定后才切指针
-  writeFileSync(INDEX, indexFor('my-data.js'));
+  // 数据落定后才切指针（同样的临时文件 + rename 原子写：崩溃不留半截 index.js，半截即白屏）
+  const itmp = INDEX + '.tmp-' + process.pid;
+  writeFileSync(itmp, indexFor('my-data.js'));
+  renameSync(itmp, INDEX);
   // index.js 被 git 跟踪而 my-data.js 被忽略时，提交会让别人克隆后构建失败——醒目提醒而不是默默改
   const tracked = spawnSync('git', ['-C', ROOT, 'ls-files', '--error-unmatch', 'src/data/index.js'], {stdio: 'pipe'}).status === 0;
   const ignored = spawnSync('git', ['-C', ROOT, 'check-ignore', '-q', 'src/data/my-data.js'], {stdio: 'pipe'}).status === 0;

@@ -57,6 +57,9 @@ function persistAi(state) {
   try { localStorage.setItem(AI_KEY, JSON.stringify(state)); }
   catch (err) { console.warn('localStorage 写入失败 · Save failed:', err); }
 }
+// 用户在本会话里动过密钥输入框（改值或清掉）：此后一切异步回填 / 明文升级都必须让位，
+// 否则「删掉旧密钥」会被解密回调或明文升级把旧密钥又写上盘、塞回面板。
+let keyUserEdited = false;
 function loadAi() {
   let cfg;
   try { cfg = JSON.parse(localStorage.getItem(AI_KEY)) || {}; } catch { cfg = {}; }
@@ -65,22 +68,44 @@ function loadAi() {
     const b64 = cfg.apiKey.slice(ENC_PREFIX.length);
     cfg.apiKey = '';
     window.electronAPI?.keyDecrypt(b64).then(res => {
-      if (res?.ok && res.data) { aiState = {...aiState, apiKey: res.data}; for (const f of aiSubs) f(aiState); }
+      // 用户可能在解密回调返回前已手动输入新密钥：不得用旧密钥覆盖新输入
+      if (res?.ok && res.data && !keyUserEdited && !aiState.apiKey) { aiState = {...aiState, apiKey: res.data}; for (const f of aiSubs) f(aiState); }
     }).catch(() => {});
   } else if (cfg.apiKey && canSecure()) {
     // 旧版明文密钥：读进内存后立即升级为密文落盘
     const plain = cfg.apiKey;
     cfg.apiKey = '';
     window.electronAPI.keyEncrypt(plain).then(res => {
-      if (res?.ok) persistAi({...aiState, apiKey: ENC_PREFIX + res.data});
-      else persistAi({...aiState, apiKey: ''}); // 加密失败则清掉明文不落盘：重启后需重填（内存也不留，与上面 cfg.apiKey='' 一致）
-    }).catch(() => persistAi({...aiState, apiKey: ''}));
+      // 落盘侧清理只动「仍是那份旧明文」的存储：回调晚到时用户可能已输入新密钥，不能误清
+      const clearStale = () => {
+        try {
+          const cur = JSON.parse(localStorage.getItem(AI_KEY)) || {};
+          if (cur.apiKey === plain) persistAi({...cur, apiKey: ''});
+        } catch {}
+      };
+      if (!res?.ok) { clearStale(); return; } // 加密失败则清掉明文不落盘：重启后需重填
+      // 升级回填只在密钥未被用户改动时执行：回调晚到时用户的新输入优先
+      // 用户已亲手改过密钥（含改完又清空）：不再回填、不再升级；
+      // 但盘上仍躺着那份旧明文时照样清掉——它已经不是用户认可的密钥，留着只是风险
+      if (keyUserEdited) { clearStale(); return; }
+      if (aiState.apiKey && aiState.apiKey !== plain) return;
+      persistAi({...aiState, apiKey: ENC_PREFIX + res.data}); // 落盘密文
+      aiState = {...aiState, apiKey: plain}; // 内存回填明文（升级前 cfg 已清空，不回填则本次会话 AI 无密钥可用）
+      for (const f of aiSubs) f(aiState);
+    }).catch(() => {
+      try {
+        const cur = JSON.parse(localStorage.getItem(AI_KEY)) || {};
+        if (cur.apiKey === plain) persistAi({...cur, apiKey: ''});
+      } catch {}
+    });
   }
   return cfg;
 }
 let aiState = {provider: 'deepseek', baseUrl: '', apiKey: '', model: '', gear: 'off', ...loadAi()};
 const aiSubs = new Set();
 function writeAi(patch) {
+  // 只认「密钥字段的值真的变了」：面板整份配置的写入不该被误判成用户编辑密钥
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'apiKey') && patch.apiKey !== aiState.apiKey) keyUserEdited = true;
   aiState = {...aiState, ...patch};
   persistAi(aiState);
   for (const f of aiSubs) f(aiState);

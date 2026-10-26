@@ -856,9 +856,12 @@ export function MindMapWindow({open, onClose, onOpenContent, initialSel, onToDra
   useEffect(() => { undoStack.current = []; redoStack.current = []; lastPushAt.current = 0; setHist({undo: 0, redo: 0}); }, [sel]);
   // ⌘/Ctrl+Z 撤销、⌘/Ctrl+Shift+Z（或 ⌘Y）重做：输入框内不拦截
   const histRef = useRef(null); histRef.current = {undo, redo};
+  const miniRef = useRef(mini); miniRef.current = mini;
   useEffect(() => {
     if (!open) return;
     const onKey = e => {
+      // 迷你模式（整窗收起为小球）下组件仍挂载：看不见导图时 ⌘Z 不能静默改数据
+      if (miniRef.current) return;
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       const t = e.target;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;

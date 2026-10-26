@@ -75,6 +75,19 @@ export function PrivateNotes() {
     // syncedId 保护：切笔记的瞬间标题/正文还是上一条的旧值，此时不能启动防抖，
     // 否则 cleanup 会把旧内容写进刚选中的新笔记（覆盖新笔记正文）。
     if (!unlocked || !sel || !cur || syncedId !== sel) return;
+    // 只点开不编辑不算改动：无 dirty 判定会让「逐条浏览」把每条笔记的 ts 刷成当前时间
+    // （列表乱序、hint 误报「已保存」，连库时还白写一次 meta 触发同步）
+    const same = title === (cur.title || '') && body === (cur.body || '') &&
+      JSON.stringify(parseTags(tagsInput)) === JSON.stringify(cur.tags || []);
+    if (same) {
+      // 内容又被改回原样：这轮编辑整体作废——必须同时撤掉上一轮排的定时器与待落盘快照。
+      // 只 return 会把「打了字又 800ms 内删回去」的中间值照样写进笔记（防抖窗口本就是给用户
+      // 反悔用的），切笔记 / 锁定时的补写也会把这份中间值硬写回去。
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+      pending.current = null;
+      return;
+    }
     clearTimeout(saveTimer.current);
     const snapshot = {id: sel, title, body, tags: parseTags(tagsInput)};
     pending.current = snapshot;
