@@ -18,6 +18,7 @@ import {isTranslatable, translateText} from './translate';
 import {aiRuntime, AiFab} from './ai';
 import {CommandPalette} from './CommandPalette';
 import {RecoveryModal} from './recovery';
+import {TasksModal, toggleTaskInSource} from './tasks';
 import {conceptExtras, setConceptSink, hydrateConceptMeta} from './conceptStore';
 import {useVaultImages, resolveAllInDoc} from './images';
 import {totalChars, recordDaily, loadStats, dailyDeltas, streakDays, knownVaults} from './writingStats';
@@ -1992,6 +1993,7 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
     {group: '数据 Data', icon: 'outlink', zh: '导入选定内容', en: 'Import selected files', run: () => setModal('import-files')},
     {group: '数据 Data', icon: 'search', zh: '批量替换', en: 'Find & replace', run: () => setModal('replace')},
     {group: '数据 Data', icon: 'pulse', zh: '写作统计', en: 'Writing stats', run: () => setModal('stats')},
+    {group: '数据 Data', icon: 'check', zh: '任务清单', en: 'Task list', run: () => setModal('tasks')},
     {group: '数据 Data', icon: 'outlink', zh: '导出分享版 HTML', en: 'Export shareable HTML', run: exportVaultHtml},
     {group: '数据 Data', icon: 'save', zh: '导出全部 Markdown', en: 'Export all Markdown', run: exportVault},
     {group: '数据 Data', icon: 'replay', zh: '恢复数据快照', en: 'Restore data snapshot', run: restoreSnapshot},
@@ -2115,6 +2117,7 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
           <button className="pill" disabled={!curItem?.item} title={curItem?.item ? `导出《${curItem.item.title}》为单文件 HTML（自带排版，可直接分享）` : '先打开一篇内容 · Open a piece first'} onClick={exportCurrentHtml}><Icon name="outlink" size={14}/>分享 · 单文件 HTML <em>Share</em></button>
           <button className="pill" onClick={() => setModal('recovery')}><Icon name="replay" size={14}/>文件恢复 <em>Recovery</em></button>
           <button className="pill" onClick={() => setModal('stats')}><Icon name="pulse" size={14}/>写作统计 <em>Stats</em></button>
+          <button className="pill" onClick={() => setModal('tasks')}><Icon name="check" size={14}/>任务清单 <em>Tasks</em></button>
           <button className="pill ghost" onClick={resetToSample}>切回示例数据 <em>Reset</em></button>
         </div>
         <p>知识库 <em>Vault</em>：<strong>{snap.account}</strong> · 导入日期 <em>Imported</em>：{snap.capturedAt}</p>
@@ -2145,6 +2148,16 @@ footer{grid-column:1/-1;padding:18px 22px;color:#6f7873;font-size:11.5px;border-
       </div>
     </Modal>}
     {modal === 'recovery' && <RecoveryModal onClose={close} onRestoreSnap={restoreSnapVersion} onRestoreCopy={restoreFileCopy} currentBodyOf={(kind, id) => { const arr = {works, notes, drafts, readings, archives}[kind] || []; const it = arr.find(x => String(x.id) === String(id)); return it ? (it.body || '') : null; }}/>}
+    {/* 任务清单：全库任务汇总；勾选走 patchItem 回写正文（全局 diff 自动写盘），点标题跳原文 */}
+    {modal === 'tasks' && <TasksModal works={works} notes={notes} drafts={drafts} readings={readings} archives={archives} onClose={close}
+      onJump={id => { close(); openContent(id); }}
+      onToggle={(kind, id, ti) => {
+        const arr = {works, notes, drafts, readings, archives}[kind] || [];
+        const it = arr.find(x => String(x.id) === String(id));
+        if (!it) return;
+        const next = toggleTaskInSource(it.body, ti);
+        if (next != null) patchItem(kind, id, {body: next});
+      }}/>}
     {/* 导入去向选择：自动按文件夹分类，或全部归入指定模块；选定后再挑文件夹 */}
     {modal === 'import' && <Modal title="导入知识库" en="Import vault" onClose={close}>
       <div className="about import-pick">

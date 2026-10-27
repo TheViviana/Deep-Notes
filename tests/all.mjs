@@ -9,3 +9,4 @@ import './electron.test.mjs';
 import './metaMerge.test.mjs';
 import './vaultCompare.test.mjs';
 import './mindmap.test.mjs';
+import './task-list.test.mjs';

@@ -4,6 +4,7 @@ import {Icon} from './icons';
 import {Analysis, Count} from './Analysis';
 import {ArticleView, LineMirror, renderMarkdown, readProgress} from './ArticleView';
 import {useWikiComplete, WikiSuggest, resolveTarget, scrollToAnchor, headingMap} from './wiki';
+import {toggleTaskInSource} from './tasks';
 import {useEditorEnhancers} from './plugins';
 import {conceptExtras, setConceptExtra, conceptReview, gradeConcept, paraCards, paraReview, deleteParaCard, gradePara} from './conceptStore';
 import {capable, getRoot} from './fileStore';
@@ -217,10 +218,20 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
   ], [works, drafts, draft?.id, notes]);
   const cmpTarget = cmpOn ? files.find(f => f.id === cmp.id) || null : null;
   const byName = useMemo(() => nameIndex(graph.nodes), [graph]);
-  // 阅读模式与对照栏共用：渲染 + [[双链]] 点击跳转（阅读模式 TOC 依赖编辑器滚动，故隐藏）
-  const readHtml = useMemo(() => readMode && draft ? renderMarkdown(draft.body) : '', [readMode, draft]);
+  // 阅读模式与对照栏共用：渲染 + [[双链]] 点击跳转（阅读模式 TOC 依赖编辑器滚动，故隐藏）；
+  // 阅读模式的任务复选框可点（taskIndex），对照栏渲染的是别的文件，保持只读
+  const readHtml = useMemo(() => readMode && draft ? renderMarkdown(draft.body, {taskIndex: true}) : '', [readMode, draft]);
   const cmpHtml = useMemo(() => cmpTarget ? renderMarkdown(cmpTarget.body) : '', [cmpTarget]);
   const jumpWiki = e => {
+    // 任务清单复选框：disabled（对照栏等只读渲染）不响应
+    const cb = e.target.closest?.('input.md-task');
+    if (cb) {
+      e.preventDefault();
+      if (cb.disabled || !draft) return;
+      const next = toggleTaskInSource(draft.body, +cb.dataset.ti);
+      if (next != null) change('body', next);
+      return;
+    }
     const a = e.target.closest('a[data-target]');
     if (!a) return;
     // 块引用 [[笔记#小节]]：目标是当前这篇时滚动到对应小节，否则跳到目标内容
@@ -382,9 +393,18 @@ export function Methods({graph, notes, setNotes, selected, setSelected, onGo, on
   const heads = useMemo(() => headingMap(graph), [graph]);
   const wiki = useWikiComplete({titles, areaRef: area, onChange: body => change('body', body), headings: heads});
   const fx = useEditorEnhancers({area, value: note?.body, onChange: body => change('body', body), wiki, title: note?.title, titles, preview: pv, previewMode: readMode ? 'preview' : 'edit', docId: 'note:' + note?.id});
-  const readHtml = useMemo(() => readMode && note ? renderMarkdown(note.body) : '', [readMode, note]);
+  const readHtml = useMemo(() => readMode && note ? renderMarkdown(note.body, {taskIndex: true}) : '', [readMode, note]);
   const byName = useMemo(() => nameIndex(graph.nodes), [graph]);
   const jumpWiki = e => {
+    // 任务清单复选框：data-ti 映射回源码第 n 个任务标记翻转
+    const cb = e.target.closest?.('input.md-task');
+    if (cb) {
+      e.preventDefault();
+      if (cb.disabled || !note) return;
+      const next = toggleTaskInSource(note.body, +cb.dataset.ti);
+      if (next != null) change('body', next);
+      return;
+    }
     const a = e.target.closest('a[data-target]');
     if (!a) return;
     // 块引用 [[笔记#小节]]：目标是当前这篇时滚动到对应小节，否则跳到目标内容

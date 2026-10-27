@@ -11,6 +11,7 @@ import {Icon} from './icons';
 import {useWikiComplete, WikiSuggest, resolveTarget, scrollToAnchor, headingMap} from './wiki';
 import {isVideoRef} from './images';
 import {headingAt} from './vaultRules';
+import {toggleTaskInSource} from './tasks';
 import {useEditorEnhancers, usePlugins, useNetwork} from './plugins';
 import {isTranslatable, translateText} from './translate';
 import {serialize, exportFiles, safeName, capable, getRoot} from './fileStore';
@@ -155,7 +156,14 @@ const TRUSTED_HTML = new RegExp('^<(?:'
 const videoTag = (ref, width = 0) =>
   PH_RE.test(String(ref || '')) ? esc(ref) // 占位符不得进 data-asset（还原时会注入 KaTeX HTML）
     : `<video class="md-embed-video" data-asset="${esc(ref)}"${width > 0 ? ` style="width:${width}px"` : ''} controls preload="metadata" playsinline></video>`;
+// 任务清单复选框：每次 renderMarkdown 调用前重置计数，data-ti 与 tasks.jsx 的源码扫描序号一一对应；
+// taskIndexOn=false 的只读消费方（ReadFull 等）渲染成 disabled，不产生「点了但没存」的错觉。
+// 该标签由 checkbox renderer 直接注入列表项输出，不经过 html token，TRUSTED_HTML 白名单无需放行。
+let taskCounter = 0, taskIndexOn = false;
 marked.use({renderer: {
+  checkbox({checked}) {
+    return `<input type="checkbox" class="md-task" data-ti="${taskCounter++}"${taskIndexOn ? '' : ' disabled'}${checked ? ' checked' : ''}> `;
+  },
   // 代码段在源码层也做了 < 转义（与正文同等防护），渲染前先还原再交给 hiCode 转义上色，
   // 否则 hiCode 的 esc() 会把 &lt; 二次转义成 &amp;lt; 显示成实体文字
   code({text, lang}) {
@@ -220,7 +228,9 @@ function renderKatex(tex, display) {
 //   数学/物理 $…$ 与 $$…$$、\(…\) 与 \[…\] → KaTeX（含 mhchem 化学式 \ce{}）；
 //   脚注 [^key] 引用 + [^key]: 定义（行首）→ 编号上标 + 文末脚注区。
 // 行内 $ 的判定从紧：$ 后不能是空白、$ 前不能紧贴字母/数字/$/反斜杠、$ 后不能紧跟数字（避开「价格 $5 和 $6」）。
-export function renderMarkdown(md) {
+export function renderMarkdown(md, opts = {}) {
+  taskCounter = 0; // 任务复选框序号每次渲染重置，与 tasks.jsx 源码扫描的口径一致
+  taskIndexOn = !!opts.taskIndex;
   // 入口剥掉 NUL 字符：占位符用 \u0000M{n}E\u0000 形状，正文里的字面 NUL 序列（外部文件可含）
   // 若不被清除，最终还原会把它替换成公式 HTML，用户原文被篡改；NUL 在 Markdown 里无合法用途
   md = String(md ?? '').replace(/\u0000/g, '');
@@ -884,7 +894,7 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
   // preview / previewMode 传入后，大纲目录（toc 插件）在预览模式同样可用：
   // 阅读区导入的书籍动辄几百页，没有目录无法快速跳章节
   const fx = useEditorEnhancers({area, value: work.body, onChange: body => onChange({body}), wiki, title: work.title, titles, preview: previewRef, previewMode: mode === 'preview' ? 'preview' : 'edit', docId: exportKind + ':' + work.id});
-  const html = useMemo(() => mode === 'preview' ? renderMarkdown(work.body) : '', [mode, work.body]);
+  const html = useMemo(() => mode === 'preview' ? renderMarkdown(work.body, {taskIndex: true}) : '', [mode, work.body]);
   // —— 文内查找（⌘F）：预览模式正文命中高亮 + 上一个 / 下一个 ——
   const [find, setFind] = useState(null); // {q, total, idx} | null
   const findInput = useRef(null);
@@ -1121,6 +1131,14 @@ export function ArticleView({work, graph, onChange, onClose, onGo, onOpenContent
     setHint('');
   };
   const onPreviewClick = e => {
+    // 任务清单复选框：data-ti 是本次渲染内的任务序号，映射回源码第 n 个任务标记翻转（代码块内不计入）
+    const cb = e.target.closest?.('input.md-task');
+    if (cb) {
+      e.preventDefault();
+      const next = toggleTaskInSource(work.body, +cb.dataset.ti);
+      if (next != null) onChange({body: next});
+      return;
+    }
     const a = e.target.closest('.md-wikilink');
     if (!a) return;
     // 块引用 [[笔记#小节]]：目标是当前这篇时滚动到对应小节，否则跳到目标内容
