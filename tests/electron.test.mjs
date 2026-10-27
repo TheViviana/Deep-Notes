@@ -9,6 +9,15 @@ import {join} from 'node:path';
 // （打包后 import.meta.url 指向临时 bundle，不能用它定位仓库文件）
 const src = readFileSync(join(__TEST_ROOT__, 'electron/main.cjs'), 'utf8');
 
+// 语法完整性：grep 式守护只看片段，一次编辑丢掉闭合括号就会带着语法错误进安装包（启动即白屏报错）。
+// node --check 只解析不执行，不依赖 electron 运行时，主进程与 preload 都查。
+test('electron 入口文件语法完整（node --check）', async () => {
+  const {execFileSync} = await import('node:child_process');
+  for (const f of ['electron/main.cjs', 'electron/preload.cjs']) {
+    execFileSync(process.execPath, ['--check', join(__TEST_ROOT__, f)], {stdio: 'pipe'});
+  }
+});
+
 test('readMd：iCloud 未下载占位（.原名.icloud）计入 unreadable，绝不静默跳过', () => {
   assert.match(src, /\\\.icloud\$\/i/);
   assert.match(src, /unreadable\.push/);

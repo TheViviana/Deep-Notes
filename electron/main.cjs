@@ -705,6 +705,8 @@ ipcMain.handle('vault:prepare-copy', async (_e, srcRoot) => {
     // 审计 v2-②：新副本不再自动登记授权白名单——导入后的首次读取会触发一次系统确认框，
     // 允许后永久记住；自动授权点会让「只授权用户亲自选过的目录」形同虚设
     return { ok: true, dir, skippedAssets: skipped || undefined };
+  } catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
 
 // 读知识库内的图片等资源 → base64（阅读视图渲染 ![[名字]] 与相对路径引用图）。
 // ref 可以是相对路径，也可以只是文件名（Obsidian 的 ![[文件名]] 不带路径）：找不到就按文件名全库搜。

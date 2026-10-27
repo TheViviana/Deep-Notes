@@ -37,6 +37,14 @@ else {
     else ok('正文存在');
   }
 }
+
+// 1.5 Electron 主进程 / preload 语法完整（node --check 只解析不执行）
+console.log('Electron 入口语法');
+for (const f of ['electron/main.cjs', 'electron/preload.cjs']) {
+  try { execFileSync(process.execPath, ['--check', join(ROOT, f)], {stdio: 'pipe'}); ok(f); }
+  catch { fail(`${f} 语法错误（node --check 未通过）`); }
+}
+
 for (const f of ['skills/neural-creator-dashboard/SKILL.md', 'README.md', 'AGENTS.md', 'package.json']) {
   if (existsSync(join(ROOT, f)) && readFileSync(join(ROOT, f), 'utf8').includes('YOUR_GITHUB_USER')) {
     (release ? errors : warnings).push(`${f} 里还有仓库地址占位符 YOUR_GITHUB_USER${release ? '' : '（发布前替换）'}`);
