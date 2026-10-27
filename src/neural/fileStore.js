@@ -288,8 +288,10 @@ export function resolveRels(kind, items) {
 // 空数组直接丢弃。多行展开仍在同一 frontmatter 块内，后续键不受影响。
 // 含 `: # " ' , [ ]` 或首尾空白的标量用双引号包裹并转义内部引号；块标量按 `|` 回写。
 // 只在真正会被 YAML 误解析时才加引号：冒号后接空格、空格后接 #、引号/方括号/逗号/换行、首尾空白、
-// 以及以 # 开头（YAML 里 `key: #foo` 的值会被当成注释吞掉）
-const NEED_QUOTE = /:\s|\s#|["'`,\[\]\n]|^\s|\s$|^$|^#/;
+// 以 # 开头（YAML 里 `key: #foo` 的值会被当成注释吞掉）；整块恰为块标量指示符（| > |- >+ 等）
+// 也必须加引号——否则写回后 parse 把它当块标量吞掉，值静默变空；以 `- `/`? `/& * ! % @ 开头
+// 加引号是为了标准 YAML（Obsidian）兼容：这些前导符在 YAML 里有结构含义，裸写会让整个 frontmatter 报错
+const NEED_QUOTE = /:\s|\s#|["'`,\[\]\n]|^\s|\s$|^$|^#|^[|>][+-]?$|^[-?]\s|^[&*!%@]/;
 function quoteVal(v) {
   const s = String(v);
   if (!NEED_QUOTE.test(s)) return s;
@@ -415,6 +417,41 @@ let pendingList = (() => { // 内存为唯一事实源：模块加载时从 loca
   try { const v = JSON.parse(localStorage.getItem(PENDING_KEY)); return Array.isArray(v) ? v : []; } catch { return []; }
 })();
 function loadPending() { return pendingList; }
+// —— 在途写留底（write-ahead，独立于挂起写通道）：操作从防抖队列取走、IPC 归还前是
+// 「既不在队列也不在留底」的裸窗口，慢盘（iCloud）上可达数十秒——进程在此窗口被杀
+// （崩溃 / 断电 / 强退），这批编辑无处可寻。取走时静默留底（不触发横幅事件：正常流程
+// 写完即清，不需要用户注意），成功后精确移除；崩溃残留由下方启动合并进挂起写（横幅
+// 通道接管，下次启动照常补写）。留底写不进（localStorage 满）则静默退化为修复前行为。
+const INFLIGHT_KEY = CONFIG.storagePrefix + '-inflight-writes-v1';
+function saveInflight(ops) {
+  let prev = [];
+  try { prev = JSON.parse(localStorage.getItem(INFLIGHT_KEY)) || []; } catch {}
+  const map = new Map(prev.map(op => [opKey(op), op])); // 与残留合并：一次失败待重试的 op 不被新批次顶掉
+  for (const op of ops) map.set(opKey(op), op);
+  try { localStorage.setItem(INFLIGHT_KEY, JSON.stringify([...map.values()])); } catch {}
+}
+function clearInflightOps(settled) {
+  const drop = new Set(settled.map(opKey));
+  let rest = [];
+  try { rest = JSON.parse(localStorage.getItem(INFLIGHT_KEY)) || []; } catch {}
+  rest = rest.filter(op => !drop.has(opKey(op)));
+  try { rest.length ? localStorage.setItem(INFLIGHT_KEY, JSON.stringify(rest)) : localStorage.removeItem(INFLIGHT_KEY); } catch {}
+}
+function clearInflightAll() {
+  try { localStorage.removeItem(INFLIGHT_KEY); } catch {}
+}
+try { // 崩溃残留的在途写留底 → 合并进挂起写（幂等补写；挂起写里同键的更新鲜版本优先）
+  const leftover = JSON.parse(localStorage.getItem(INFLIGHT_KEY));
+  if (Array.isArray(leftover) && leftover.length) {
+    const map = new Map(loadPending().map(op => [opKey(op), op]));
+    for (const op of leftover) if (!map.has(opKey(op))) map.set(opKey(op), op);
+    pendingList = [...map.values()];
+    pendingRecorded = pendingList.length > 0;
+    try { localStorage.setItem(PENDING_KEY, JSON.stringify(pendingList)); } catch {}
+    clearInflightAll();
+    try { window.dispatchEvent(new Event('deepnotes-pending-changed')); } catch {}
+  }
+} catch {}
 const IDB_NAME = 'deepnotes-pending', IDB_STORE = 'kv';
 function idbRun(mode, fn) {
   return new Promise((resolve, reject) => {
@@ -533,11 +570,13 @@ async function flushOnce() {
   const ops = [...queue.values()];
   queue.clear();
   inflight = ops; // 在途操作副本：beforeunload 的同步通道据此合并（异步 IPC 在慢盘上可能永不完结）
+  saveInflight(ops); // 写前留底：进程在 IPC 归还前被杀，重启后残留由启动合并补写（见 INFLIGHT_KEY）
   // move 先于 write / trash 执行：新条目常插到队首抢走原名，被挤到消歧名的旧条目必须先把
   // 原名文件搬走、新条目随后才写原名——按入队序「写原名(新) → move 原名→消歧名」会把新条目
   // 刚落盘的文件搬到消歧名再被旧内容覆盖，新条目从盘上蒸发（同名新建即触发）
   const ordered = [...ops.filter(op => op.move), ...ops.filter(op => !op.move)];
   const failedOps = [];
+  const settledOps = []; // IPC 已归还且结果确定：成功（盘上已有）或二次失败（已转挂起写留底）
   let requeued = false;
   for (const op of ordered) {
     try {
@@ -550,14 +589,16 @@ async function flushOnce() {
       // 主进程把业务失败包成 {ok:false} 返回而非抛错：这里必须显式检查，
       // 否则越界 / 拒写 / 权限不足全被静默吞掉，重试与用户提示都不会触发
       if (res && res.ok === false) throw new Error(res.error || '写盘失败');
+      settledOps.push(op);
     } catch (err) {
       // 非破坏性增量：瞬时故障（磁盘休眠 / 占用等）不丢操作，稍后自动重试一次；
       // 重试仍失败则持久留底为「挂起写」（启动时跳过同步防覆盖 + 提示重试），
       // 内容始终还留在浏览器里
-      if (!op._retry) { queue.set(opKey(op), {...op, _retry: true}); requeued = true; }
-      else failedOps.push(op);
+      if (!op._retry) { queue.set(opKey(op), {...op, _retry: true}); requeued = true; } // 一次失败：留在在途留底，等重试落定
+      else { failedOps.push(op); settledOps.push(op); } // 二次失败：挂起写通道接管，在途留底可清
     }
   }
+  if (settledOps.length) clearInflightOps(settledOps);
   if (requeued) { clearTimeout(timer); timer = setTimeout(flush, 2500); }
   if (failedOps.length) {
     recordPending(failedOps);
@@ -689,37 +730,34 @@ export function flushSyncNow() {
   }
   clearTimeout(timer);
   timer = null;
-  // 在途 flush（慢盘上仍 await IPC）的操作已不在队列里：合并进同步批次，否则这批编辑
-  // 既不落盘也不留底。队列里的同名新编辑优先（同键覆盖在途旧值），在途的异步写迟到后
-  // 由主进程写序号守卫拦住，不会把新内容回滚。
-  // 在途 op 必须整体排在当前队列之前：它们是被 flushOnce 取走的更早批次。追加到队尾会把
-  // 「删除 P（在途）→ 重建同名 P（新排队）」在退出时执行成「写 P → 回收 P」，刚重建的笔记
-  // 只剩 .trash 里一份（此类的操作 ordering 只靠插入序）。Map.set 同键不改插入位，所以
-  // 「先铺在途、再盖队列」即可让队列里的新编辑在同键上顶替在途旧值且保持靠后的位置。
-  if (inflight?.length) {
-    const merged = new Map();
-    for (const op of inflight) merged.set(opKey(op), op);
-    for (const [k, op] of queue) merged.set(k, op);
-    queue.clear();
-    for (const [k, op] of merged) queue.set(k, op);
-  }
   // 挂起写也搭上退出前的同步通道（最后一次机会）：排队进队列但留底先不清（审计 C2：
   // 先写后清，与 retryPending 同口径——同步通道执行期间进程被强杀时，留底还在盘上，
   // 下次启动照常重试，不会出现「留底已清、盘上未成」的窗口）。
   const pend = loadPending();
   if (pend.length) fillPending(pend); // 只填空位：队列里的新编辑优先于留底里的旧内容
-  if (!queue.size) return;
-  // 与 flush 同一口径：move 先于 write / trash，同名新建场景下新条目的文件不被搬走覆盖。
-  // op 自带 enqueue 时的写序号：主进程按序号守卫——在途异步写（慢盘上迟到）不会把同步通道
-  // 刚落盘的新内容回滚成旧版。
-  const ops = [...queue.values()]
-    .map(op => ({...op, root: op.root || getRoot()}))
-    .sort((a, b) => (b.move ? 1 : 0) - (a.move ? 1 : 0));
+  if (!queue.size && !inflight?.length) return;
+  // 与 flush 同口径：move 先于 write / trash，同名新建场景下新条目的文件不被搬走覆盖。
+  // 但 move-first 必须「分批」做：在途批次整体先于当前队列批次。若跨批全局排序把队列里的
+  // move 提到在途 write 之前，「在途 w:P（内容更新）+ 队列 m:P→Q + w:Q」会执行成 P 先被改名
+  // Q、在途写又以旧一版内容把 P 重建出来——同一 deepnotes-id 的 P/Q 幽灵副本长期并存。
+  // 同键去重：队列里的新编辑顶替在途旧值（在途的异步写迟到后由主进程写序号守卫拦住，
+  // 不会把同步通道刚落盘的新内容回滚成旧版）；在途 op 不再预先并入队列，否则同一 op
+  // 会在两个批次里各出现一次（退出时重复 trash / 重复写）。
+  const queueOps = [...queue.values()].map(op => ({...op, root: op.root || getRoot()}));
+  const qKeys = new Set(queueOps.map(opKey));
+  const inflightOps = (inflight || []).filter(op => !qKeys.has(opKey(op)));
+  const moveFirst = list => [...list.filter(op => op.move), ...list.filter(op => !op.move)];
+  const ops = [...moveFirst(inflightOps), ...moveFirst(queueOps)];
   queue.clear();
   try {
     const res = v.flushSync(ops);
+    clearInflightAll(); // 同步批次已出结果：成功项盘上已有、失败项由下方收敛进挂起写——在途留底使命完成
     const bad = Array.isArray(res?.failed) ? res.failed : null;
-    if (bad && bad.length) {
+    if (bad === null) {
+      // 返回形状不符（如旧版主进程没有 flush-sync 处理器、sendSync 拿到 undefined）：
+      // 结果未知按失败处理——应用正在退出，绝不能按「成功」清掉留底
+      recordPending(ops);
+    } else if (bad.length) {
       // 退出前也没写成：留底收敛为仍失败的（写成功的从记录清除）
       const at = new Date().toISOString();
       savePending(ops.filter(op => bad.includes(op.rel || op.from || '')).map(op => ({...op, at})));
@@ -728,6 +766,7 @@ export function flushSyncNow() {
     }
   } catch (err) {
     recordPending(ops); // 同步通道整体异常：宁可全部留底（recordPending 按 opKey 合并，旧记录不丢）
+    clearInflightAll(); // 已由 recordPending 接管
     console.warn('退出落盘失败 · Flush on quit failed:', err);
   }
 }
@@ -752,8 +791,13 @@ export function queueSync(kind, item, old, relMap, oldRelMap) {
   }
   if (old && oldRel && oldRel !== newRel) {
     let chainFrom = oldRel;
+    // 折叠只动本条目所在模块目录里的 op：用户手写重复 deepnotes-id 导致两模块同 id 时，
+    // 不限路径会把另一模块排队的 write/move 误判成「这条的中间态」删掉
+    const dirPrefix = (kind === 'notes' ? '05-方法库 methods' : DIRS[kind]) + '/';
     for (const [k, op] of queue) {
       if (op.iid !== item.id) continue;
+      const p = op.rel || op.to || op.from || '';
+      if (!p.startsWith(dirPrefix)) continue;
       if (op.move) chainFrom = op.from; // 链头：这条条目最早一次排队的源路径
       queue.delete(k); // 中间的 move / write 全部作废，由本次收敛后的操作取代
     }

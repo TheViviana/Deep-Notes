@@ -74,7 +74,13 @@ export function useWorks() {
     const t = setTimeout(() => {
       pendingWorks = null;
       try { localStorage.setItem(WORKS_KEY, JSON.stringify({seeded: true, items: works})); }
-      catch (err) { console.warn('localStorage 写入失败 · Save failed:', err); }
+      // 写失败（配额满）不能停在 console：作品是体积最大的内容模块（正文 + 粘贴图 dataURL），
+      // 恰恰最容易触顶。派事件给 main.jsx 弹全局通知（与 useSaved 的 trySaveLocal 同一口径），
+      // 提示用户尽快导出备份。
+      catch (err) {
+        console.warn('localStorage 写入失败 · Save failed:', err);
+        try { window.dispatchEvent(new CustomEvent('deepnotes-local-save-failed')); } catch {}
+      }
     }, 300);
     return () => clearTimeout(t);
   }, [works, diskMode]);

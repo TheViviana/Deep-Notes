@@ -2,10 +2,14 @@
 // PDF 走 pdfParse.js（按需加载）；HTML 朴素转 Markdown；纯文本直接收录。
 import {headingAt} from './vaultRules';
 
-// 从纯文本中提取第一个标题（ATX 或 Setext），找不到返回 null
+// 从纯文本中提取第一个标题（ATX 或 Setext），找不到返回 null。
+// 跳过代码围栏：围栏里的 `# 注释` 不是标题（与 plugins.jsx parseOutline / ArticleView 大纲同一口径）
 function firstHeading(text) {
   const lines = String(text || '').split('\n');
+  let fence = false;
   for (let i = 0; i < lines.length; i++) {
+    if (/^ {0,3}(```|~~~)/.test(lines[i])) { fence = !fence; continue; }
+    if (fence) continue;
     const h = headingAt(lines, i);
     if (h) return h.text;
   }

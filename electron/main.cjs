@@ -36,7 +36,7 @@ function inside(root, target) {
     if (parent === cur) { t = path.resolve(String(target || '')); break; }
     cur = parent;
   }
-  return t === r || t.startsWith(r + path.sep);
+  return t === r || t.startsWith(r.endsWith(path.sep) ? r : r + path.sep); // 根即文件系统根（/）时不再拼出 //
 }
 // 目标本身是符号链接时直接拒绝（rename / writeFile 会穿过或搬运链接，语义都不对）。
 function isSymlink(p) {
@@ -100,7 +100,10 @@ async function ensureAuthorized(root) {
   if (!raw) return false; // 审计 v2-④：空 root 不弹框，杜绝把 cwd 误授权
   if (rootAuthorized(raw)) return true;
   const r = path.resolve(raw);
-  if (loadAuth().denied.has(r)) return false; // 用户明确拒绝过且已持久化：静默保持未授权，不再追问
+  const denied = loadAuth().denied;
+  if (denied.has(r)) return false; // 用户明确拒绝过且已持久化：静默保持未授权，不再追问
+  // denyRoot 同时登记解析路径与 realpath：这里也两种写法都查，否则改经符号链接写法访问同一库会重复弹框
+  try { if (denied.has(fs.realpathSync(r))) return false; } catch {}
   if (askedRoots.has(r)) return false;
   askedRoots.add(r);
   try {
@@ -114,7 +117,9 @@ async function ensureAuthorized(root) {
       cancelId: 1,
     });
     if (response === 0) { authorizeRoot(r); return true; }
-    denyRoot(r); // 拒绝也记下来：否则每次启动都对同一目录重复追问
+    // 只有点「拒绝」按钮（response===1）才持久化拒绝；按 ESC / 点关闭按钮同样返回 cancelId，
+    // 但那只是「现在不想决定」——记成永久拒绝后该库 403 且无界面解除通道，误按一次就废了
+    if (response === 1) denyRoot(r); // 拒绝也记下来：否则每次启动都对同一目录重复追问
   } catch {}
   return false;
 }
@@ -126,14 +131,18 @@ const SKIP = new Set(['.obsidian', '.trash', '.git', '.DS_Store', 'node_modules'
 const writeEpochs = new Map(); // 键 = 解析后的绝对路径
 function writeGuard(full, epoch) {
   if (!epoch) return null; // 旧客户端不带序号：维持原行为
+  // 序号必须是有限数：NaN 与一切比较恒为 false（守卫静默失效），超大值会让该路径此后
+  // 所有合法写入被误判过期且渲染层按成功处理——畸形序号一律按「无守卫」放行本写
+  const num = Number(epoch);
+  if (!Number.isFinite(num) || num <= 0) return null;
   const key = path.resolve(String(full));
   const latest = writeEpochs.get(key) || 0;
   // 记录的序号比当前墙钟还大：上次落盘后时钟被回拨（NTP 校正 / 手动改时间），序号基准
   // 已失效——不收敛的话，渲染层重载后（lastEpoch 归零、以回拨后的墙钟为基准）所有新写
   // 都会被误判成「迟到的旧写」静默跳过，且渲染层按成功处理、不留底。以本次写为新基准继续。
-  if (latest > Date.now()) { writeEpochs.set(key, epoch); return null; }
-  if (epoch < latest) return '已有更新的版本落盘，本次过期写入已跳过';
-  writeEpochs.set(key, epoch);
+  if (latest > Date.now()) { writeEpochs.set(key, num); return null; }
+  if (num < latest) return '已有更新的版本落盘，本次过期写入已跳过';
+  writeEpochs.set(key, num);
   return null;
 }
 
@@ -376,6 +385,7 @@ ipcMain.handle('vault:read', async (_e, root) => {
 ipcMain.handle('vault:write', async (_e, { root, rel, body, epoch }) => {
   try {
     if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
+    if (!rel) return { ok: false, error: '路径为空' }; // 与 flush-sync 同口径：空 rel 会让 full===root 借 t===r 混过 inside
     const full = path.join(root, rel);
     if (!inside(root, full)) return { ok: false, error: '路径越界' };
     if (isSymlink(full)) return { ok: false, error: '目标是符号链接，拒绝写入' };
@@ -399,8 +409,12 @@ ipcMain.handle('vault:write', async (_e, { root, rel, body, epoch }) => {
 ipcMain.handle('vault:saveAsset', async (_e, { root, name, mime, data }) => {
   try {
     if (!(await ensureAuthorized(root))) return { ok: false, error: '知识库文件夹未授权 · Vault root not authorized' };
+    // 扩展段禁「点」防 .. 上跳，也必须禁「/」「\」：'xx.png/a/b' 会借 path.join 在
+    // attachments 下建出任意深度的嵌套目录，'.md' 尾巴还会产出一个会被 readMd 当笔记读的假文件
+    if (/[/\\]/.test(String(name || ''))) return { ok: false, error: '非法资源名' };
     const sha = String(name || '').replace(/\.[^.]+$/, '');
     if (!/^[0-9a-f]{40}$/i.test(sha)) return { ok: false, error: '非法资源名' };
+    if (!/^[[\]a-z0-9]{1,12}$/i.test((String(name).match(/\.([^.]+)$/)?.[1]) || '')) return { ok: false, error: '非法资源名' };
     const sub = sha.slice(0, 2);
     const rel = path.posix.join('attachments', sub, name);
     const full = path.join(root, rel);
@@ -508,6 +522,11 @@ ipcMain.handle('vault:trash', async (_e, { root, rel }) => {
       if (err?.code === 'ENOENT') return; // 文件本就不存在，视为已删除
       throw err;
     });
+    // 进站即刷新 mtime：回收期按「进回收站那一刻」起算。原本依赖 rename 刷新 ctime，
+    // 但 exFAT / SMB / 旧内核 ext4 上 rename 不刷新 ctime，重挂载后还可能归零——
+    // 老文件刚删就会被 pruneTrash 当场物理清除。主动 utimes 让 TTL 锚点不依赖文件系统行为
+    const t = new Date();
+    await fsp.utimes(dest, t, t).catch(() => {});
     await pruneUp(root, path.dirname(full)).catch(() => {}); // 文件移走后目录空了就删掉，不在库里留空文件夹
     pruneTrash(root).catch(() => {}); // 顺手清掉超期的回收站文件
     return { ok: true };
@@ -558,6 +577,8 @@ ipcMain.on('vault:flush-sync', (e, ops) => {
         fs.mkdirSync(trashDir, { recursive: true });
         const dest = path.join(trashDir, Date.now() + '-' + Math.random().toString(36).slice(2, 6) + '-' + path.basename(full));
         try { fs.renameSync(full, dest); } catch (err) { if (err?.code !== 'ENOENT') throw err; }
+        // 与异步通道同口径：进站刷新 mtime，回收期不依赖文件系统的 ctime 行为
+        try { const t = new Date(); fs.utimesSync(dest, t, t); } catch {}
         pruneUp(op.root, path.dirname(full)).catch(() => {});
       } else {
         if (isSymlink(full)) { failed.push(rel); continue; }
@@ -646,15 +667,23 @@ ipcMain.handle('key-decrypt', (_e, b64) => {
 // 视频不复制——课程视频动辄数百 MB，复制进 iCloud 副本等于整库体积翻倍，
 // 播放时由 findAsset 回退到原始库只读读取（见下方 sourceRootOf）。
 const ASSET_RE = /\.(png|jpe?g|gif|webp|svg|bmp|avif|pdf)$/i;
-async function copyAssets(src, dest) {
+// 单文件 512MB 上限：源库里数 GB 的扫描版 PDF 会让 prepare-copy 长时间无反馈、副本体积翻倍。
+// 超限跳过并计数回报；正文引用该文件时由 findAsset 回退源库只读读取，内容不丢
+const ASSET_CAP = 512 * 1024 * 1024;
+async function copyAssets(src, dest, state = {skipped: 0}) {
   let entries;
-  try { entries = await fsp.readdir(src, { withFileTypes: true }); } catch { return; }
+  try { entries = await fsp.readdir(src, { withFileTypes: true }); } catch { return state; }
   for (const e of entries) {
     if (e.name.startsWith('.') || SKIP.has(e.name)) continue;
     const s = path.join(src, e.name), d = path.join(dest, e.name);
-    if (e.isDirectory()) { await fsp.mkdir(d, { recursive: true }); await copyAssets(s, d); }
-    else if (e.isFile() && ASSET_RE.test(e.name)) await fsp.copyFile(s, d).catch(() => {});
+    if (e.isDirectory()) { await fsp.mkdir(d, { recursive: true }); await copyAssets(s, d, state); }
+    else if (e.isFile() && ASSET_RE.test(e.name)) {
+      const st = await fsp.stat(s).catch(() => null);
+      if (!st || st.size > ASSET_CAP) { state.skipped++; continue; }
+      await fsp.copyFile(s, d).catch(() => {});
+    }
   }
+  return state;
 }
 
 ipcMain.handle('vault:prepare-copy', async (_e, srcRoot) => {
@@ -672,12 +701,10 @@ ipcMain.handle('vault:prepare-copy', async (_e, srcRoot) => {
     let dir = path.join(parent, base);
     for (let i = 2; fs.existsSync(dir); i++) dir = path.join(parent, `${base} ${i}`);
     await fsp.mkdir(dir, { recursive: true });
-    await copyAssets(resolved, dir);
+    const {skipped} = await copyAssets(resolved, dir);
     // 审计 v2-②：新副本不再自动登记授权白名单——导入后的首次读取会触发一次系统确认框，
     // 允许后永久记住；自动授权点会让「只授权用户亲自选过的目录」形同虚设
-    return { ok: true, dir };
-  } catch (err) { return { ok: false, error: String(err?.message || err) }; }
-});
+    return { ok: true, dir, skippedAssets: skipped || undefined };
 
 // 读知识库内的图片等资源 → base64（阅读视图渲染 ![[名字]] 与相对路径引用图）。
 // ref 可以是相对路径，也可以只是文件名（Obsidian 的 ![[文件名]] 不带路径）：找不到就按文件名全库搜。
@@ -898,8 +925,9 @@ ipcMain.on('vault:meta-write-sync', (e, {root, data, dirty, base} = {}) => {
       }
     }
     fs.mkdirSync(path.dirname(full), {recursive: true});
-    const tmp = full + '.tmp-' + process.pid;
+    const tmp = full + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8); // 随机段：崩溃残留不与下次写互顶
     fs.writeFileSync(tmp, JSON.stringify(payload));
+    try { const fd = fs.openSync(tmp, 'r'); fs.fsyncSync(fd); fs.closeSync(fd); } catch {} // fsync 再 rename：断电不留空/截断的 meta.json
     fs.renameSync(tmp, full); // 原子替换，与 atomicWrite 同思路
     e.returnValue = {ok: true, data: payload};
   } catch (err) { e.returnValue = {ok: false, error: String(err?.message || err)}; }
@@ -995,8 +1023,8 @@ function aiUrlAllowed(raw) {
   let u;
   try { u = new URL(String(raw || '')); } catch { return 'URL 无效'; }
   const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const loopback = host === 'localhost' || host === '::1' || /^127\./.test(host);
   if (u.protocol === 'http:') {
-    const loopback = host === 'localhost' || host === '::1' || /^127\./.test(host);
     if (!loopback) return '明文 http 仅允许本机地址（localhost / 127.0.0.1 / ::1）';
     // 回环地址也限制端口：省略端口（默认 80）同样拒绝——本地推理服务都带显式端口
     if (!LOCAL_PORTS.has(Number(u.port) || 0)) {
@@ -1004,8 +1032,13 @@ function aiUrlAllowed(raw) {
     }
   } else if (u.protocol !== 'https:') {
     return '仅允许 http(s) 地址';
+  } else if (loopback) {
+    // https 回环此前不限端口，架空了整个白名单设计（本机任意端口的 TLS 服务都可被打）。
+    // 公网 https 不受限；本机回环无论协议都只放行常见本地服务端口
+    if (!LOCAL_PORTS.has(Number(u.port) || 0)) {
+      return `本机地址仅允许常见本地服务端口（${[...LOCAL_PORTS].sort((a, b) => a - b).join(' / ')}）`;
+    }
   }
-  const loopback = host === 'localhost' || host === '::1' || /^127\./.test(host);
   if (!loopback && (
     /^(10\.|192\.168\.|169\.254\.|0\.)/.test(host)
     || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
@@ -1020,6 +1053,8 @@ function privateIp(ip) {
   const s = String(ip || '');
   if (/^::ffff:/i.test(s)) return privateIp(s.slice(7));
   if (/^(10\.|192\.168\.|169\.254\.|0\.|127\.)/.test(s) || /^172\.(1[6-9]|2\d|3[01])\./.test(s)) return true;
+  // CGNAT 100.64.0.0/10 与基准测试段 198.18.0.0/15：同属不可路由段，DNS rebinding 同样要打进来
+  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(s) || /^198\.1[89]\./.test(s)) return true;
   return /^(::1$|::|f[cd][0-9a-f]{2}:|fe80:)/i.test(s);
 }
 
@@ -1079,13 +1114,14 @@ ipcMain.handle('ai-fetch', async (_event, { url, headers, body }) => {
 // chunk 直接发给发起方即可，无需多路复用。空闲 90s（无新 chunk）自动中止：总时长不限——
 // 长文生成几分钟是常态，卡死的判据是「不再有数据」而不是「总时间」。
 ipcMain.handle('ai-fetch-stream', async (event, { url, headers, body }) => {
+  let idle = null; // 提出 try：异常路径也要清，否则定时器残留 90 秒后对已中止的 controller 空触发
   try {
     const blocked = aiUrlAllowed(url);
     if (blocked) return { ok: false, status: 0, error: `请求被拒绝：${blocked}` };
     const hostBlocked = await aiHostAllowed(url);
     if (hostBlocked) return { ok: false, status: 0, error: `请求被拒绝：${hostBlocked}` };
     const ctrl = new AbortController();
-    let idle = setTimeout(() => ctrl.abort(new Error('响应空闲超过 90 秒，已中止')), 90_000);
+    idle = setTimeout(() => ctrl.abort(new Error('响应空闲超过 90 秒，已中止')), 90_000);
     const res = await net.fetch(String(url), {
       method: 'POST',
       headers,
@@ -1120,6 +1156,7 @@ ipcMain.handle('ai-fetch-stream', async (event, { url, headers, body }) => {
     clearTimeout(idle);
     return { ok: true, status: res.status };
   } catch (err) {
+    if (idle) clearTimeout(idle);
     return { ok: false, status: 0, error: String(err?.message || err) };
   }
 });

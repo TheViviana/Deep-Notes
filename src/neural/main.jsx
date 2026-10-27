@@ -241,7 +241,10 @@ function ReadFull({r, graph, onClose, onGo, onOpenContent}) {
   // 弹窗可能在翻译进行中被关闭：卸载后停止取任务、不再 setState（与 ArticleView 同一套 alive 口径）
   const alive = useRef(true);
   useEffect(() => () => { alive.current = false; }, []);
-  useEffect(() => { setTrans({phase: 'idle', done: 0, total: 0}); setHint(''); }, [src, r]);
+  // 翻译代数：src/r 切换或「收起译文」时递增，旧 worker 的完成回调据此作废——
+  // 否则进行中切「查看原文」再切回，残留 worker 会把已被重置的 idle 状态改回 done（按钮显示假完成）
+  const transGen = useRef(0);
+  useEffect(() => { transGen.current += 1; setTrans({phase: 'idle', done: 0, total: 0}); setHint(''); }, [src, r]);
   const outline = useMemo(() => src || !tocOn ? [] : parseOutline(r.body), [src, tocOn, r.body]);
   const jumpHead = line => {
     if (!box.current) return;
@@ -273,20 +276,21 @@ function ReadFull({r, graph, onClose, onGo, onOpenContent}) {
     const queue = nodes.filter(el => isTranslatable(el.textContent));
     if (!queue.length) { setHint('没有需要翻译的外语段落 · Nothing foreign to translate'); return; }
     setTrans({phase: 'running', done: 0, total: queue.length});
+    const gen = transGen.current;
     const out = [];
     let done = 0;
     const worker = async () => {
       while (queue.length) {
-        if (!alive.current) return; // 弹窗已关闭：停止取任务、不再 setState
+        if (!alive.current || transGen.current !== gen) return; // 弹窗已关闭或视图已切换：停止取任务、不再 setState
         const el = queue.shift();
         try { out.push([el, await translateText(el.textContent)]); } catch { out.push([el, null]); }
         done += 1;
-        if (!alive.current) return;
+        if (!alive.current || transGen.current !== gen) return;
         setTrans(t => ({...t, done}));
       }
     };
     await Promise.all([worker(), worker(), worker()]);
-    if (!alive.current) return; // 卸载后 DOM 节点已失效，不再回填译文
+    if (!alive.current || transGen.current !== gen) return; // 卸载后 DOM 节点已失效 / 已切视图，不再回填译文
     for (const [el, text] of out) {
       if (!text || !el.isConnected || el.querySelector('.md-trans')) continue;
       const span = document.createElement('span');
@@ -297,6 +301,7 @@ function ReadFull({r, graph, onClose, onGo, onOpenContent}) {
     setTrans(t => ({...t, phase: 'done'}));
   };
   const restoreTrans = () => {
+    transGen.current += 1; // 作废仍在跑的旧 worker：收起译文后不允许它再回填
     box.current?.querySelectorAll('.md-trans').forEach(s => s.remove());
     setTrans({phase: 'idle', done: 0, total: 0});
     setHint('');
@@ -486,7 +491,8 @@ function App() {
   useEffect(() => {
     history.replaceState(null, '', page === 'home' ? location.pathname : '#' + page);
     const key = `dn-scroll-${page}`;
-    const saved = sessionStorage.getItem(key);
+    let saved = null;
+    try { saved = sessionStorage.getItem(key); } catch (_) {} // 隐私模式 / 存储被禁时与同文件其余存储调用一致地静默降级
     window.scrollTo({top: saved ? parseInt(saved, 10) || 0 : 0});
   }, [page]);
   // 离开页面时保存当前滚动位置
@@ -511,6 +517,7 @@ function App() {
   // —— 桌面版文件夹知识库：内容变化全局 diff 后写回 .md（导入时已在原库旁建好副本并 setRoot） ——
   // 不侵入各处 CRUD：每次渲染对比上一份快照，新增/修改 → 写文件，删除 → 移入 .trash。
   const prevContent = useRef(null);
+  const replacedRef = useRef(0); // importFiles 的 updater 把「更新了几条同名」带出 StrictMode 双调用
   // adoptThrough：adoptData 整体替换后的第一轮 diff 是否写透盘。导入 / 恢复快照 = true
   // （新副本要靠这轮全量写盘生成内容）；启动读盘与外部改动同步 = false——内存刚被盘上
   // 内容灌满，照常 diff 会把全库每个文件重写一遍（mtime 全变、iCloud 全量重传），必须抑制。
@@ -579,12 +586,16 @@ function App() {
     // 附属数据（概念定义 / 复习进度 / 闪念箱 / 空分类）写库失败：不静默，让用户知道这次改动没落盘
     const metaFail = () => showGlobalNotice('附属数据未能写入知识库（.deepnotes/meta.json 读写失败），本次的概念定义 / 复习进度等改动可能未保存 · Meta write failed');
     window.addEventListener('deepnotes-meta-write-failed', metaFail);
+    // 作品模块（worksStore）未走 trySaveLocal：写满时代为弹同款通知，不能只在 console 留痕
+    const localFail = () => showGlobalNotice(STORAGE_ERR + '，建议 ⌘K「导出全部 Markdown」尽快备份 · Export backup advised');
+    window.addEventListener('deepnotes-local-save-failed', localFail);
     // IndexedDB 补灌完成后再对齐一次（审计 v2-⑦）：补灌事件可能早于本监听器注册，只靠事件会漏
     pendingReady.then(sync).catch(() => {});
     return () => {
       window.removeEventListener('deepnotes-pending-changed', sync);
       window.removeEventListener('deepnotes-pending-persist-failed', failNote);
       window.removeEventListener('deepnotes-meta-write-failed', metaFail);
+      window.removeEventListener('deepnotes-local-save-failed', localFail);
     };
   }, []);
   async function retryPendingWrites() {
@@ -1397,12 +1408,12 @@ function App() {
       : `会在「${srcName}」旁新建「${srcName} - Deep Notes」副本作为你的知识库文件夹（副本初始为空，导入完成后按结果生成 .md）：之后的编辑会实时写回副本，原文件夹内容保持不变。`}` : '';
     const ok = window.confirm(`将从「${srcName}」导入：${where}。${desktopNote}\n\n这会替换当前浏览器里的全部文章、选题和草稿，确定继续吗？`);
     if (!ok) return;
-    let copyDir = null;
+    let copyDir = null, skippedAssets = 0;
     if (srcDir) {
       setTarget(target);
       const copy = await prepareCopy(srcDir);
       if (copy?.ok) {
-        await setRoot(copy.dir); copyDir = copy.dir; // await：先把旧队列写进旧库再换根目录
+        await setRoot(copy.dir); copyDir = copy.dir; skippedAssets = copy.skippedAssets || 0; // await：先把旧队列写进旧库再换根目录
         // 新库的附属数据（闪念箱 / 概念定义 / 段落闪卡 / 手动空分类）与本机合并，再把本机版本写过去
         const meta = await loadMeta();
         if (meta) {
@@ -1420,7 +1431,7 @@ function App() {
     // 不应被 adoptData keepFolders=false 误清后再空写盘上）；新建副本照常清空。
     // 复用库的内容刚从盘上解析出来，灌入不写透（through=false）——否则首轮 diff 把每个文件
     // 重写一遍（mtime 全变、iCloud 全量重传、写前快照刷屏）；新建副本为空才需要写透生成 .md。
-    adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${copyDir ? ` · 已写入「${copyDir.replace(/\/+$/, '').split('/').pop()}」` : ''}`, reuse, !reuse);
+    adoptData(data, `已导入知识库：文章 ${data.counts.works} · 笔记 ${data.counts.notes} · 选题 ${data.counts.ideas} · 草稿 ${data.counts.drafts}${data.counts.readings ? ` · 阅读 ${data.counts.readings}` : ''}${data.counts.archives ? ` · 档案 ${data.counts.archives}` : ''}${copyDir ? ` · 已写入「${copyDir.replace(/\/+$/, '').split('/').pop()}」` : ''}${skippedAssets ? ` · ${skippedAssets} 个超过 512MB 的资源未复制进副本（仍在原文件夹，视频可正常播放）` : ''}`, reuse, !reuse);
     try { localStorage.setItem(FILES_KEY, String(data.counts.all)); } catch {} // 文件数基线：自动同步的「拒绝不完整覆盖」以此为参照
   }
 
@@ -1437,7 +1448,6 @@ function App() {
     if (!data.counts.all || !fresh.length) { setToast('所选文件里没有可识别的 Markdown 内容 · Nothing to import'); return; }
     saveSnapshot(); // 写前快照，⌘K「恢复数据快照」可回退本次合并
     const canon = s => String(s || '').trim().toLowerCase();
-    let replaced = 0;
     // 同标题视为同一条：保留原 id（选中态 / 反向链接不断）。replaceFields 列出的字段才被文件
     // 覆盖，且空值不覆盖（空 body / 空 author 不会抹掉现有内容）——应用内手工维护的
     // 数据（作品指标、阅读分类、笔记路径）不在列表里，合并永远不会清掉它们。
@@ -1467,6 +1477,7 @@ function App() {
       };
       const adds = [];
       const addIdx = new Map(); // 同批文件内部的同标题去重：后者按「更新」合并进前者，不重复追加
+      let replaced = 0;
       for (const f of items) {
         const k = canon(f.title);
         const i = k ? idx.get(k) : undefined;
@@ -1476,46 +1487,72 @@ function App() {
         if (k) addIdx.set(k, adds.length);
         adds.push(f);
       }
-      return reid ? [...out, ...adds.map((x, i) => reid(x, i))] : [...out, ...adds];
+      return {out, replaced};
     };
+    // 合并一律走函数式 updater：pickMdFiles/parseVault 的 await 窗口（数秒）里用户仍可编辑，
+    // 闭包数组会把窗口内的编辑静默回滚（连库模式还会把回滚值写盘）。StrictMode 下 updater
+    // 可能双调用，replaced 经 ref 带出、以最后一次为准。
+    const maxNum = (list, re) => list.reduce((m, x) => Math.max(m, Number(String(x.id).match(re)?.[1]) || 0), 0);
     if (target === 'works') {
-      const base = works.reduce((m, w) => Math.max(m, Number(String(w.id).match(/^w(\d+)$/)?.[1]) || 0), 0);
-      setWorks(mergeByTitle(works, fresh, (x, i) => ({...x, id: 'w' + (base + fresh.length + i + 1)}),
-        f => ['title', 'direction', 'tags', 'body', ...(fmHas(f, FM_DATE_WORKS) ? ['date'] : []), ...(fmHas(f, FM_MEDIA) ? ['media'] : [])]));
+      setWorks(list => {
+        const r = mergeByTitle(list, fresh, (x, i) => ({...x, id: 'w' + (maxNum(list, /^w(\d+)$/) + fresh.length + i + 1)}),
+          f => ['title', 'direction', 'tags', 'body', ...(fmHas(f, FM_DATE_WORKS) ? ['date'] : []), ...(fmHas(f, FM_MEDIA) ? ['media'] : [])]);
+        replacedRef.current = r.replaced;
+        return r.out;
+      });
     } else if (target === 'methods') {
       // 新笔记的 path 不能和现有笔记撞车（同 path 会互相覆盖一个文件）；撞了就在文件名后追加 id 短码。
       // 替换同名条目不动 path：文件原地更新，不会在知识库里搬家。
       // 消歧循环必须有界且保底唯一：短码追加 8 次后仍撞车（极端同名批量导入）时，
       // 退回数字后缀递增到空位为止——任何输入都必须落到一条没人占用的路径
-      const usedPaths = new Set(notes.map(x => x.path));
-      const rePath = f => {
-        let p = f.path;
-        if (usedPaths.has(p)) {
-          let dedup = p.replace(/\.md$/, `--${shortId(f.id)}.md`);
-          for (let n = 2; usedPaths.has(dedup) && n < 1000; n++) dedup = p.replace(/\.md$/, `--${shortId(f.id)}-${n}.md`);
-          if (usedPaths.has(dedup)) dedup = p.replace(/\.md$/, `-${Date.now()}.md`);
-          p = dedup;
-        }
-        usedPaths.add(p);
-        return {...f, path: p};
-      };
-      const base = notes.reduce((m, n) => Math.max(m, Number(String(n.id).match(/^n(?:ote-)?(\d+)$/)?.[1]) || 0), 0);
-      setNotes(mergeByTitle(notes, fresh.map(rePath), (x, i) => ({...x, id: 'n' + (base + fresh.length + i + 1)}), ['title', 'body']));
+      setNotes(list => {
+        const usedPaths = new Set(list.map(x => x.path));
+        const rePath = f => {
+          let p = f.path;
+          if (usedPaths.has(p)) {
+            let dedup = p.replace(/\.md$/, `--${shortId(f.id)}.md`);
+            for (let n = 2; usedPaths.has(dedup) && n < 1000; n++) dedup = p.replace(/\.md$/, `--${shortId(f.id)}-${n}.md`);
+            if (usedPaths.has(dedup)) dedup = p.replace(/\.md$/, `-${Date.now()}.md`);
+            p = dedup;
+          }
+          usedPaths.add(p);
+          return {...f, path: p};
+        };
+        const r = mergeByTitle(list, fresh.map(rePath), (x, i) => ({...x, id: 'n' + (maxNum(list, /^n(?:ote-)?(\d+)$/) + fresh.length + i + 1)}), ['title', 'body']);
+        replacedRef.current = r.replaced;
+        return r.out;
+      });
     } else if (target === 'ideas') {
       // 导入的选题 id 可能是字符串（frontmatter deepnotes-id / 稳定散列），新增条目改用带时间戳的 id，避免与数字 id 撞车
       const stamp = 'idea-' + Date.now();
-      setIdeas(mergeByTitle(ideas, fresh, (x, i) => ({...x, id: `${stamp}-${i}`}),
-        f => ['title', ...(fmHas(f, ['platform', '平台']) ? ['platform'] : []), ...(fmHas(f, ['priority', '优先级']) ? ['priority'] : []), ...(fmHas(f, ['status', '状态']) ? ['status'] : []), ...(fmHas(f, ['note', '备注', 'description', '简介']) ? ['note'] : [])]));
+      setIdeas(list => {
+        const r = mergeByTitle(list, fresh, (x, i) => ({...x, id: `${stamp}-${i}`}),
+          f => ['title', ...(fmHas(f, ['platform', '平台']) ? ['platform'] : []), ...(fmHas(f, ['priority', '优先级']) ? ['priority'] : []), ...(fmHas(f, ['status', '状态']) ? ['status'] : []), ...(fmHas(f, ['note', '备注', 'description', '简介']) ? ['note'] : [])]);
+        replacedRef.current = r.replaced;
+        return r.out;
+      });
     } else if (target === 'drafts') {
-      setDrafts(mergeByTitle(drafts, fresh, (x, i) => ({...x, id: 'draft-' + Date.now() + '-' + i}), ['title', 'body']));
+      setDrafts(list => {
+        const r = mergeByTitle(list, fresh, (x, i) => ({...x, id: 'draft-' + Date.now() + '-' + i}), ['title', 'body']);
+        replacedRef.current = r.replaced;
+        return r.out;
+      });
     } else if (target === 'readings') {
-      setReadings(mergeByTitle(readings, fresh, (x, i) => ({...x, id: 'reading-' + Date.now() + '-' + i}),
-        f => ['title', 'author', 'source', 'folder', 'body', ...(fmHas(f, FM_DATE_READ) ? ['date'] : [])]));
+      setReadings(list => {
+        const r = mergeByTitle(list, fresh, (x, i) => ({...x, id: 'reading-' + Date.now() + '-' + i}),
+          f => ['title', 'author', 'source', 'folder', 'body', ...(fmHas(f, FM_DATE_READ) ? ['date'] : [])]);
+        replacedRef.current = r.replaced;
+        return r.out;
+      });
     } else if (target === 'archives') {
-      setArchives(mergeByTitle(archives, fresh, (x, i) => ({...x, id: 'archive-' + Date.now() + '-' + i}),
-        f => ['title', 'body', ...(fmHas(f, FM_DATE_ARCH) ? ['date'] : [])]));
+      setArchives(list => {
+        const r = mergeByTitle(list, fresh, (x, i) => ({...x, id: 'archive-' + Date.now() + '-' + i}),
+          f => ['title', 'body', ...(fmHas(f, FM_DATE_ARCH) ? ['date'] : [])]);
+        replacedRef.current = r.replaced;
+        return r.out;
+      });
     }
-    setToast(`已导入 ${fresh.length} 条到「${MERGE_ZH[target]}」${replaced ? `（更新 ${replaced} 条同名）` : ''} · Imported`);
+    setToast(`已导入 ${fresh.length} 条到「${MERGE_ZH[target]}」${replacedRef.current ? `（更新 ${replacedRef.current} 条同名）` : ''} · Imported`);
   }
   async function resetToSample() {
     if (!window.confirm('切回虚构示例数据？当前浏览器里的文章、选题和草稿会被清空替换。')) return;

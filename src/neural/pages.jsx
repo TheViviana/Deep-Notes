@@ -186,7 +186,8 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
   const [inboxOpen, setInboxOpen] = useState(false); // 闪念箱抽屉
   // 左侧草稿列表可收起：收起后正文区左移占满，方便边读边开思维导图浮动窗
   const [listHidden, setListHidden] = useLocalState(CONFIG.storagePrefix + '-drafts-list-v1', false);
-  const change = (key, value) => setDrafts(drafts.map(d => d.id === draft.id ? {...d, [key]: value} : d));
+  // 函数式 updater：闭包 drafts 在连发变更（自动配对/斜杠命令同帧二次 onChange）时会丢上一笔
+  const change = (key, value) => setDrafts(ds => ds.map(d => d.id === draft.id ? {...d, [key]: value} : d));
   const titles = useMemo(() => graph.nodes.filter(n => CONTENT.has(n.kind) && n.id !== 'draft:' + draft?.id).map(n => ({id: n.id, title: n.path?.split('/').pop().replace(/\.md$/, '') || n.title, short: n.short || n.title, kind: n.kind})), [graph, draft?.id]);
   const heads = useMemo(() => headingMap(graph), [graph]);
   const wiki = useWikiComplete({titles, areaRef: area, onChange: body => change('body', body), headings: heads});

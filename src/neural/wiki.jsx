@@ -45,6 +45,9 @@ export function useWikiComplete({titles, areaRef, onChange, headings}) {
     // 偏移校验：菜单打开时的 [[ 上下文已不在此处（切换草稿/笔记后 textarea 被程序化换值，
     // 无 input 事件、菜单残留），按旧偏移切割新正文会把双链插错位置——直接关菜单不误插
     if (el.value.slice(s - 2, s) !== '[[' || el.value.slice(s, s + sug.q.length) !== sug.q) { setSuggest(null); return; }
+    // 光标校验：菜单打开后光标被方向键 / 鼠标挪走（无 input 事件，菜单不收起），
+    // Enter 会把双链插回旧偏移并拽走光标——光标不在补全区间时关菜单、不拦截
+    if (el.selectionStart < s || el.selectionStart > s + sug.q.length + 1) { setSuggest(null); return; }
     const value = el.value.slice(0, s) + t.title + ']]' + el.value.slice(e).replace(/^\]\]/, '');
     const pos = s + t.title.length + 2;
     onChange(value); setSuggest(null);
@@ -89,12 +92,17 @@ export function scrollToAnchor(root, anchor) {
   return false;
 }
 // 全库小节索引：小写标题 → [{text, line}]，供块引用补全（headingMap）与 AI 建议共用。
+// 同时注册 path 文件名键：创作台补全列表用文件名当 title（改名 / 消歧后与标题不同），
+// 只按标题注册会让 [[文件名#小节]] 补全静默落空
 export function headingMap(graph) {
   const m = new Map();
   for (const n of graph.nodes) {
     if (!CONTENT.has(n.kind) || !n.body) continue;
     const hs = parseOutline(n.body);
-    if (hs.length) m.set(String(n.title).toLowerCase(), hs);
+    if (!hs.length) continue;
+    m.set(String(n.title).toLowerCase(), hs);
+    const fn = n.path?.split('/').pop()?.replace(/\.md$/, '');
+    if (fn && fn.toLowerCase() !== String(n.title).toLowerCase()) m.set(fn.toLowerCase(), hs);
   }
   return m;
 }

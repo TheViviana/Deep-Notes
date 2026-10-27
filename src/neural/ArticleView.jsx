@@ -2,7 +2,7 @@
 import React, {useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {marked} from 'marked';
 import mermaid from 'mermaid';
-mermaid.initialize({startOnLoad: false, securityLevel: 'loose', theme: 'dark'});
+mermaid.initialize({startOnLoad: false, securityLevel: 'strict', theme: 'dark'}); // strict：图内文本不当 HTML 执行，与正文 XSS 白名单同一道防线
 import katex from 'katex';
 import 'katex/contrib/mhchem'; // 化学式 \ce{...}（注册进同一个 katex 实例）
 import 'katex/dist/katex.min.css';
@@ -58,7 +58,9 @@ function markFindHits(root, q) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: n => {
       const p = n.parentElement;
-      if (!p || /script|style|mark/i.test(p.tagName)) return NodeFilter.FILTER_REJECT;
+      if (!p || /script|style/i.test(p.tagName)) return NodeFilter.FILTER_REJECT;
+      // 只排除查找自身的高亮 mark.av-find：用户 ==高亮== 的正文也是 <mark>，应当能被搜到
+      if (p.closest('mark.av-find')) return NodeFilter.FILTER_REJECT;
       if (p.closest('.md-trans')) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     },
@@ -219,6 +221,9 @@ function renderKatex(tex, display) {
 //   脚注 [^key] 引用 + [^key]: 定义（行首）→ 编号上标 + 文末脚注区。
 // 行内 $ 的判定从紧：$ 后不能是空白、$ 前不能紧贴字母/数字/$/反斜杠、$ 后不能紧跟数字（避开「价格 $5 和 $6」）。
 export function renderMarkdown(md) {
+  // 入口剥掉 NUL 字符：占位符用 \u0000M{n}E\u0000 形状，正文里的字面 NUL 序列（外部文件可含）
+  // 若不被清除，最终还原会把它替换成公式 HTML，用户原文被篡改；NUL 在 Markdown 里无合法用途
+  md = String(md ?? '').replace(/\u0000/g, '');
   const maths = [];               // {tex, display}
   const stashMath = (tex, display) => { maths.push({tex, display}); return `\u0000M${maths.length - 1}E\u0000`; };
   const footnotes = new Map();    // key → 定义文本
@@ -298,13 +303,45 @@ export function renderMarkdown(md) {
       .replace(/&lt;(span style="color:#[0-9a-fA-F]{3,8}")>((?:(?!&lt;)[\s\S])*?)&lt;\/span>/g, '<$1>$2</span>')
       .replace(/&lt;(u)>((?:(?!&lt;)[\s\S])*?)&lt;\/u>/g, '<$1>$2</$1>');
   };
-  // 用捕获组 split：奇数段是 ```围栏``` 或 `行内代码`，偶数段才做双链等替换。
+  // 分行扫描切出代码段：``` 与 ~~~ 围栏（0-3 空格缩进）、缩进代码块（空行后 4 空格 / tab 起的连续缩进行）。
+  // 代码段只转义 <、不做其他替换（双链 / 公式 / 高亮 / 脚注与 Obsidian 一致在代码里不生效）——
+  // 否则 ~~~ 内的 $a$ 会被摘成公式占位符、[^1]: 被吞成脚注，代码内容静默消失。
   // 审计 H1：代码段也必须转义类标签的 <——行文里出现的 ```（不在行首 / 未闭合）会把
   // 后续正文误判成代码段，若整体跳过转义，marked 又不认这个围栏，原生 HTML 就漏出去了。
-  // 代码段只转义、不做其他替换（双链 / 公式 / 高亮与 Obsidian 一致在代码里不生效），
   // code / codespan renderer 渲染前会先还原这个转义，代码显示不受影响。
-  let src = String(md || '').split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g)
-    .map((seg, i) => i % 2 ? seg.replace(/<(?=[a-zA-Z!/?])/g, '&lt;') : proc(seg)).join('');
+  const escCode = s => s.replace(/<(?=[a-zA-Z!/?])/g, '&lt;');
+  const parts = []; // {code, text}
+  {
+    const lines = String(md || '').split('\n');
+    let text = [], codeLs = null, fenceCh = null, prevBlank = true, prevList = false;
+    const pushText = () => { if (text.length) { parts.push({code: false, text: text.join('\n')}); text = []; } };
+    const pushCode = () => { if (codeLs) { parts.push({code: true, text: codeLs.join('\n')}); codeLs = null; fenceCh = null; } };
+    for (const ln of lines) {
+      const fm = ln.match(/^ {0,3}(`{3,}|~{3,})/);
+      if (codeLs && fenceCh) { // 围栏代码块内：直到同种标记的闭合围栏
+        codeLs.push(ln);
+        const close = ln.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+        if (close && close[1][0] === fenceCh) pushCode();
+        continue;
+      }
+      if (codeLs) { // 缩进代码块内：缩进行或空行延续
+        if (/^( {4}|\t)/.test(ln) || !ln.trim()) { codeLs.push(ln); continue; }
+        pushCode(); // 当前行落回普通文本，继续向下处理
+      }
+      if (fm) { pushText(); codeLs = [ln]; fenceCh = fm[1][0]; prevBlank = false; continue; }
+      // 缩进代码块起始：空行后且上一行不是列表项（列表里空行后的缩进是列表延续，不是代码）
+      if (prevBlank && !prevList && /^( {4}|\t)\S/.test(ln)) { pushText(); codeLs = [ln]; prevBlank = false; continue; }
+      text.push(ln);
+      prevBlank = !ln.trim();
+      if (ln.trim()) prevList = /^ {0,3}([-+*]|\d+[.)])\s/.test(ln);
+    }
+    pushText(); pushCode();
+  }
+  // 普通段再切行内代码（`...`）：奇数段是行内代码只转义，偶数段才做双链等替换
+  let src = parts.map(p => p.code
+    ? escCode(p.text)
+    : p.text.split(/(`[^`\n]*`)/g).map((seg, i) => i % 2 ? escCode(seg) : proc(seg)).join('')
+  ).join('\n');
   let out = marked.parse(src);
   // 脚注区在 marked.parse 之后追加：不再作为整块 HTML 走 marked（html renderer 的
   // 白名单只认单个受信标签，整块区块会被误转义）。追加顺序在公式占位符替换之前，

@@ -186,7 +186,10 @@ export function parseOutline(text) {
   let fence = false;
   const lines = String(text || '').split('\n');
   lines.forEach((line, i) => {
-    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
+    // CommonMark：0-3 空格缩进的围栏行才算开/闭围栏；4 空格及以上是缩进代码块内容，
+    // marked 不会翻转围栏态——这里若跟着翻转，块内含 ``` 的缩进代码会把 fence 卡在 true，
+    // 之后所有真实标题从大纲里消失，TOC 下标与 DOM 错位
+    if (/^ {0,3}(```|~~~)/.test(line)) fence = !fence;
     if (!fence) {
       const h = headingAt(lines, i);
       if (h && h.level <= 4) out.push({level: h.level, text: h.text, line: i});
@@ -570,7 +573,16 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
         {role: 'user', content: `润色这段文字：\n\n${sel.text}`}]);
       const out = String(data?.choices?.[0]?.message?.content || '').trim().replace(/^```[a-z]*\n?/, '').replace(/```$/, '').trim();
       if (!out) throw new Error('模型没有返回内容 · Empty response');
-      mutate(el.value.slice(0, sel.s) + out + el.value.slice(sel.e), sel.s, sel.s + out.length);
+      // 请求返回时正文可能已被用户编辑：过期偏移会把等待期间输入的文字当作选区替换掉。
+      // 偏移失效时在当前正文里重新定位选区文本（仅当全文唯一才安全），定位不到就放弃替换。
+      const v = el.value;
+      let s = sel.s, e2 = sel.e;
+      if (v.slice(s, e2) !== sel.text) {
+        const at = v.indexOf(sel.text);
+        if (at >= 0 && v.indexOf(sel.text, at + 1) < 0) { s = at; e2 = at + sel.text.length; }
+        else { setAskErr('正文已变化，请重新选择后再润色 · Text changed, select again'); return; }
+      }
+      mutate(v.slice(0, s) + out + v.slice(e2), s, s + out.length);
       setAskSel(null);
     } catch (e) { setAskErr(`润色失败：${e?.message || e}`); }
     finally { setAskBusy(false); }
@@ -727,13 +739,20 @@ export function useEditorEnhancers({area, value, onChange, wiki, title, titles, 
           el.setSelectionRange(el.selectionStart + 1, el.selectionStart + 1);
           return;
         }
-        // 语法自动闭合（成对包裹 / 游标落在中间）
+        // 语法自动闭合（成对包裹 / 游标落在中间）。
+        // 上下文守卫：' " 紧跟 ASCII 字母/数字后不配对（don't 不再打成 don''——英文撇号是单词内部字符）；
+        // * 在行首不配对（`* ` 列表的手写习惯不打架；继续打第二个 * 时 prev 是 * 仍正常配对成 **）
         const pairs = {'*': '*', '`': '`', '$': '$', '"': '"', "'": "'", '(': ')', '{': '}'};
         if (pairs[e.key] && !e.ctrlKey && !e.metaKey && !e.altKey) {
           const s = el.selectionStart, end = el.selectionEnd;
-          e.preventDefault();
-          const sel = el.value.slice(s, end);
-          insertAt(el, s, end, e.key + sel + pairs[e.key], s + 1 + sel.length);
+          const prev = el.value[s - 1] || '';
+          const noPair = ((e.key === "'" || e.key === '"') && /[A-Za-z0-9]/.test(prev))
+            || (e.key === '*' && (!prev || prev === '\n'));
+          if (!noPair) {
+            e.preventDefault();
+            const sel = el.value.slice(s, end);
+            insertAt(el, s, end, e.key + sel + pairs[e.key], s + 1 + sel.length);
+          }
           return;
         }
         // 方括号：单个 [ → [] ；前一个字符已是 [ 则补全为 [[ ]] 双链

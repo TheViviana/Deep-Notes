@@ -154,7 +154,8 @@ export function aiMemoryPrompt() {
   return picked.map(t => `- ${t}`).join('\n');
 }
 export function saveParaCard(text, source) {
-  const id = 'pc-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  // 随机段 7 位：与 saveAiMemory 同口径，杜绝同毫秒批量入库时 3 位随机的键碰撞互顶
+  const id = 'pc-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
   paraCards.write({...paraCards.get(), [id]: {id, text, source, ts: Date.now()}});
   return id;
 }

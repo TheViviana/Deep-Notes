@@ -12,7 +12,8 @@ export const unquote = s => {
   if (t.length >= 2) {
     const q = t[0];
     if ((q === '"' || q === "'") && t[t.length - 1] === q) {
-      try { return q === '"' ? JSON.parse(t) : t.slice(1, -1).replace(/''/g, "'"); } catch { /* 引号不配对，按原样返回 */ }
+      try { return q === '"' ? JSON.parse(t) : t.slice(1, -1).replace(/''/g, "'"); }
+      catch { return t.slice(1, -1); } // JSON 不兼容转义（如 "C:\path"）：至少剥掉外层引号，别带着引号进标题
     }
   }
   return t;

@@ -64,7 +64,6 @@ html, body { margin: 0; background: #0d0e0e; }
 .pill.primary em { color: rgba(22, 23, 22, .55); }
 .pill.primary:hover { box-shadow: 0 6px 26px rgba(236, 236, 232, .3); }
 .pill.ghost { background: transparent; }
-.pill.danger { color: #ff9aa8; }
 .pill:disabled { opacity: .4; cursor: not-allowed; }
 .text-btn { border: 0; background: none; color: var(--text-2); display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
 .text-btn:hover { color: var(--gold); }
@@ -517,7 +516,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .editor-area.hybrid textarea::selection, .editor-main.hybrid textarea::selection { color: transparent; background: transparent; }
 .editor-area.hybrid textarea::placeholder, .editor-main.hybrid textarea::placeholder { color: var(--muted); white-space: pre-wrap; }
 .line-mirror { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; z-index: 0; color: var(--text); cursor: text; user-select: none; -webkit-user-select: none; }
-.lm-degraded { position: sticky; top: 0; z-index: 2; padding: 4px 12px; font-size: 12px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+.lm-degraded { position: sticky; top: 0; z-index: 2; padding: 4px 12px; font-size: 12px; color: var(--gold); background: color-mix(in srgb, var(--gold) 12%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--gold) 30%, transparent); }
 .lm-degraded em { margin-left: 8px; opacity: .6; font-style: normal; }
 .lm-inner { position: relative; }
 .lm-line { min-height: 1.9em; }
@@ -571,7 +570,6 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .editor-tools button:hover { color: var(--text); background: rgba(255, 255, 255, .06); }
 .editor-tools button.on { color: var(--gold); border-color: rgba(212, 175, 110, .45); background: rgba(212, 175, 110, .1); }
 .editor-tools button:disabled { opacity: .35; cursor: not-allowed; }
-.drafts-layout.focused { grid-template-columns: minmax(0, 1fr); }
 .drafts-layout.focused .draft-list, .drafts-layout.focused .draft-links { display: none; }
 /* 专注模式动画：进入时编辑区从轻微下沉淡入并点亮金色描边；退出时两侧卡片从各自方向滑回。
    全局 prefers-reduced-motion 规则会把动画压到近零，无需单独处理 */
@@ -588,7 +586,11 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .drafts-layout.list-hidden { grid-template-columns: 40px minmax(0, 1fr) 320px; }
 .drafts-layout.methods-page.list-hidden { grid-template-columns: 40px minmax(0, 1fr); }
 .drafts-layout.list-hidden .draft-list { display: none; }
-.drafts-layout.focused.list-hidden { grid-template-columns: minmax(0, 1fr); }
+/* 专注模式的单列模板必须压过上面 methods-page / list-hidden 的两列模板，
+   也要压过 1180px 断点里 methods-page.list-hidden 的 40px 轨道——四种类名组合
+   分别列出来保证特异性足够，规则放最后保证同特异性时顺序占优 */
+.drafts-layout.focused, .drafts-layout.focused.list-hidden,
+.drafts-layout.methods-page.focused, .drafts-layout.methods-page.focused.list-hidden { grid-template-columns: minmax(0, 1fr); }
 .drafts-layout.focused .list-rail { display: none; }
 .list-rail { position: sticky; top: 80px; width: 40px; min-height: 140px; display: grid; place-items: center; padding: 0; color: var(--text-2); cursor: pointer; }
 .list-rail:hover { color: var(--gold); border-color: rgba(232, 180, 90, .45); }
@@ -616,7 +618,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .ai-chip-mode { color: var(--gold); }
 .ai-chip-sep { width: 1px; height: 12px; background: var(--line-2); }
 .ai-chip-model { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ai-pop { position: absolute; left: 0; bottom: calc(100% + 10px); width: 372px; max-height: min(74vh, 680px); overflow: auto; padding: 14px 14px 12px; border-radius: 16px; display: grid; gap: 12px; z-index: 40; animation: fadeUp .2s both; scrollbar-width: thin; background: linear-gradient(160deg, rgba(38, 39, 38, .97), rgba(15, 16, 16, .97)); backdrop-filter: blur(18px) saturate(1.25); -webkit-backdrop-filter: blur(18px) saturate(1.25); box-shadow: 0 24px 60px rgba(0, 0, 0, .5); border: 1px solid var(--line); border-radius: 16px; }
+.ai-pop { position: absolute; left: 0; bottom: calc(100% + 10px); width: 372px; max-width: calc(100vw - 32px); max-height: min(74vh, 680px); overflow: auto; padding: 14px 14px 12px; border-radius: 16px; display: grid; gap: 12px; z-index: 40; animation: fadeUp .2s both; scrollbar-width: thin; background: linear-gradient(160deg, rgba(38, 39, 38, .97), rgba(15, 16, 16, .97)); backdrop-filter: blur(18px) saturate(1.25); -webkit-backdrop-filter: blur(18px) saturate(1.25); box-shadow: 0 24px 60px rgba(0, 0, 0, .5); border: 1px solid var(--line); }
 .ai-pop::-webkit-scrollbar { width: 8px; }
 .ai-pop::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .12); border-radius: 4px; }
 .ai-pop-head { display: flex; align-items: baseline; gap: 7px; padding-bottom: 9px; border-bottom: 1px solid var(--line); }
@@ -691,10 +693,12 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .ai-clear { margin-left: auto; border: 0; background: none; color: var(--muted); font-size: 10.5px; cursor: pointer; }
 .ai-clear:hover { color: var(--text); }
 .ai-dock-chat .ai-msgs { max-height: min(40vh, 360px); overflow: auto; }
-.ai-fab { position: fixed; right: 18px; bottom: 22px; width: 46px; height: 46px; border-radius: 50%; border: 1px solid var(--line-2); display: grid; place-items: center; color: var(--text); background: rgba(24, 25, 25, .92); box-shadow: 0 10px 30px rgba(0, 0, 0, .45); cursor: pointer; z-index: 46; transition: transform .2s, border-color .2s; }
+.ai-fab { position: fixed; right: 18px; bottom: 22px; width: 46px; height: 46px; border-radius: 50%; border: 1px solid var(--line-2); display: grid; place-items: center; color: var(--text); background: rgba(24, 25, 25, .92); box-shadow: 0 10px 30px rgba(0, 0, 0, .45); cursor: pointer; z-index: 56; transition: transform .2s, border-color .2s; }
 .ai-fab:hover { transform: translateY(-2px); border-color: rgba(212, 175, 110, .55); }
 .ai-fab.open { color: var(--gold); border-color: rgba(212, 175, 110, .55); }
-.ai-panel { position: fixed; right: 18px; bottom: 78px; width: min(400px, calc(100vw - 32px)); height: min(62vh, 560px); display: flex; flex-direction: column; padding: 12px 14px; border-radius: 16px; z-index: 46; animation: fadeUp .25s both; }
+.ai-panel { position: fixed; right: 18px; bottom: 78px; width: min(400px, calc(100vw - 32px)); height: min(62vh, 560px); display: flex; flex-direction: column; padding: 12px 14px; border-radius: 16px; z-index: 56; animation: fadeUp .25s both; }
+/* z-56 高于闪念箱抽屉（z-55）：选中文字「送 AI 面板」会自动唤起本面板，若闪念箱开着
+   而面板被盖住，用户会以为发送没反应；FAB 同步提升保证面板可再打开。仍在选中菜单（60）之下 */
 .ai-panel header { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; letter-spacing: .08em; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
 .ai-panel header span { display: inline-flex; align-items: center; gap: 6px; }
 .ai-panel header small { color: var(--muted); font-weight: 400; letter-spacing: 0; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -795,7 +799,9 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .md-preview mark.av-find.cur { background: var(--gold); color: #16130c; }
 /* 本地语音朗读：当前正在朗读的段落 */
 /* 思维导图浮动窗口与遮罩 */
-.mm-window { position: fixed; z-index: 75; display: flex; flex-direction: column; border-radius: 16px; overflow: hidden; box-shadow: 0 16px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.06); min-width: 400px; min-height: 300px; }
+.mm-window { position: fixed; z-index: 81; display: flex; flex-direction: column; border-radius: 16px; overflow: hidden; box-shadow: 0 16px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.06); min-width: 400px; min-height: 300px; }
+/* z-81 高于左下角工具坞（z-80）：浮窗可自由拖动，拖到左下角不再被「今日回顾/番茄钟」角标盖住；
+   仍低于遮罩（100），不影响模态弹窗 */
 .mm-window-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); cursor: move; user-select: none; flex: none; }
 .mm-window-head b { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .mm-window-tools { display: flex; align-items: center; gap: 4px; }
@@ -1117,7 +1123,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 /* 知识库视频 ![[课程.mp4]] / ![](课程.mp4)：桌面版经 deepnotes-asset:// 流式回填 src；
    未解析（网页版）保持虚线空框，不撑破版面 */
 .md-preview video.md-embed-video { display: block; width: min(100%, 760px); max-width: 100%; margin: 12px 0; border-radius: 10px; border: 1px dashed var(--line-2); background: rgba(255, 255, 255, .04); min-height: 140px; }
-.md-preview .md-embed-video-fail { margin: 12px 0; padding: 10px 14px; border: 1px dashed var(--line-2); border-radius: 10px; color: var(--text-dim); font-size: 13px; background: rgba(255, 255, 255, .03); }
+.md-preview .md-embed-video-fail { margin: 12px 0; padding: 10px 14px; border: 1px dashed var(--line-2); border-radius: 10px; color: var(--muted); font-size: 13px; background: rgba(255, 255, 255, .03); }
 /* 正文 / 表格里的 [文件名](x.mp4)：点击打开灯箱播放 */
 .md-preview a.md-video-link { color: var(--cyan); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .md-preview a.md-video-link::before { content: "▶ "; font-size: .8em; opacity: .85; }
@@ -1201,11 +1207,18 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
   .drafts-layout { grid-template-columns: 220px minmax(0, 1fr); }
   .drafts-layout.list-hidden, .drafts-layout.methods-page.list-hidden { grid-template-columns: 40px minmax(0, 1fr); }
   .draft-links { grid-column: 1 / -1; position: static; }
+  /* 阅读区三列在窄屏同步收窄（挂 .library-layout 提高特异性，压过 1293/1316 的基础模板） */
+  .library-layout.readings-layout { grid-template-columns: 180px minmax(0, 1fr) clamp(320px, 30vw, 420px); }
+  .library-layout.readings-layout.list-hidden { grid-template-columns: 40px minmax(0, 1fr) clamp(320px, 30vw, 420px); }
   .topbar nav button { padding: 6px 11px; }
   .brand-text small { display: none; }
 }
 @media (max-width: 960px) {
   .library-layout, .snapshot-grid, .lanes { grid-template-columns: 1fr; }
+  /* 阅读区元素同时挂 .library-layout 和 .readings-layout：1293 行的同特异性三列模板按源码顺序
+     会压过本块的 1fr（媒体查询不加特异性），这里用双类选择器（0,2,0）按特异性取胜；1327 行的
+     第二个 960px 媒体块保留同口径声明，双保险 */
+  .library-layout.readings-layout, .library-layout.readings-layout.list-hidden { grid-template-columns: 1fr; }
   .library-analysis { position: static; height: 72vh; }
   .legend { display: none; }
   .top-actions .pill.ghost { display: none; }
@@ -1226,9 +1239,14 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
   .kpi-band div:nth-child(3) { border-left: 0; }
   .kpi-band strong { font-size: 26px; }
   .drafts-layout { grid-template-columns: 1fr; }
+  /* 585 行的 .drafts-layout.methods-page（0,2,0）会压过上面的 1fr（0,1,0，媒体查询不加特异性），
+     这里同特异性重复声明、靠源码靠后取胜：手机宽度下方法库也要变单列，编辑器不再被挤进 250px 窄列 */
+  .drafts-layout.methods-page { grid-template-columns: 1fr; }
   .drafts-layout.list-hidden, .drafts-layout.methods-page.list-hidden { grid-template-columns: 1fr; }
   .list-rail { position: static; width: 100%; min-height: 34px; }
   .draft-list { position: static; }
+  /* 405 行的 max-height（0,2,0）在窄屏同样压过 static：放开内部滚动限制，列表随页面自然流式排布 */
+  .page-methods .draft-list { max-height: none; overflow: visible; }
   .hub-copy { left: 16px; top: 68px; right: 16px; }
   .hub-copy h1 { font-size: 22px; }
   .hub-copy .eyebrow { margin-bottom: 6px; }

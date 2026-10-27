@@ -3,6 +3,7 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {CONTENT, KINDS} from './graph';
 import {Icon} from './icons';
+import {tagsOf} from './vaultRules';
 
 const KIND_ICON = {post: 'works', note: 'methods', idea: 'idea', draft: 'draft', reading: 'book', archive: 'archive', concept: 'concept'};
 // 内容类型筛选：全部 / 六类内容；配合正则可做「只在我读过的书里找」这类精确检索
@@ -24,14 +25,25 @@ export function CommandPalette({open, onClose, graph, actions, onOpenContent}) {
     let re = null;
     const rm = k.match(/^\/(.+)\/([gimsu]*)$/);
     if (rm) { try { re = new RegExp(rm[1], rm[2].replace(/g/g, '')); } catch { re = null; } }
-    const plain = k.toLowerCase();
-    const acts = actions.filter(a => !k
+    // #标签 过滤：查询里的 #词 摘出来按内容标签过滤（正则模式不解析）；剩余文本继续全文匹配。
+    // 只输 #标签 时列出带该标签的全部内容；标签与关键词可叠加（先按标签收窄再按文本匹配）。
+    const tagTokens = [];
+    let textQuery = k;
+    if (!re) textQuery = k.replace(/(?:^|\s)#([^\s#]+)/g, (_, t) => { tagTokens.push(t.toLowerCase()); return ' '; }).trim();
+    const plain = textQuery.toLowerCase();
+    const acts = tagTokens.length ? [] : actions.filter(a => !textQuery
       || a.zh.toLowerCase().includes(plain) || String(a.en || '').toLowerCase().includes(plain));
     if (!k) return acts;
     // 有关键词时：标题命中排前、按连接度排序的内容结果 + 剩余可用命令
     const hit = n => {
       if (kind !== 'all' && n.kind !== kind) return false;
+      // 标签口径与 vaultRules.tagsOf 一致：显式标签 ∪ 正文 #话题——正文里打了 #话题 的作品也能被 #标签 搜到
+      if (tagTokens.length) {
+        const eff = tagsOf({tags: n.tags || []}, n.body || '');
+        if (!tagTokens.every(t => eff.some(x => x.toLowerCase().includes(t)))) return false;
+      }
       if (re) return re.test(String(n.title)) || re.test(String(n.text || ''));
+      if (!plain) return tagTokens.length > 0; // 纯 #标签 查询：标签命中即入选
       const t = String(n.title).toLowerCase(), x = String(n.text || '').toLowerCase();
       return t.includes(plain) || x.includes(plain);
     };
@@ -65,7 +77,7 @@ export function CommandPalette({open, onClose, graph, actions, onOpenContent}) {
       <div className="palette-input">
         <Icon name="search" size={15}/>
         <input autoFocus value={q} onChange={e => { setQ(e.target.value); setPick(0); }}
-          placeholder="搜索内容或输入命令… 支持 /正则/ 与按类型筛选 · Search, /regex/, filter by kind" aria-label="搜索内容或命令"/>
+          placeholder="搜索内容或输入命令… 支持 /正则/、#标签 与按类型筛选 · Search, /regex/, #tag, filter by kind" aria-label="搜索内容或命令"/>
       </div>
       <div className="palette-filters" role="group" aria-label="按内容类型筛选 Filter by kind">
         {KIND_FILTERS.map(([k, zh]) => <button key={k} className={kind === k ? 'on' : ''} onClick={() => { setKind(k); setPick(0); }}>{zh}</button>)}

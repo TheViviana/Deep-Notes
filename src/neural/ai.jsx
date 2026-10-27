@@ -161,6 +161,9 @@ function sseFeeder(onEvent) {
 }
 
 export async function aiChat(messages, {onDelta} = {}) {
+  // 请求级复核：调用方（如选中 AI 菜单）可能在弹出后顶栏才切回断网，这里统一兜底，
+  // 保证「断网」二字在任何时刻都意味着真的没有请求发出去
+  if (!isNetworkOn()) throw new Error('顶栏联网开关未打开，AI 不会发起请求 · Network switch is off');
   const cfg = aiState, p = providerOf(cfg);
   const baseUrl = (cfg.baseUrl || p.baseUrl || '').replace(/\/+$/, '');
   if (!baseUrl) throw new Error('还没有配置 Base URL · Base URL missing');
